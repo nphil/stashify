@@ -1,0 +1,11 @@
+# Stash plugin source for stash-decensor.
+# Stash: Settings > Plugins > Available Plugins > Add Source
+#   Name: Decensor    URL: https://nphil.github.io/stash-decensor/index.yml
+- id: decensor
+  name: Decensor
+  metadata:
+    description: Remove mosaic censorship from Stash scenes on demand via a DeepMosaics + Real-ESRGAN worker container. Adds a scene-page panel and a standalone dashboard.
+  version: 1.1.0-409a248
+  date: 2026-07-15 17:44:37
+  path: decensor.zip
+  sha256: 2a52a22e10f94837b94346d1e898f522046409fd36464d6c05190f7b7f2dabe1
