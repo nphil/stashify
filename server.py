@@ -21,9 +21,11 @@ import os
 import re
 import sys
 import json
+import time
 import uuid
 import queue
 import logging
+import subprocess
 import mimetypes
 import posixpath
 import threading
@@ -96,6 +98,46 @@ _jobs_lock = threading.Lock()
 _work = queue.Queue()
 _stash = None
 _stash_lock = threading.Lock()
+_running_job_id = None          # the job whose subprocess is live (for cancel/pause)
+_gpu = {}                       # latest GPU stats, refreshed by gpu_poller
+_gpu_lock = threading.Lock()
+
+
+def _numf(s):
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _read_gpu():
+    gid = os.environ.get("GPU_ID", "0")
+    if str(gid).strip() in ("", "-1"):
+        return {}
+    try:
+        q = "utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw"
+        out = subprocess.run(
+            ["nvidia-smi", "-i", str(gid), "--query-gpu=" + q, "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode != 0 or not out.stdout.strip():
+            return {}
+        v = [x.strip() for x in out.stdout.strip().splitlines()[0].split(",")]
+        if len(v) < 5:
+            return {}
+        return {"util": _numf(v[0]), "mem_used": _numf(v[1]), "mem_total": _numf(v[2]),
+                "temp": _numf(v[3]), "power": _numf(v[4])}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def gpu_poller():
+    while True:
+        stats = _read_gpu()
+        with _gpu_lock:
+            _gpu.clear()
+            _gpu.update(stats)
+        time.sleep(2)
 
 
 def get_stash():
@@ -117,6 +159,13 @@ def new_job(scene_id, overrides):
         "review_scene_id": None,
         "output_path": None,
         "error": None,
+        "stage": None,
+        "frame": None,
+        "total_frames": None,
+        "fps": None,
+        "eta": None,
+        "paused": False,
+        "started_at": None,
         "_overrides": overrides,
         "_info": None,
     }
@@ -126,7 +175,13 @@ def new_job(scene_id, overrides):
 
 
 def public(job):
-    return {k: v for k, v in job.items() if not k.startswith("_")}
+    out = {k: v for k, v in job.items() if not k.startswith("_")}
+    sa = job.get("started_at")
+    if sa:
+        out["elapsed"] = int((job.get("_ended_at") or time.time()) - sa)
+    with _gpu_lock:
+        out["gpu_stats"] = dict(_gpu)
+    return out
 
 
 def set_job(job_id, **fields):
@@ -137,10 +192,14 @@ def set_job(job_id, **fields):
 
 
 def progress_cb(job_id):
-    def cb(frac, msg=None):
+    def cb(frac, msg=None, stats=None):
         fields = {"progress": round(float(frac), 3)}
         if msg:
             fields["message"] = msg
+        if stats:
+            for k in ("stage", "frame", "total_frames", "fps", "eta"):
+                if stats.get(k) is not None:
+                    fields[k] = stats[k]
         set_job(job_id, **fields)
     return cb
 
@@ -160,14 +219,15 @@ def job_config(job):
 
 def do_process(job):
     job_id = job["id"]
-    set_job(job_id, state="running", message="Starting")
+    set_job(job_id, state="running", message="Starting", started_at=time.time(),
+            paused=False, stage=None, frame=None, total_frames=None, fps=None, eta=None)
     cfg = job_config(job)
     stash = get_stash()
     info = core.process_to_review(stash, cfg, job["scene_id"], progress=progress_cb(job_id))
     set_job(
         job_id, state="review_ready", progress=1.0, message="Preview ready to review",
         review_scene_id=info.get("review_scene_id"), output_path=info.get("output_path"),
-        _info=info,
+        _info=info, _ended_at=time.time(),
     )
 
 
@@ -195,17 +255,27 @@ ACTIONS = {"process": do_process, "replace": do_replace, "discard": do_discard}
 
 
 def worker_loop():
+    global _running_job_id
     while True:
         action, job_id = _work.get()
         with _jobs_lock:
             job = _jobs.get(job_id)
+            if job and job.get("state") == "cancelled":
+                job = None  # cancelled while still queued -> skip
         if not job:
             continue
+        with _jobs_lock:
+            _running_job_id = job_id
         try:
             ACTIONS[action](job)
+        except core.Cancelled:
+            set_job(job_id, state="cancelled", message="Cancelled", paused=False, _ended_at=time.time())
         except Exception as exc:  # noqa: BLE001
             logging.exception(f"Job {job_id} action {action} failed")
-            set_job(job_id, state="error", message=str(exc), error=str(exc))
+            set_job(job_id, state="error", message=str(exc), error=str(exc), _ended_at=time.time())
+        finally:
+            with _jobs_lock:
+                _running_job_id = None
 
 
 # --------------------------------------------------------------------------- #
@@ -393,6 +463,37 @@ class Handler(BaseHTTPRequestHandler):
             _work.put((action, job_id))
             return self._send(202, snapshot)
 
+        m = re.match(r"^/api/jobs/([0-9a-f]+)/(cancel|pause|resume)$", path)
+        if m:
+            job_id, action = m.group(1), m.group(2)
+            with _jobs_lock:
+                job = _jobs.get(job_id)
+                running = (_running_job_id == job_id)
+            if not job:
+                return self._send(404, {"error": "no such job"})
+            st = job["state"]
+            if action == "cancel":
+                if st not in ("queued", "running", "paused"):
+                    return self._send(409, {"error": f"job is {st}, cannot cancel"})
+                if running:
+                    core.cancel_active()  # SIGKILL the live subprocess group
+                set_job(job_id, state="cancelled", message="Cancelled", paused=False,
+                        _ended_at=time.time())
+            elif action == "pause":
+                if not running or st != "running":
+                    return self._send(409, {"error": "job is not running"})
+                if not core.pause_active():
+                    return self._send(409, {"error": "pause not supported here"})
+                set_job(job_id, paused=True, message="Paused")
+            else:  # resume
+                if not running or not job.get("paused"):
+                    return self._send(409, {"error": "job is not paused"})
+                core.resume_active()
+                set_job(job_id, paused=False, message="Resumed")
+            with _jobs_lock:
+                snapshot = public(_jobs[job_id])
+            return self._send(202, snapshot)
+
         return self._send(404, {"error": "not found"})
 
 
@@ -406,6 +507,7 @@ def main():
         logging.warning("STASH_URL not set — jobs will fail until it is configured.")
 
     threading.Thread(target=worker_loop, daemon=True).start()
+    threading.Thread(target=gpu_poller, daemon=True).start()
     httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     logging.info(f"decensor server listening on :{PORT} (token {'on' if TOKEN else 'off'})")
     httpd.serve_forever()

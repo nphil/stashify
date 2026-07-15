@@ -12,9 +12,11 @@ while the worker logs plainly to stdout.
 import os
 import re
 import shlex
+import signal
 import shutil
 import logging
 import tempfile
+import threading
 import subprocess
 from urllib.parse import urlparse
 
@@ -157,28 +159,95 @@ def cuda_env(cfg):
     return env
 
 
+class Cancelled(Exception):
+    """Raised when the user cancels the running job."""
+
+
+# The currently-running subprocess + a cancel flag, so the HTTP layer can
+# cancel/pause/resume it. Only one job runs at a time (single worker thread).
+_active = {"proc": None, "cancel": False}
+_active_lock = threading.Lock()
+_HAVE_PGID = hasattr(os, "killpg") and hasattr(os, "getpgid")
+
+
+def reset_cancel():
+    with _active_lock:
+        _active["cancel"] = False
+
+
+def check_cancel():
+    with _active_lock:
+        c = _active["cancel"]
+    if c:
+        raise Cancelled("cancelled by user")
+
+
+def _signal_active(sig):
+    """Signal the running subprocess's whole process group (tool + its ffmpeg)."""
+    with _active_lock:
+        proc = _active["proc"]
+    if not proc or proc.poll() is not None:
+        return False
+    try:
+        if _HAVE_PGID:
+            os.killpg(os.getpgid(proc.pid), sig)
+        else:
+            proc.send_signal(sig)
+        return True
+    except (ProcessLookupError, OSError):
+        return False
+
+
+def cancel_active():
+    with _active_lock:
+        _active["cancel"] = True
+    # SIGKILL the whole group: reliable, and works even if the job is paused (SIGSTOP).
+    _signal_active(getattr(signal, "SIGKILL", signal.SIGTERM))
+    return True
+
+
+def pause_active():
+    return _signal_active(signal.SIGSTOP) if hasattr(signal, "SIGSTOP") else False
+
+
+def resume_active():
+    return _signal_active(signal.SIGCONT) if hasattr(signal, "SIGCONT") else False
+
+
 def run_cmd(cmd, cwd=None, env=None, tag="proc", on_line=None):
     """Run a command, streaming output. Each line is passed to on_line (for live
-    progress parsing) and the last 15 lines are logged at debug on completion."""
+    progress parsing); the last 15 lines are logged at debug on completion. The
+    child is its own session leader so the whole group can be paused/cancelled."""
     log.debug("Running: " + " ".join(cmd))
-    proc = subprocess.Popen(
-        cmd, cwd=cwd, env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
-    )
+    kw = {"cwd": cwd, "env": env, "stdout": subprocess.PIPE,
+          "stderr": subprocess.STDOUT, "text": True, "bufsize": 1}
+    if _HAVE_PGID:
+        kw["start_new_session"] = True
+    proc = subprocess.Popen(cmd, **kw)
+    with _active_lock:
+        _active["proc"] = proc
     tail = []
-    for line in proc.stdout:
-        line = line.rstrip("\n")
-        tail.append(line)
-        if len(tail) > 15:
-            tail.pop(0)
-        if on_line:
-            try:
-                on_line(line)
-            except Exception:  # noqa: BLE001 - progress parsing must never break the run
-                pass
-    proc.wait()
+    try:
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            tail.append(line)
+            if len(tail) > 15:
+                tail.pop(0)
+            if on_line:
+                try:
+                    on_line(line)
+                except Exception:  # noqa: BLE001 - progress parsing must never break the run
+                    pass
+        proc.wait()
+    finally:
+        with _active_lock:
+            _active["proc"] = None
     for line in tail:
         log.debug(f"[{tag}] {line}")
+    with _active_lock:
+        cancelled = _active["cancel"]
+    if cancelled:
+        raise Cancelled(f"{tag} cancelled")
     if proc.returncode != 0:
         raise RuntimeError(f"{tag} exited with code {proc.returncode}")
 
@@ -611,24 +680,51 @@ def stash_from_env():
 PREVIEW_TAG = "Decensored (preview)"
 
 
-def _band(progress, lo, hi):
-    """Return an on_line callback that maps any NN% in tool output into [lo,hi]."""
+_RE_FRAMES = re.compile(r"(\d+)\s*/\s*(\d+)")
+_RE_FPS = re.compile(r"([\d.]+)\s*(?:frame/s|frames/s|it/s|fps)", re.IGNORECASE)
+_RE_PCT = re.compile(r"(\d{1,3})%")
+
+
+def _band(progress, lo, hi, stage=None):
+    """on_line callback: parse frame/total, fps and % from tool output, map into
+    [lo,hi], and report rich stats (stage / frame / total_frames / fps / eta)."""
     def on_line(line):
-        m = re.search(r"(\d{1,3})%", line)
-        if m and progress:
-            pct = min(100, int(m.group(1))) / 100.0
-            progress(lo + (hi - lo) * pct, None)
+        if not progress:
+            return
+        frame = total = fps = eta = None
+        m = _RE_FRAMES.search(line)
+        if m:
+            frame, total = int(m.group(1)), int(m.group(2))
+        f = _RE_FPS.search(line)
+        if f:
+            try:
+                fps = float(f.group(1))
+            except ValueError:
+                fps = None
+        if frame is not None and total:
+            frac = lo + (hi - lo) * min(1.0, frame / total)
+            if fps and fps > 0 and total >= frame:
+                eta = int((total - frame) / fps)
+        else:
+            pm = _RE_PCT.search(line)
+            if not pm:
+                return
+            frac = lo + (hi - lo) * (min(100, int(pm.group(1))) / 100.0)
+        progress(frac, None, {"stage": stage, "frame": frame,
+                              "total_frames": total, "fps": fps, "eta": eta})
     return on_line
 
 
 def process_to_review(stash, cfg, scene_id, progress=None):
     """Decensor a single scene into a reviewable preview scene. Does NOT touch
     the original. Returns an info dict for a later replace/discard."""
-    def p(frac, msg=None):
+    def p(frac, msg=None, stats=None):
+        check_cancel()
         if progress:
-            progress(frac, msg)
+            progress(frac, msg, stats)
 
     validate(cfg)
+    reset_cancel()
     p(0.02, "Fetching scene")
     scene = stash.find_scene(int(scene_id), fragment=SCENE_FRAGMENT)
     if not scene:
@@ -655,13 +751,13 @@ def process_to_review(stash, cfg, scene_id, progress=None):
         upscale = cfg["postUpscale"] and backend != "realesrgan"
         b_lo, b_hi = (0.05, 0.6) if upscale else (0.05, 0.85)
 
-        p(b_lo, f"Running {backend}")
-        produced = BACKENDS[backend](cfg, input_path, new_dir(), on_line=_band(progress, b_lo, b_hi))
+        p(b_lo, f"Running {backend}", {"stage": backend})
+        produced = BACKENDS[backend](cfg, input_path, new_dir(), on_line=_band(progress, b_lo, b_hi, backend))
         if upscale:
-            p(0.6, "Real-ESRGAN upscale")
-            produced = backend_realesrgan(cfg, produced, new_dir(), on_line=_band(progress, 0.6, 0.85))
+            p(0.6, "Real-ESRGAN upscale", {"stage": "realesrgan"})
+            produced = backend_realesrgan(cfg, produced, new_dir(), on_line=_band(progress, 0.6, 0.85, "realesrgan"))
 
-        p(0.88, "Importing preview into Stash")
+        p(0.88, "Importing preview into Stash", {"stage": "import"})
         os.makedirs(cfg["outputDir"], exist_ok=True)
         stem = re.sub(r"\s+", "_", os.path.splitext(os.path.basename(input_path))[0])
         ext = os.path.splitext(produced)[1] or ".mp4"

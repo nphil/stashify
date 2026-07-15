@@ -137,3 +137,11 @@ select {
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 .toast.err { border-color: var(--accent); }
+
+/* ---- live job stats ---- */
+.stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(70px, 1fr)); gap: 5px; margin: 8px 0 2px; }
+.stat { background: rgba(255, 255, 255, 0.05); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; display: flex; flex-direction: column; line-height: 1.2; }
+.stat .sl { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em; }
+.stat .sv { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar.is-paused .fill { background: #7a8087; }
+.jmsg.paused { color: var(--accent-2); }

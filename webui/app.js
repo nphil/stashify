@@ -184,10 +184,35 @@
     jobs.forEach(function (j) { joblist.appendChild(jobCard(j)); });
   }
 
+  function statChip(g, label, val) {
+    if (val == null || val === "") return;
+    var s = el("div", "stat");
+    s.appendChild(el("span", "sl", label));
+    s.appendChild(el("span", "sv", val));
+    g.appendChild(s);
+  }
+  function statsGrid(j, pct) {
+    var g = el("div", "stats");
+    statChip(g, "progress", pct + "%");
+    if (j.stage) statChip(g, "stage", j.stage);
+    if (j.frame != null && j.total_frames) statChip(g, "frame", j.frame + " / " + j.total_frames);
+    if (j.fps != null) statChip(g, "fps", Math.round(j.fps * 10) / 10);
+    if (j.eta != null) statChip(g, "eta", fmtDur(j.eta));
+    if (j.elapsed != null) statChip(g, "elapsed", fmtDur(j.elapsed));
+    var gp = j.gpu_stats || {};
+    if (gp.util != null) statChip(g, "gpu", Math.round(gp.util) + "%");
+    if (gp.mem_used != null && gp.mem_total != null)
+      statChip(g, "vram", Math.round(gp.mem_used) + " / " + Math.round(gp.mem_total) + " MB");
+    if (gp.temp != null) statChip(g, "temp", Math.round(gp.temp) + "°C");
+    if (gp.power != null) statChip(g, "power", Math.round(gp.power) + " W");
+    return g;
+  }
+
   function jobCard(j) {
     var name = (state.scenes[j.scene_id] || {}).title || ("Scene " + j.scene_id);
     var c = el("div", "job");
     c.appendChild(el("div", "jt", esc(name)));
+
     if (j.state === "review_ready") {
       c.appendChild(el("div", "jmsg ok", "Preview ready — review it:"));
       if (j.review_scene_id) {
@@ -202,8 +227,10 @@
       rep.onclick = function () { rep.disabled = dis.disabled = true; jobAction(j.id, "replace"); };
       dis.onclick = function () { rep.disabled = dis.disabled = true; jobAction(j.id, "discard"); };
       row.appendChild(rep); row.appendChild(dis); c.appendChild(row);
-    } else if (j.state === "replaced" || j.state === "discarded") {
-      c.appendChild(el("div", "jmsg ok", j.state === "replaced" ? "Original replaced ✓" : "Preview discarded"));
+    } else if (j.state === "replaced" || j.state === "discarded" || j.state === "cancelled") {
+      var done = j.state === "replaced" ? "Original replaced ✓"
+        : (j.state === "cancelled" ? "Cancelled" : "Preview discarded");
+      c.appendChild(el("div", "jmsg" + (j.state === "cancelled" ? "" : " ok"), done));
       var d = el("div", "row"); var b = el("button", "btn", "Dismiss");
       b.onclick = function () { state.dismissed.add(j.id); pollJobs(); }; d.appendChild(b); c.appendChild(d);
     } else if (j.state === "error") {
@@ -211,9 +238,25 @@
       var d2 = el("div", "row"); var b2 = el("button", "btn", "Dismiss");
       b2.onclick = function () { state.dismissed.add(j.id); pollJobs(); }; d2.appendChild(b2); c.appendChild(d2);
     } else {
-      c.appendChild(el("div", "jmsg", esc(j.message || j.state)));
-      var bar = el("div", "bar"); bar.appendChild(el("div", "fill")).style.width = Math.round((j.progress || 0) * 100) + "%";
+      // queued / running / paused / replacing / discarding
+      var pct = Math.round((j.progress || 0) * 100);
+      c.appendChild(el("div", "jmsg" + (j.paused ? " paused" : ""), esc(j.paused ? "Paused" : (j.message || j.state))));
+      var bar = el("div", "bar" + (j.paused ? " is-paused" : ""));
+      bar.appendChild(el("div", "fill")).style.width = pct + "%";
       c.appendChild(bar);
+      if (j.state === "running") c.appendChild(statsGrid(j, pct));
+      var ctl = el("div", "row");
+      if (j.state === "running") {
+        var pr = el("button", "btn", j.paused ? "Resume" : "Pause");
+        pr.onclick = function () { pr.disabled = true; jobAction(j.id, j.paused ? "resume" : "pause"); };
+        ctl.appendChild(pr);
+      }
+      if (j.state === "running" || j.state === "queued") {
+        var cx = el("button", "btn btn-danger", "Cancel");
+        cx.onclick = function () { cx.disabled = true; jobAction(j.id, "cancel"); };
+        ctl.appendChild(cx);
+      }
+      if (ctl.children.length) c.appendChild(ctl);
     }
     return c;
   }
