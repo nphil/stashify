@@ -1,0 +1,43 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2d3238"/><stop offset="1" stop-color="#1b1e21"/>
+    </linearGradient>
+    <linearGradient id="img" x1="128" y1="392" x2="384" y2="120" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#e85d4a"/><stop offset="0.55" stop-color="#f0824f"/><stop offset="1" stop-color="#f4b15e"/>
+    </linearGradient>
+    <clipPath id="screen"><rect x="120" y="120" width="272" height="272" rx="44"/></clipPath>
+  </defs>
+
+  <rect width="512" height="512" rx="115" fill="url(#bg)"/>
+  <rect x="7.5" y="7.5" width="497" height="497" rx="111" stroke="#ffffff" stroke-opacity="0.07" stroke-width="3"/>
+
+  <g clip-path="url(#screen)">
+    <rect x="120" y="120" width="272" height="272" fill="url(#img)"/>
+    <circle cx="330" cy="168" r="118" fill="#ffffff" fill-opacity="0.12"/>
+    <g fill="#191c20">
+      <rect x="120" y="120" width="68" height="68" opacity="0.93"/>
+      <rect x="120" y="188" width="68" height="68" opacity="0.90"/>
+      <rect x="120" y="256" width="68" height="68" opacity="0.93"/>
+      <rect x="120" y="324" width="68" height="68" opacity="0.88"/>
+      <rect x="188" y="120" width="68" height="68" opacity="0.60"/>
+      <rect x="188" y="188" width="68" height="68" opacity="0.66"/>
+      <rect x="188" y="256" width="68" height="68" opacity="0.55"/>
+      <rect x="188" y="324" width="68" height="68" opacity="0.62"/>
+      <rect x="256" y="120" width="68" height="68" opacity="0.30"/>
+      <rect x="256" y="188" width="68" height="68" opacity="0.24"/>
+      <rect x="256" y="256" width="68" height="68" opacity="0.32"/>
+      <rect x="256" y="324" width="68" height="68" opacity="0.22"/>
+      <rect x="324" y="120" width="68" height="68" opacity="0.10"/>
+      <rect x="324" y="188" width="68" height="68" opacity="0.06"/>
+      <rect x="324" y="256" width="68" height="68" opacity="0.09"/>
+      <rect x="324" y="324" width="68" height="68" opacity="0.05"/>
+    </g>
+  </g>
+
+  <g transform="translate(344 152)" fill="#ffffff">
+    <path d="M0 -28 L6.5 -6.5 L28 0 L6.5 6.5 L0 28 L-6.5 6.5 L-28 0 L-6.5 -6.5 Z" opacity="0.96"/>
+  </g>
+  <circle cx="300" cy="336" r="6.5" fill="#ffffff" opacity="0.8"/>
+  <circle cx="360" cy="300" r="4" fill="#ffffff" opacity="0.6"/>
+</svg>
