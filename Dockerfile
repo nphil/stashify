@@ -45,6 +45,21 @@ RUN mkdir -p /opt/Real-ESRGAN/weights && cd /opt/Real-ESRGAN/weights && \
         f=$(basename "$u"); wget -q -O "$f" "$u" || rm -f "$f"; \
     done
 
+# Runtime fixups for the bundled ML tools (all needed for the video pipeline):
+#  1. The base image's conda ffmpeg (/opt/conda/bin/ffmpeg, first on PATH) ships
+#     with only libopenh264 — no libx264. DeepMosaics and Real-ESRGAN hardcode
+#     libx264 for their mp4 output and die with "Unknown encoder 'libx264'".
+#     Point ffmpeg/ffprobe at the apt build (has libx264/libx265 + NVENC).
+#  2. Real-ESRGAN's inference_realesrgan_video.py does `import ffmpeg`
+#     (the ffmpeg-python package), which the base deps don't include.
+#  3. The Real-ESRGAN clone has no realesrgan/version.py until its setup runs, and
+#     core.py runs the script with cwd=/opt/Real-ESRGAN, so `import realesrgan`
+#     resolves to the clone. An editable install generates version.py there.
+RUN ln -sf /usr/bin/ffmpeg /opt/conda/bin/ffmpeg \
+    && ln -sf /usr/bin/ffprobe /opt/conda/bin/ffprobe \
+    && pip install --no-cache-dir ffmpeg-python \
+    && pip install --no-cache-dir --no-deps -e /opt/Real-ESRGAN
+
 WORKDIR /app
 COPY core.py worker.py server.py entrypoint.sh /app/
 RUN chmod +x /app/entrypoint.sh
