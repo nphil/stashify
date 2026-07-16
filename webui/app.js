@@ -70,16 +70,26 @@
       TOKEN = (((d.configuration || {}).plugins || {}).decensor || {}).workerToken || "";
     } catch (e) { /* worker may accept unauthenticated */ }
   }
+  var health = null;
+  function connLabel() {
+    // reflect the SELECTED engine, not the worker's env default
+    if ($("engine").value === "lada") return "lada (temporal)";
+    return (health ? health.backend : "?") + (health && health.postUpscale ? " + upscale" : "");
+  }
+  function renderConn() {
+    if (!health) return;
+    conn.className = "conn ok";
+    conn.textContent = "● " + connLabel() + " · GPU " + health.gpu;
+  }
   async function updateConn() {
     try {
-      var h = await workerFetch("health");
-      conn.className = "conn ok";
-      conn.textContent = "● " + h.backend + " · GPU " + h.gpu + (h.postUpscale ? " · upscale on" : "");
+      health = await workerFetch("health");
       var opt = document.querySelector('#engine option[value="lada"]');
       if (opt) {
-        opt.disabled = !h.lada;
-        opt.textContent = h.lada ? "Lada (temporal)" : "Lada (offline)";
+        opt.disabled = !health.lada;
+        opt.textContent = health.lada ? "Lada (temporal)" : "Lada (offline)";
       }
+      renderConn();
     } catch (e) {
       conn.className = "conn err"; conn.textContent = "worker unreachable";
     }
@@ -98,7 +108,8 @@
     grid.innerHTML = "<div class='empty'>Loading…</div>";
     var sort = $("sort").value;
     var qs = "scenes?q=" + encodeURIComponent($("search").value.trim()) +
-      "&page=" + state.page + "&per_page=" + PER + "&sort=" + encodeURIComponent(sort);
+      "&page=" + state.page + "&per_page=" + PER + "&sort=" + encodeURIComponent(sort) +
+      "&hide_done=" + ($("hideDone").checked ? 1 : 0);   // server-side -> full pages
     var res;
     try { res = await workerFetch(qs); }
     catch (e) {
@@ -405,12 +416,22 @@
       var cens = mkv("Censored (original)", false);
       var lv = mkv("Decensored · live", true);
       lv.addEventListener("loadeddata", function () { duo.hidden = false; });
-      // keep the original's frame locked to the live playhead
-      cens.addEventListener("loadedmetadata", function () { cens.pause(); });
+      // The original PLAYS alongside the live feed (smooth), paired to its
+      // play/pause/seek and drift-corrected only when >1s out of step —
+      // constant seek-snapping made it jitter.
+      var follow = function () { cens.play && cens.play().catch(function () {}); };
+      var hold = function () { cens.pause(); };
+      var snap = function () {
+        if (cens.readyState >= 1) cens.currentTime = lv.currentTime;
+      };
+      lv.addEventListener("play", follow);
+      lv.addEventListener("playing", follow);
+      lv.addEventListener("pause", hold);
+      lv.addEventListener("waiting", hold);
+      lv.addEventListener("seeked", snap);
+      lv.addEventListener("loadeddata", snap);
       lv.addEventListener("timeupdate", function () {
-        if (cens.readyState >= 1 && Math.abs(cens.currentTime - lv.currentTime) > 0.5) {
-          cens.currentTime = lv.currentTime;
-        }
+        if (cens.readyState >= 1 && Math.abs(cens.currentTime - lv.currentTime) > 1.0) snap();
       });
       c._refs.live = lv; c._refs.cens = cens; c._refs.duo = duo;
       c.appendChild(duo);
@@ -516,7 +537,21 @@
     var deb;
     $("search").addEventListener("input", function () { clearTimeout(deb); deb = setTimeout(function () { state.page = 1; loadScenes(); }, 300); });
     $("sort").onchange = $("minres").onchange = $("hideDone").onchange = function () { state.page = 1; loadScenes(); };
-    $("engine").onchange = function () { $("ladaq").hidden = $("engine").value !== "lada"; };
+    // engine choice persists across visits
+    try {
+      var se = localStorage.getItem("dc_engine"), sq = localStorage.getItem("dc_ladaq");
+      if (se) $("engine").value = se;
+      if (sq) $("ladaq").value = sq;
+    } catch (e) {}
+    $("ladaq").hidden = $("engine").value !== "lada";
+    $("engine").onchange = function () {
+      $("ladaq").hidden = $("engine").value !== "lada";
+      try { localStorage.setItem("dc_engine", $("engine").value); } catch (e) {}
+      renderConn();
+    };
+    $("ladaq").onchange = function () {
+      try { localStorage.setItem("dc_ladaq", $("ladaq").value); } catch (e) {}
+    };
     $("prev").onclick = function () { if (state.page > 1) { state.page--; loadScenes(); } };
     $("next").onclick = function () { state.page++; loadScenes(); };
     $("decensorSel").onclick = decensorSelected;

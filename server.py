@@ -52,10 +52,26 @@ STASH_API_KEY = os.environ.get("STASH_API_KEY", "")
 # Scene fragment the dashboard needs, proxied so the WebUI works from any origin
 # (a dedicated subdomain can't use Stash's session cookie cross-origin).
 SCENES_GQL = (
-    "query($f: FindFilterType){ findScenes(filter:$f){ count scenes {"
+    "query($f: FindFilterType, $sf: SceneFilterType){ findScenes(filter:$f, scene_filter:$sf){ count scenes {"
     " id title date files { path width height duration size }"
     " studio { name } tags { name } } } }"
 )
+
+_done_tag_ids = None      # ids of tags named Decensored* (cached; for hide_done)
+
+
+def done_tag_ids():
+    """Tags to exclude when the dashboard hides decensored scenes. Filtering in
+    the GraphQL query keeps every page full (client-side filtering left holes)."""
+    global _done_tag_ids
+    if _done_tag_ids is None:
+        try:
+            data = stash_gql("query{ allTags { id name } }")
+            _done_tag_ids = [t["id"] for t in data.get("allTags", [])
+                             if t.get("name", "").lower().startswith("decensored")]
+        except Exception:  # noqa: BLE001 - fall back to client-side filtering
+            return []
+    return _done_tag_ids
 
 
 def stash_base():
@@ -597,8 +613,13 @@ class Handler(BaseHTTPRequestHandler):
             "sort": sort,
             "direction": (g("dir", "") or ("ASC" if sort == "title" else "DESC")).upper(),
         }
+        sf = {}
+        if g("hide_done", "") in ("1", "true"):
+            ids = done_tag_ids()
+            if ids:
+                sf["tags"] = {"value": ids, "modifier": "EXCLUDES", "depth": 0}
         try:
-            data = stash_gql(SCENES_GQL, {"f": f})
+            data = stash_gql(SCENES_GQL, {"f": f, "sf": sf or None})
             return self._send(200, data["findScenes"])
         except Exception as exc:  # noqa: BLE001
             return self._send(502, {"error": "stash: " + str(exc)})
