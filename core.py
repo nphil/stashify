@@ -581,7 +581,8 @@ def process_scene(stash, cfg, scene, trigger_tag_id, done_tag_id):
         os.makedirs(cfg["outputDir"], exist_ok=True)
         stem = re.sub(r"\s+", "_", os.path.splitext(os.path.basename(input_path))[0])
         ext = os.path.splitext(produced)[1] or ".mp4"
-        dest = unique_path(cfg["outputDir"], f"{stem}_decensored", ext)
+        suffix = "_upscaled" if cfg["backend"] == "upscale" else "_decensored"
+        dest = unique_path(cfg["outputDir"], f"{stem}{suffix}", ext)
         shutil.move(produced, dest)
         _chown_like(dest, input_path)
         log.info(f"Wrote cleaned file: {dest}")
@@ -861,7 +862,9 @@ def process_to_review(stash, cfg, scene_id, progress=None, log_cb=None):
         os.makedirs(cfg["outputDir"], exist_ok=True)
         stem = re.sub(r"\s+", "_", os.path.splitext(os.path.basename(input_path))[0])
         ext = os.path.splitext(produced)[1] or ".mp4"
-        dest = unique_path(cfg["outputDir"], f"{stem}_decensored", ext)
+        # suffix matches the operation: upscale-only jobs aren't "decensored"
+        suffix = "_upscaled" if cfg["backend"] == "upscale" else "_decensored"
+        dest = unique_path(cfg["outputDir"], f"{stem}{suffix}", ext)
         shutil.move(produced, dest)
         _chown_like(dest, input_path)
 
@@ -874,7 +877,8 @@ def process_to_review(stash, cfg, scene_id, progress=None, log_cb=None):
             preview_tag = stash.find_tag(PREVIEW_TAG, create=True)
             update = {"id": review_id, "tag_ids": [preview_tag["id"]]}
             if scene.get("title"):
-                update["title"] = f"{scene['title']} (Decensored preview)"
+                label = "Upscaled" if cfg["backend"] == "upscale" else "Decensored"
+                update["title"] = f"{scene['title']} ({label} preview)"
             stash.update_scene(update)
         else:
             log.warning(

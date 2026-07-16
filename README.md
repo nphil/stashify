@@ -109,7 +109,7 @@ volumes:
 ```
 
 `OUTPUT_DIR` must be inside a Stash library folder, at a path both Stash and
-the worker agree on (e.g. `/data/decensored`).
+the worker agree on (e.g. `/data/stashify`).
 
 Additionally, worker and runner share a **scratch** mount at the same container
 path (`/scratch` by default, `LADA_SCRATCH`). Keep it **outside** your Stash
@@ -140,7 +140,7 @@ into its persisted `/models` volume. The default SPAN upscale checkpoint
 | `LADA_FP16` | `false` | **Keep false on Pascal** (no usable fp16). |
 | `LADA_ENCODER` | — | Empty = runner default (NVENC probe result). |
 | `LADA_UPSCALE_MODEL` | — | Empty = runner default (`2xLiveActionV1_SPAN`). |
-| `OUTPUT_DIR` | `/data/decensored` | Inside a Stash library path. |
+| `OUTPUT_DIR` | `/data/stashify` | Inside a Stash library path. |
 | `TRIGGER_TAG` | `Decensor` | Tag that marks scenes for batch mode. |
 | `DONE_TAG` | `Decensored` | Applied after processing. |
 | `IMPORT_RESULT` | `true` | Scan the result into Stash + copy metadata. |

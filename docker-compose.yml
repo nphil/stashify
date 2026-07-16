@@ -48,7 +48,7 @@ services:
       LADA_SCRATCH: "/scratch"
 
       # --- library ---
-      OUTPUT_DIR: "/stuff2/decensored"   # inside the /stuff2 library so previews scan in
+      OUTPUT_DIR: "/stuff2/stashify"   # inside the /stuff2 library so previews scan in
     volumes:
       - /mnt/user/Download/torrents/Stuff:/stuff     # == Stash's /stuff
       - /mnt/user/Stuff:/stuff2                       # == Stash's /stuff2
@@ -92,7 +92,7 @@ services:
 #   docker run -d --name Stashify -p 8710:8710 \
 #     -e STASH_URL=http://192.168.1.69:6969 -e STASH_API_KEY=<key> -e WORKER_TOKEN=<token> \
 #     -e BACKEND=lada -e LADA_URL=http://<runner-host>:8711 -e LADA_TOKEN=<token> \
-#     -e OUTPUT_DIR=/stuff2/decensored \
+#     -e OUTPUT_DIR=/stuff2/stashify \
 #     -v /mnt/user/Download/torrents/Stuff:/stuff -v /mnt/user/Stuff:/stuff2 \
 #     -v /mnt/user/appdata/stashify/scratch:/scratch \
 #     ghcr.io/nphil/stashify:latest
