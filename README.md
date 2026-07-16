@@ -14,28 +14,42 @@ host.
 
 ## How it works
 
-A coordinator/runner design — three pieces that talk over HTTP:
+A coordinator/runner design — a thin coordinator, **one or more GPU compute
+runners**, and a UI plugin, all talking over HTTP:
 
 1. **Stashify worker** (`Dockerfile` → `server.py`, image
    `ghcr.io/nphil/stashify`, ~131 MB) — a **thin coordinator**: HTTP API,
-   dashboard, Stash GraphQL integration, job queue, preview/replace logic. No
-   GPU, no CUDA, no models.
-2. **Stashify runner** (`Dockerfile.lada` → `lada_runner.py`, image
-   `ghcr.io/nphil/stashify-runner`) — the **GPU compute node**:
-   [Lada](https://github.com/ladaapp/lada) mosaic removal (YOLO11 detection +
-   BasicVSR++ temporal restoration), **SPAN upscaling** (via
-   [spandrel](https://github.com/chaiNNer-org/spandrel)), and NVENC encoding.
-   The worker dispatches jobs to it; results hand off through a shared
-   `/scratch` mount.
+   dashboard, Stash GraphQL integration, job queue, preview/replace logic, and
+   **capability-based routing** across every registered runner (it health-checks
+   candidates, skips offline nodes, and prefers idle + preferred ones). No GPU,
+   no CUDA, no models.
+2. **Compute runners** — any mix of:
+   - **Linux/Docker runner** (`Dockerfile.lada` → `lada_runner.py`, image
+     `ghcr.io/nphil/stashify-runner`):
+     [Lada](https://github.com/ladaapp/lada) mosaic removal (YOLO11 detection +
+     BasicVSR++ temporal restoration), **SPAN upscaling** (via
+     [spandrel](https://github.com/chaiNNer-org/spandrel)), and NVENC encoding.
+     Runs on cards as old as Pascal (Tesla P40).
+   - **Windows runner** (`winrunner/`, [one-file installer](https://github.com/nphil/stashify/releases/latest)):
+     turns a Windows desktop into a second node with **two concurrent lanes** —
+     AI (NVIDIA: SPAN upscale fp16 + **[Jasna](https://github.com/Kruk2/jasna)
+     mosaic removal**, Turing or newer) and transcode (Intel iGPU QuickSync
+     HEVC). Ships a Kanagawa-themed **tray flyout** (anchored popup with live
+     GPU gauges, job progress, and a coalescing log tail; undockable).
+
+   Results hand off through a shared `/scratch` mount (SMB for the Windows box).
 3. **Stash UI plugin** (`stashify.yml` + `stashify.js` + `stashify.css`) — adds
    a panel to the scene page. Your browser calls the worker directly; progress,
    the review player, and Replace/Discard all render right there. The worker
    also serves a full dashboard (e.g. `https://stashify.nateshome.net`) with an
    engine picker, live stats (frames/fps/ETA + GPU telemetry), a live-log
-   terminal, before/after frame previews, and cancel/pause/resume.
+   terminal, before/after frame previews, cancel/pause/resume, and a **Runners
+   panel** (add nodes manually or auto-discover them on the LAN).
 
 ```
-Scene page → [Decensor] → worker queues job → runner (Lada → optional SPAN upscale)
+Scene page → [Decensor] → worker queues job → routed to the best runner:
+      decensor          → Jasna (Windows, Turing+) or Lada (Docker, Pascal+)
+      upscale/transcode → SPAN fp16 / QuickSync lanes
            → preview scene → review in panel/dashboard → [Replace original]  (in place)
                                                        → [Discard]           (delete preview)
 ```
@@ -141,6 +155,8 @@ into its persisted `/models` volume. The default SPAN upscale checkpoint
 | `LADA_ENCODER` | — | Empty = runner default (NVENC probe result). |
 | `LADA_UPSCALE_MODEL` | — | Empty = runner default (`2xLiveActionV1_SPAN`). |
 | `OUTPUT_DIR` | `/data/stashify` | Inside a Stash library path. |
+| `RUNNERS` | — | Optional JSON array of extra compute runners: `[{"name":"desktop","url":"http://IP:8712","token":"...","ops":["upscale","transcode","decensor","decensor+upscale"],"prefer":["upscale"]}]`. Merged with dashboard-managed runners (env wins on duplicate URLs). |
+| `RUNNERS_STORE` | `/config/runners.json` | Where dashboard-added runners persist — mount `/config` to keep them across recreations. |
 | `TRIGGER_TAG` | `Decensor` | Tag that marks scenes for batch mode. |
 | `DONE_TAG` | `Decensored` | Applied after processing. |
 | `IMPORT_RESULT` | `true` | Scan the result into Stash + copy metadata. |
@@ -158,6 +174,55 @@ into its persisted `/models` volume. The default SPAN upscale checkpoint
 | `LADA_MODEL_WEIGHTS_DIR` | `/models` | Persisted weights volume. |
 | `LADA_DEFAULT_ENCODER` | probe | Override the NVENC startup probe (e.g. `libx264`). |
 | `UPSCALE_MODEL` | `/models/2xLiveActionV1_SPAN_490000.pth` | SPAN/Compact/ESRGAN checkpoint (any spandrel-loadable SR model). |
+
+---
+
+## More compute: adding runners & discovery
+
+The coordinator routes each job by **capability**: every runner advertises its
+ops (`decensor`, `upscale`, `decensor+upscale`, `transcode`), the coordinator
+health-checks the candidates, skips offline/paused nodes, and picks an idle one
+(a runner's `prefer` list breaks ties). If a preferred node is busy or off, the
+job just goes to the next capable runner.
+
+Manage the fleet from the dashboard — **⚙ Runners** in the top bar:
+
+- **🔎 Discover on network** — scans your /24 on the runner ports (8711/8712,
+  override with `DISCOVER_CIDR` / `DISCOVER_PORTS`) for the unauthenticated
+  `/ping` beacon every runner serves, and one-click registers what it finds.
+  Discovered runners default to the fleet `WORKER_TOKEN`.
+- **+ Add runner** — register by URL with a test-before-add probe; pick which
+  ops the node should be *preferred* for.
+- Runners added here persist in `RUNNERS_STORE` (mount `/config`); runners from
+  the `RUNNERS` env show with an *env* badge and win on duplicate URLs.
+
+## Windows runner (second machine: RTX + iGPU)
+
+`winrunner/` turns a Windows desktop into an extra compute node — see
+[winrunner/README.md](winrunner/README.md) for details. **Install on a new
+machine with one file:** grab `setup-stashify-runner.ps1` from the
+[latest release](https://github.com/nphil/stashify/releases/latest) and run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File setup-stashify-runner.ps1 -WithJasna -JasnaDir "D:\Models\jasna"
+```
+
+It self-elevates, installs `uv` if needed, downloads the runner payload, and
+sets up everything: Python venv (torch cu124), ffmpeg, the SPAN model, a config
+wizard (NAS paths + token), an auto-start logon task (runs **as you**, so your
+saved SMB credentials work), and the firewall rule. `-WithJasna` adds the
+[Jasna](https://github.com/Kruk2/jasna) decensor engine (~4.1 GB self-contained
+release; NVIDIA compute ≥ 7.5 i.e. Turing+, driver ≥ 580, 10 GB VRAM is
+enough at the default clip size) — its first job compiles TensorRT engines
+(15–60 min, cached; subsequent jobs start instantly). `-JasnaDir` keeps the
+~8 GB engine + model cache off `C:`.
+
+The runner exposes two independent lanes, so an upscale (NVIDIA) and a
+transcode (Intel QuickSync) run **concurrently**; decensor shares the AI lane.
+A tray flyout (click the tray icon) shows node status, both GPUs, active jobs
+with progress, and a live log tail that coalesces progress ticks into a single
+updating line; it auto-hides on click-out and can be pinned as a floating
+window. Register the node afterwards via dashboard → Runners → Discover.
 
 ---
 
@@ -199,12 +264,14 @@ are ignored.)
 
 | Backend | Role |
 |---|---|
-| `lada` | Mosaic **removal + temporal restoration** ([ladaapp/lada](https://github.com/ladaapp/lada): YOLO11 detection + BasicVSR++). Optionally chains a SPAN upscale pass (`POST_UPSCALE`). |
+| `lada` | Mosaic **removal + temporal restoration**. On the Docker runner this is [ladaapp/lada](https://github.com/ladaapp/lada) (YOLO11 detection + BasicVSR++); on the Windows runner the same op runs [Jasna](https://github.com/Kruk2/jasna) (RF-DETR detection + BasicVSR++ via TensorRT — faster and higher quality, Turing+ only). Optionally chains a SPAN upscale pass (`POST_UPSCALE`). |
 | `upscale` | **Upscale only** — SPAN (default `2xLiveActionV1_SPAN`, a live-action 2× model) or any spandrel-loadable checkpoint. No mosaic removal. |
+| `transcode` | **Re-encode only** (HEVC, target resolution/quality) — runs on the Windows runner's Intel QuickSync lane. |
 | `command` | Any external CLI — e.g. a **TecoGAN** or **JavPlayer** wrapper — via `COMMAND_TEMPLATE`. |
 
 Pick per job with the dashboard's engine dropdown; the env vars just set
-defaults.
+defaults. Which physical node executes an op is the routing's job — see
+*adding runners & discovery* above.
 
 ### The runner image and the Tesla P40
 
