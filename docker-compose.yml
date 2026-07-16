@@ -22,7 +22,9 @@ services:
     # build: .
     container_name: Stashify
     labels:
-      # unRAID Docker tab reads these: container icon + a WebUI link.
+      # unRAID Docker tab reads these: managed flag (drops the "3rd Party" tag,
+      # enables update-status + the autostart toggle), container icon, WebUI link.
+      net.unraid.docker.managed: "dockerman"
       net.unraid.docker.icon: "https://raw.githubusercontent.com/nphil/stashify/main/assets/icon-256.png"
       net.unraid.docker.webui: "https://stashify.nateshome.net/"
     # Thin coordinator: NO GPU, no CUDA, no models — all compute happens in the
@@ -66,6 +68,7 @@ services:
     #   dockerfile: Dockerfile.lada
     container_name: Stashify-Runner
     labels:
+      net.unraid.docker.managed: "dockerman"
       net.unraid.docker.icon: "https://raw.githubusercontent.com/nphil/stashify/main/assets/icon-256.png"
     runtime: nvidia
     ports:
