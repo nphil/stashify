@@ -100,6 +100,123 @@ OVERRIDES = {
     "transcode_quality": "transcodeQuality",
 }
 
+# --------------------------------------------------------------------------- #
+# runner registry: env RUNNERS (static bootstrap) + a persisted store the
+# dashboard edits + live LAN discovery. core.resolve_runner() picks a capable
+# one per job from the merged set.
+# --------------------------------------------------------------------------- #
+
+RUNNERS_STORE = os.environ.get("RUNNERS_STORE", "/config/runners.json")
+_runners_lock = threading.Lock()
+
+
+def _env_runners():
+    raw = os.environ.get("RUNNERS")
+    if not raw:
+        return []
+    try:
+        rs = json.loads(raw)
+        for r in rs:
+            r["_source"] = "env"
+        return rs
+    except (ValueError, TypeError):
+        return []
+
+
+def load_store():
+    try:
+        with open(RUNNERS_STORE, encoding="utf-8") as fh:
+            rs = json.load(fh)
+        for r in rs:
+            r["_source"] = "manual"
+        return rs
+    except Exception:  # noqa: BLE001 - no store yet / unreadable
+        return []
+
+
+def save_store(runners):
+    try:
+        os.makedirs(os.path.dirname(RUNNERS_STORE) or ".", exist_ok=True)
+        clean = [{k: v for k, v in r.items() if not k.startswith("_")} for r in runners]
+        with open(RUNNERS_STORE, "w", encoding="utf-8") as fh:
+            json.dump(clean, fh, indent=2)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("could not save runners store: %s", exc)
+        return False
+
+
+def merged_runners():
+    """env RUNNERS + persisted store, deduped by url (env wins)."""
+    seen = {}
+    for r in _env_runners() + load_store():
+        url = str(r.get("url", "")).rstrip("/")
+        if url and url not in seen:
+            seen[url] = r
+    return list(seen.values())
+
+
+def probe_runner(r):
+    """Live status for one runner (for the dashboard list)."""
+    import requests
+
+    url = str(r.get("url", "")).rstrip("/")
+    out = {"name": r.get("name") or url, "url": url, "ops": r.get("ops"),
+           "prefer": r.get("prefer") or [], "source": r.get("_source", "manual"),
+           "online": False, "busy": None, "node": None, "kind": None, "note": None}
+    if not url:
+        return out
+    tok = r.get("token") or os.environ.get("WORKER_TOKEN", "")
+    try:
+        h = requests.get(url + "/health", headers={"X-Lada-Token": tok}, timeout=4).json()
+        out.update(online=True, busy=h.get("busy"), node=h.get("node"),
+                   kind=h.get("kind"), ops=h.get("ops") or r.get("ops"), paused=h.get("paused"))
+    except Exception:  # noqa: BLE001 - maybe reachable but token-gated
+        try:
+            p = requests.get(url + "/ping", timeout=3).json()
+            if p.get("stashify"):
+                out.update(online=True, node=p.get("node"), kind=p.get("kind"),
+                           ops=p.get("ops") or r.get("ops"), note="token mismatch")
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
+def discover_runners(timeout=0.5):
+    """Scan the coordinator's LAN /24 on the runner ports for /ping responders."""
+    import ipaddress
+    import requests
+    from concurrent.futures import ThreadPoolExecutor
+    from urllib.parse import urlparse as _up
+
+    cidr = os.environ.get("DISCOVER_CIDR")
+    if not cidr:
+        host = _up(stash_base()).hostname or "192.168.1.0"
+        try:
+            cidr = str(ipaddress.ip_network(host + "/24", strict=False))
+        except ValueError:
+            cidr = "192.168.1.0/24"
+    ports = [int(p) for p in os.environ.get("DISCOVER_PORTS", "8711,8712").split(",")]
+    targets = [(str(ip), port) for ip in ipaddress.ip_network(cidr, strict=False).hosts() for port in ports]
+
+    def probe(t):
+        ip, port = t
+        try:
+            p = requests.get("http://%s:%d/ping" % (ip, port), timeout=timeout).json()
+            if p.get("stashify"):
+                return {"name": p.get("node") or ("%s:%d" % (ip, port)),
+                        "url": "http://%s:%d" % (ip, port), "ops": p.get("ops"),
+                        "kind": p.get("kind"), "_source": "discovered"}
+        except Exception:  # noqa: BLE001
+            return None
+    found = []
+    with ThreadPoolExecutor(max_workers=64) as ex:
+        for r in ex.map(probe, targets):
+            if r:
+                found.append(r)
+    return found
+
+
 _jobs = {}
 _jobs_lock = threading.Lock()
 _work = queue.Queue()
@@ -407,6 +524,7 @@ def progress_cb(job_id):
 
 def job_config(job):
     cfg = core.config_from_env()
+    cfg["runners"] = merged_runners()      # env RUNNERS + dashboard-added/discovered
     for req_key, cfg_key in OVERRIDES.items():
         val = job["_overrides"].get(req_key)
         if val is not None and val != "":
@@ -693,6 +811,11 @@ class Handler(BaseHTTPRequestHandler):
             with _jobs_lock:
                 data = [public(j) for j in _jobs.values()]
             return self._send(200, data)
+        if path == "/api/runners":
+            from concurrent.futures import ThreadPoolExecutor
+            rs = merged_runners()
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                return self._send(200, list(ex.map(probe_runner, rs)))
         m = re.match(r"^/api/jobs/([0-9a-f]+)/log$", path)
         if m:
             from urllib.parse import urlparse, parse_qs
@@ -725,6 +848,35 @@ class Handler(BaseHTTPRequestHandler):
             job = new_job(str(scene_id), overrides)
             _work.put(("process", job["id"]))
             return self._send(202, public(job))
+
+        # --- runner registry management ---
+        if path == "/api/runners":                     # add / update a runner
+            b = self._body()
+            url = str(b.get("url", "")).rstrip("/")
+            if not url.startswith("http"):
+                return self._send(400, {"error": "a valid http(s) url is required"})
+            entry = {"name": b.get("name") or url, "url": url, "token": b.get("token") or "",
+                     "ops": b.get("ops") or None, "prefer": b.get("prefer") or []}
+            with _runners_lock:
+                store = [r for r in load_store() if str(r.get("url", "")).rstrip("/") != url]
+                store.append(entry)
+                save_store(store)
+            return self._send(201, probe_runner(dict(entry, _source="manual")))
+        if path == "/api/runners/remove":
+            url = str(self._body().get("url", "")).rstrip("/")
+            with _runners_lock:
+                save_store([r for r in load_store() if str(r.get("url", "")).rstrip("/") != url])
+            return self._send(200, {"ok": True})
+        if path == "/api/runners/test":
+            b = self._body()
+            return self._send(200, probe_runner({"url": b.get("url"), "token": b.get("token"),
+                                                 "name": b.get("name"), "_source": "test"}))
+        if path == "/api/runners/discover":
+            found = discover_runners()
+            known = {str(r.get("url", "")).rstrip("/") for r in merged_runners()}
+            for f in found:
+                f["registered"] = f["url"] in known
+            return self._send(200, found)
 
         m = re.match(r"^/api/jobs/([0-9a-f]+)/(replace|discard)$", path)
         if m:

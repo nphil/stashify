@@ -790,6 +790,9 @@ class Handler(BaseHTTPRequestHandler):
         if raw in ("", "/"):
             return self._send_file(os.path.join(HERE, "webui", "index.html"),
                                    "text/html", inject_token=True)
+        if raw == "/ping":            # unauth discovery beacon (no sensitive data)
+            return self._send(200, {"stashify": True, "node": CFG["node_name"],
+                                    "kind": "windows", "ops": enabled_ops()})
         if not self._authed():
             return self._send(401, {"error": "bad token"})
         if raw == "/health":

@@ -18,8 +18,39 @@
     <div class="gpumeter" id="gpumeter" title="GPU (live)" hidden>
       <span class="gpudot"></span><span id="gpumeter-text"></span>
     </div>
+    <button id="runnersBtn" class="btn" title="Manage compute runners">⚙ Runners</button>
     <div class="conn" id="conn" title="worker status">connecting…</div>
   </header>
+
+  <div id="runnersModal" class="modal" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>Compute runners</h2>
+        <button id="runnersClose" class="linkbtn">✕</button>
+      </div>
+      <div class="modal-actions">
+        <button id="discoverBtn" class="btn">🔎 Discover on network</button>
+        <button id="addRunnerBtn" class="btn btn-primary">+ Add runner</button>
+      </div>
+      <div id="runnersList" class="runners"></div>
+      <form id="addRunnerForm" class="runner-form" hidden>
+        <div class="rf-row"><label>Name</label><input id="rfName" placeholder="desktop-3080"></div>
+        <div class="rf-row"><label>URL</label><input id="rfUrl" placeholder="http://192.168.1.63:8712"></div>
+        <div class="rf-row"><label>Token</label><input id="rfToken" placeholder="(blank = use worker token)"></div>
+        <div class="rf-row"><label>Prefer for</label>
+          <label class="chk"><input type="checkbox" id="rfPrefUp"> upscale</label>
+          <label class="chk"><input type="checkbox" id="rfPrefTx"> transcode</label>
+          <label class="chk"><input type="checkbox" id="rfPrefDe"> decensor</label>
+        </div>
+        <div class="rf-row rf-btns">
+          <button type="button" id="rfTest" class="btn">Test</button>
+          <button type="submit" class="btn btn-primary">Save runner</button>
+          <button type="button" id="rfCancel" class="btn">Cancel</button>
+          <span id="rfMsg" class="rf-msg"></span>
+        </div>
+      </form>
+    </div>
+  </div>
 
   <main>
     <section class="browser">

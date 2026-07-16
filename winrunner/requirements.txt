@@ -4,5 +4,4 @@ requests
 psutil
 av
 spandrel
-pystray
-pillow
+PySide6-Essentials   # tray flyout GUI

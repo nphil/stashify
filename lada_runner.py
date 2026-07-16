@@ -483,6 +483,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         raw = self.path.split("?", 1)[0].rstrip("/")
+        if raw == "/ping":            # unauth discovery beacon (no sensitive data)
+            import socket
+            return self._send(200, {"stashify": True,
+                                    "node": os.environ.get("NODE_NAME") or socket.gethostname(),
+                                    "kind": "linux", "ops": ["decensor", "upscale", "decensor+upscale"]})
         if raw == "/health" or raw == "":
             models = sorted(os.listdir(MODELS_DIR)) if os.path.isdir(MODELS_DIR) else []
             with _jobs_lock:

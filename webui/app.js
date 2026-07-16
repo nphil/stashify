@@ -562,8 +562,110 @@
     } catch (e) { box.hidden = true; }
   }
 
+  // ---- runners management ------------------------------------------------ //
+  function openRunners() { $("runnersModal").hidden = false; loadRunners(); }
+  function closeRunners() { $("runnersModal").hidden = true; $("addRunnerForm").hidden = true; }
+
+  async function loadRunners() {
+    var box = $("runnersList");
+    box.innerHTML = "<div class='empty'>Checking runners…</div>";
+    var list;
+    try { list = await workerFetch("runners"); }
+    catch (e) { box.innerHTML = "<div class='empty'>Couldn't load runners: " + esc(e.message) + "</div>"; return; }
+    box.innerHTML = "";
+    if (!list.length) { box.innerHTML = "<div class='empty'>No runners yet. Add or discover one.</div>"; }
+    list.forEach(function (r) { box.appendChild(runnerCard(r)); });
+  }
+
+  function runnerCard(r) {
+    var c = el("div", "rc " + (r.online ? "online" : "offline"));
+    c.appendChild(el("span", "dot"));
+    var main = el("div", "rc-main");
+    var name = el("div", "rc-name", esc(r.name || r.url));
+    if (r.kind) name.appendChild(el("span", "rc-kind", esc(r.kind)));
+    main.appendChild(name);
+    main.appendChild(el("div", "rc-url", esc(r.url)));
+    if (r.ops && r.ops.length) {
+      var ops = el("div", "rc-ops");
+      r.ops.forEach(function (op) {
+        var prefer = (r.prefer || []).indexOf(op) >= 0;
+        ops.appendChild(el("span", "op" + (prefer ? " prefer" : ""), op));
+      });
+      main.appendChild(ops);
+    }
+    if (r.source) main.appendChild(el("div", "rc-src", "source: " + r.source + (r.note ? " · " + r.note : "")));
+    c.appendChild(main);
+    var st = el("div", "rc-status" + (r.busy ? " busy" : ""),
+      r.online ? (r.paused ? "paused" : (r.busy ? "busy" : "idle")) : "offline");
+    c.appendChild(st);
+    if (r.source !== "env") {
+      var rm = el("button", "linkbtn", "remove");
+      rm.onclick = function () { removeRunner(r.url); };
+      c.appendChild(rm);
+    }
+    return c;
+  }
+
+  function formRunner() {
+    var prefer = [];
+    if ($("rfPrefUp").checked) prefer.push("upscale");
+    if ($("rfPrefTx").checked) prefer.push("transcode");
+    if ($("rfPrefDe").checked) prefer.push("decensor");
+    return { name: $("rfName").value.trim(), url: $("rfUrl").value.trim(),
+             token: $("rfToken").value.trim(), prefer: prefer };
+  }
+  function rfMsg(t, cls) { var m = $("rfMsg"); m.textContent = t; m.className = "rf-msg" + (cls ? " " + cls : ""); }
+
+  async function removeRunner(url) {
+    try { await workerFetch("runners/remove", { method: "POST", body: JSON.stringify({ url: url }) }); }
+    catch (e) { toast("remove failed: " + e.message, true); }
+    loadRunners();
+  }
+
   // ---- init -------------------------------------------------------------- //
   function bind() {
+    $("runnersBtn").onclick = openRunners;
+    $("runnersClose").onclick = closeRunners;
+    $("runnersModal").addEventListener("click", function (e) { if (e.target === $("runnersModal")) closeRunners(); });
+    $("addRunnerBtn").onclick = function () { $("addRunnerForm").hidden = false; rfMsg(""); };
+    $("rfCancel").onclick = function () { $("addRunnerForm").hidden = true; };
+    $("rfTest").onclick = async function () {
+      var r = formRunner();
+      if (!r.url) { rfMsg("enter a URL", "err"); return; }
+      rfMsg("testing…");
+      try {
+        var res = await workerFetch("runners/test", { method: "POST", body: JSON.stringify(r) });
+        rfMsg(res.online ? ("online: " + (res.node || "?") + " [" + (res.ops || []).join(",") + "]") : "offline / unreachable", res.online ? "ok" : "err");
+      } catch (e) { rfMsg("test failed: " + e.message, "err"); }
+    };
+    $("addRunnerForm").onsubmit = async function (e) {
+      e.preventDefault();
+      var r = formRunner();
+      if (!r.url) { rfMsg("enter a URL", "err"); return; }
+      try {
+        await workerFetch("runners", { method: "POST", body: JSON.stringify(r) });
+        $("addRunnerForm").hidden = true; $("rfName").value = $("rfUrl").value = $("rfToken").value = "";
+        loadRunners();
+      } catch (err) { rfMsg("save failed: " + err.message, "err"); }
+    };
+    $("discoverBtn").onclick = async function () {
+      var b = $("discoverBtn"); b.disabled = true; b.textContent = "Scanning…";
+      try {
+        var found = await workerFetch("runners/discover", { method: "POST", body: "{}" });
+        var nu = found.filter(function (f) { return !f.registered; });
+        if (!found.length) toast("No runners found on the network");
+        else if (!nu.length) toast("Found " + found.length + " — all already registered");
+        else {
+          for (var i = 0; i < nu.length; i++) {
+            await workerFetch("runners", { method: "POST", body: JSON.stringify({ name: nu[i].name, url: nu[i].url }) });
+          }
+          toast("Added " + nu.length + " discovered runner" + (nu.length > 1 ? "s" : ""));
+        }
+        loadRunners();
+      } catch (e) { toast("discover failed: " + e.message, true); }
+      b.disabled = false; b.textContent = "🔎 Discover on network";
+    };
+
     var deb;
     $("search").addEventListener("input", function () { clearTimeout(deb); deb = setTimeout(function () { state.page = 1; loadScenes(); }, 300); });
     $("sort").onchange = $("minres").onchange = function () { state.page = 1; loadScenes(); };

@@ -55,6 +55,8 @@ services:
       # Shared handoff with the compute runner. Deliberately OUTSIDE the Stash
       # libraries so half-written intermediates can never get scanned as scenes.
       - /mnt/user/appdata/stashify/scratch:/scratch
+      # Persists the runner registry the dashboard manages (runners.json).
+      - /mnt/user/appdata/stashify/config:/config
     restart: unless-stopped
 
   # Compute runner (Pascal cu126 build): Lada decensoring + SPAN upscaling +
