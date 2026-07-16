@@ -111,11 +111,16 @@ def main():
     rate = done / max(0.001, time.time() - t0)
     log(f"upscaled {done} frames in {hms(time.time() - t0)} ({rate:.1f}f/s); muxing audio")
 
-    r = subprocess.run([args.ffmpeg, "-y", "-loglevel", "error", "-i", vtmp, "-i", args.input,
-                        "-map", "0:v", "-map", "1:a?", "-c", "copy", "-shortest", final],
-                       capture_output=True, text=True, creationflags=NOWIN)
-    if r.returncode != 0:
-        log("audio mux failed; keeping video-only")
+    try:
+        r = subprocess.run([args.ffmpeg, "-y", "-loglevel", "error", "-i", vtmp, "-i", args.input,
+                            "-map", "0:v", "-map", "1:a?", "-c", "copy", "-shortest", final],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=600, creationflags=NOWIN)
+        rc = r.returncode
+    except subprocess.TimeoutExpired:
+        log("audio mux timed out; keeping video-only")
+        rc = 1
+    if rc != 0:
         os.replace(vtmp, final)
     else:
         os.remove(vtmp)

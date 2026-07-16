@@ -11,8 +11,10 @@ translates the container paths it receives (/stuff2/..., /scratch/...) to how
 this machine reaches the same files (SMB/UNC), does the work as a subprocess,
 and hands the output back on the shared /scratch mount.
 
-Runs headless as a Windows service (see install-service.ps1); the tray app and
-the served dashboard at http://localhost:<port>/ talk to it over HTTP.
+Runs headless as a Windows service (see install.ps1); the tray app and the
+served dashboard at http://localhost:<port>/ talk to it over HTTP. All API
+routes require the shared token; the served page has the token injected so the
+same-origin dashboard works. With no token set the listener binds 127.0.0.1.
 
 Stdlib only (the heavy libs live in the venv the subprocesses use). psutil is
 used for cross-tree suspend/resume/kill since Windows has no process groups.
@@ -23,14 +25,14 @@ import sys
 import json
 import time
 import uuid
+import hmac
 import queue
+import atexit
 import shutil
 import logging
 import subprocess
 import threading
-import mimetypes
-import posixpath
-from collections import deque
+from collections import deque, OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
@@ -40,6 +42,10 @@ except ImportError:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 IS_WIN = os.name == "nt"
+NOWIN = subprocess.CREATE_NO_WINDOW if IS_WIN else 0
+STALL_SECS = int(os.environ.get("STASHIFY_STALL_SECS", "600"))   # kill a job with no output for this long
+MAX_JOBS = 60                                                    # retained terminal jobs before eviction
+MAX_BODY = 64 * 1024                                             # /run body cap
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
                     datefmt="%H:%M:%S", stream=sys.stdout)
@@ -54,22 +60,41 @@ def _expand(v):
     return os.path.expandvars(v) if isinstance(v, str) else v
 
 
+def resolve_ffmpeg(val):
+    if val and val != "auto" and os.path.isfile(_expand(val)):
+        return _expand(val)
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    import glob
+    for pat in [os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                             "Microsoft", "WinGet", "Packages", "Gyan.FFmpeg*", "*", "bin", "ffmpeg.exe")]:
+        hits = glob.glob(pat)
+        if hits:
+            return hits[0]
+    return "ffmpeg"
+
+
 def load_config():
     path = os.environ.get("STASHIFY_RUNNER_CONFIG") or os.path.join(
         os.environ.get("LOCALAPPDATA", HERE), "StashifyRunner", "config.json")
     cfg = {}
-    if os.path.isfile(path):
-        with open(path, "r", encoding="utf-8") as fh:
-            cfg = json.load(fh)
-    else:
-        log.warning("no config at %s — using defaults/example", path)
-        ex = os.path.join(HERE, "config.example.json")
-        if os.path.isfile(ex):
-            with open(ex, "r", encoding="utf-8") as fh:
+    try:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as fh:
                 cfg = json.load(fh)
+        else:
+            log.warning("no config at %s — using example defaults", path)
+            ex = os.path.join(HERE, "config.example.json")
+            if os.path.isfile(ex):
+                with open(ex, "r", encoding="utf-8") as fh:
+                    cfg = json.load(fh)
+    except Exception as exc:  # noqa: BLE001 - degrade, don't crash-loop
+        log.error("config load failed (%s); continuing with defaults", exc)
+        cfg = {}
     cfg.setdefault("node_name", os.environ.get("COMPUTERNAME", "windows-runner"))
     cfg.setdefault("port", 8712)
-    cfg.setdefault("token", "")
+    cfg.setdefault("token", os.environ.get("LADA_TOKEN", ""))
     cfg.setdefault("path_map", [])
     cfg.setdefault("lanes", {"ai": True, "transcode": True})
     cfg.setdefault("ai_encoder", "auto")
@@ -81,27 +106,13 @@ def load_config():
     cfg["upscale_model"] = _expand(cfg.get("upscale_model") or "")
     cfg["local_temp"] = _expand(cfg.get("local_temp") or os.path.join(HERE, "tmp"))
     cfg["ffmpeg"] = resolve_ffmpeg(cfg.get("ffmpeg", "auto"))
-    # longest prefix first, so /stuff2 beats /stuff
     cfg["path_map"] = sorted(
         [{"prefix": p["prefix"].rstrip("/"), "local": _expand(p["local"])} for p in cfg["path_map"]],
         key=lambda x: len(x["prefix"]), reverse=True)
+    # trust boundary: only models under this dir may be loaded (pickle RCE guard)
+    cfg["models_dir"] = os.path.dirname(cfg["upscale_model"]) if cfg["upscale_model"] else \
+        os.path.join(os.environ.get("LOCALAPPDATA", HERE), "StashifyRunner", "models")
     return cfg
-
-
-def resolve_ffmpeg(val):
-    if val and val != "auto" and os.path.isfile(_expand(val)):
-        return _expand(val)
-    found = shutil.which("ffmpeg")
-    if found:
-        return found
-    # winget/Gyan default install location
-    import glob
-    for pat in [os.path.join(os.environ.get("LOCALAPPDATA", ""),
-                             "Microsoft", "WinGet", "Packages", "Gyan.FFmpeg*", "*", "bin", "ffmpeg.exe")]:
-        hits = glob.glob(pat)
-        if hits:
-            return hits[0]
-    return "ffmpeg"
 
 
 CFG = load_config()
@@ -111,15 +122,31 @@ FFMPEG = CFG["ffmpeg"]
 FFPROBE = (FFMPEG[:-len("ffmpeg.exe")] + "ffprobe.exe") if FFMPEG.lower().endswith("ffmpeg.exe") \
     else (shutil.which("ffprobe") or "ffprobe")
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm"}
+# child processes must speak UTF-8 (Japanese filenames etc.)
+CHILD_ENV = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
 
 
 # --------------------------------------------------------------------------- #
-# path translation (container <-> this machine)
+# path translation (container <-> this machine), with containment + long paths
 # --------------------------------------------------------------------------- #
 
-def to_local(container_path):
-    """/stuff2/a/b.mp4 -> \\\\192.168.1.69\\Stuff\\a\\b.mp4 (per path_map)."""
-    p = container_path.replace("\\", "/")
+def _longpath(p):
+    """Prefix a Windows UNC/drive path so >260-char paths work."""
+    if not IS_WIN or p.startswith("\\\\?\\"):
+        return p
+    if p.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + p.lstrip("\\")
+    if len(p) >= 3 and p[1] == ":":
+        return "\\\\?\\" + p
+    return p
+
+
+def to_local(container_path, longpath=True):
+    """/stuff2/a/b.mp4 -> \\\\192.168.1.69\\Stuff\\a\\b.mp4. Returns None if the
+    path isn't under any configured prefix (containment)."""
+    p = str(container_path).replace("\\", "/")
+    if ".." in p.split("/"):
+        return None
     for m in CFG["path_map"]:
         if p == m["prefix"] or p.startswith(m["prefix"] + "/"):
             rest = p[len(m["prefix"]):].lstrip("/")
@@ -127,35 +154,41 @@ def to_local(container_path):
             if rest:
                 sep = "\\" if IS_WIN else "/"
                 local = local.rstrip("\\/") + sep + rest.replace("/", sep)
-            return local
-    return container_path  # unmapped: pass through (may already be local)
+            return _longpath(local) if longpath else local
+    return None
 
 
 def to_container(local_path):
-    """Reverse: local output path -> the container path the coordinator reads."""
-    lp = local_path.replace("/", "\\") if IS_WIN else local_path
-    for m in CFG["path_map"]:
+    lp = local_path.replace("\\\\?\\UNC\\", "\\\\").replace("\\\\?\\", "")
+    lp = lp.replace("/", "\\") if IS_WIN else lp
+    for m in sorted(CFG["path_map"], key=lambda x: len(x["local"]), reverse=True):
         base = m["local"].replace("/", "\\") if IS_WIN else m["local"]
-        if lp.lower() == base.lower() or lp.lower().startswith(base.lower().rstrip("\\/") + ("\\" if IS_WIN else "/")):
+        sep = "\\" if IS_WIN else "/"
+        if lp.lower() == base.lower() or lp.lower().startswith(base.rstrip("\\/").lower() + sep):
             rest = lp[len(base.rstrip("\\/")):].lstrip("\\/")
             return (m["prefix"] + "/" + rest.replace("\\", "/")).replace("//", "/")
     return local_path
 
 
 # --------------------------------------------------------------------------- #
-# progress parsing (uniform: both upscale_cli and transcode_cli emit lada-style)
+# progress parsing — anchored to the lada-style lines our CLIs emit
 #   "upscaling: 42%| |Processed: 00:12 (1234f) | Remaining: 01:23 | Speed: 12.3f/s"
 # --------------------------------------------------------------------------- #
 
 _RE_FRAME = re.compile(r"\((\d+)f\)")
 _RE_ETA = re.compile(r"Remaining:\s*(\d+):(\d+)(?::(\d+))?")
 _RE_FPS = re.compile(r"([\d.]+)\s*f/s", re.IGNORECASE)
-_RE_SPEED = re.compile(r"(\d+\.?\d*)x(?!\d)")   # "3.37x" but not the 1080 in "1080x1920"
+_RE_SPEED = re.compile(r"(\d+\.?\d*)x(?!\d)")
 _RE_PCT = re.compile(r"(\d{1,3})\s*%")
-_RE_NM = re.compile(r"(\d+)\s*/\s*(\d+)")
+_PROGRESS_PREFIX = re.compile(r"^\s*(upscaling|transcode|decensor|processing)", re.IGNORECASE)
 
 
 def parse_progress(line):
+    # only trust our own progress lines, not incidental ratios in tool output
+    if not _PROGRESS_PREFIX.match(line) and "(" not in line:
+        return {}
+    if not _PROGRESS_PREFIX.match(line) and not _RE_FRAME.search(line):
+        return {}
     f = {}
     pm = _RE_PCT.search(line)
     if pm:
@@ -165,11 +198,6 @@ def parse_progress(line):
         f["frame"] = int(lf.group(1))
         if f.get("progress", 0) > 0.01:
             f["total_frames"] = max(f["frame"], int(round(f["frame"] / f["progress"])))
-    elif not pm:
-        nm = _RE_NM.search(line)
-        if nm and int(nm.group(2)):
-            f["frame"], f["total_frames"] = int(nm.group(1)), int(nm.group(2))
-            f["progress"] = round(min(1.0, f["frame"] / f["total_frames"]), 3)
     fp = _RE_FPS.search(line)
     if fp:
         try:
@@ -190,15 +218,27 @@ def parse_progress(line):
 
 
 # --------------------------------------------------------------------------- #
-# jobs + per-job log ring buffer
+# jobs + per-job log ring buffer (bounded)
 # --------------------------------------------------------------------------- #
 
-_jobs = {}
+_jobs = OrderedDict()
 _jobs_lock = threading.Lock()
 LOG_MAX = 600
 _logs = {}
 _logseq = {}
 _logs_lock = threading.Lock()
+
+
+def _evict_jobs():
+    # keep active jobs + the most recent terminal ones
+    terminal = [jid for jid, j in _jobs.items()
+                if j.get("state") in ("done", "error", "cancelled")]
+    while len(_jobs) > MAX_JOBS and terminal:
+        jid = terminal.pop(0)
+        _jobs.pop(jid, None)
+        with _logs_lock:
+            _logs.pop(jid, None)
+            _logseq.pop(jid, None)
 
 
 def push_log(jid, text, level="proc"):
@@ -256,13 +296,12 @@ def _newest_video(d):
 
 
 class Lane:
-    def __init__(self, name, gpu_label, ops):
+    def __init__(self, name, gpu_label):
         self.name = name
         self.gpu_label = gpu_label
-        self.ops = ops
         self.q = queue.Queue()
         self.lock = threading.Lock()
-        self.proc = None          # live subprocess.Popen
+        self.proc = None
         self.cancel = False
         self.paused = False
         self.running_id = None
@@ -275,8 +314,7 @@ class Lane:
         with self.lock:
             return self.running_id is not None
 
-    # ---- process control (Windows-safe via psutil) ----
-    def _proc_tree(self):
+    def _tree(self):
         with self.lock:
             p = self.proc
         if not p or p.poll() is not None or not psutil:
@@ -290,7 +328,7 @@ class Lane:
         with self.lock:
             self.cancel = True
             p = self.proc
-        proc = self._proc_tree()
+        proc = self._tree()
         if proc:
             for c in proc.children(recursive=True):
                 try:
@@ -308,43 +346,39 @@ class Lane:
                 pass
         return True
 
-    def do_pause(self):
-        proc = self._proc_tree()
+    def _suspend_resume(self, resume):
+        proc = self._tree()
         if not proc:
             return False
         for t in [proc] + proc.children(recursive=True):
             try:
-                t.suspend()
+                t.resume() if resume else t.suspend()
             except Exception:  # noqa: BLE001
                 pass
-        self.paused = True
+        self.paused = not resume
         return True
 
+    def do_pause(self):
+        return self._suspend_resume(False)
+
     def do_resume(self):
-        proc = self._proc_tree()
-        if not proc:
-            return False
-        for t in [proc] + proc.children(recursive=True):
-            try:
-                t.resume()
-            except Exception:  # noqa: BLE001
-                pass
-        self.paused = False
-        return True
+        return self._suspend_resume(True)
 
     def _loop(self):
         while True:
             jid = self.q.get()
-            with _jobs_lock:
-                job = _jobs.get(jid)
-                if job and job.get("state") == "cancelled":
-                    job = None
-            if not job:
-                continue
             with self.lock:
                 self.running_id = jid
                 self.cancel = False
                 self.paused = False
+            # re-check under lock: a cancel that raced the dequeue must win
+            with _jobs_lock:
+                job = _jobs.get(jid)
+                skip = (not job) or job.get("state") == "cancelled"
+            if skip:
+                with self.lock:
+                    self.running_id = None
+                continue
             try:
                 run_job(self, job)
             except Exception as exc:  # noqa: BLE001
@@ -366,75 +400,116 @@ def lane_for(op):
 
 
 # --------------------------------------------------------------------------- #
-# encoder probe (reused idea from the P40 fix: NVENC needs a modern driver)
+# encoder capability probe — per lane, once at startup (never in a request)
 # --------------------------------------------------------------------------- #
 
 _enc_cache = {}
+_enc_lock = threading.Lock()
+AI_ORDER = ["hevc_nvenc", "hevc_qsv", "libx264"]         # NVENC-first (3080)
+TX_ORDER = ["hevc_qsv", "hevc_nvenc", "libx264"]         # QSV-first (iGPU)
 
 
-def probe_encoder(prefer):
-    """Return the first working encoder. 'auto' tries nvenc -> qsv -> x264."""
+def _test_encoder(enc):
+    try:
+        r = subprocess.run(
+            [FFMPEG, "-hide_banner", "-f", "lavfi", "-i",
+             "testsrc=duration=1:size=256x256:rate=10", "-pix_fmt", "yuv420p",
+             "-c:v", enc, "-f", "null", "-"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=30, creationflags=NOWIN)
+        return r.returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def resolve_lane_encoder(lane):
+    prefer = CFG["ai_encoder"] if lane == "ai" else CFG["transcode_encoder"]
     if prefer and prefer != "auto":
         return prefer
-    if "auto" in _enc_cache:
-        return _enc_cache["auto"]
-    for enc in ("hevc_nvenc", "hevc_qsv", "libx264"):
-        try:
-            r = subprocess.run(
-                [FFMPEG, "-hide_banner", "-f", "lavfi", "-i",
-                 "testsrc=duration=1:size=256x256:rate=10", "-pix_fmt", "yuv420p",
-                 "-c:v", enc, "-f", "null", "-"],
-                capture_output=True, text=True, timeout=30,
-                creationflags=(subprocess.CREATE_NO_WINDOW if IS_WIN else 0))
-            if r.returncode == 0:
-                _enc_cache["auto"] = enc
-                log.info("encoder probe: using %s", enc)
-                return enc
-        except Exception:  # noqa: BLE001
-            continue
-    _enc_cache["auto"] = "libx264"
-    return "libx264"
+    key = "ai" if lane == "ai" else "transcode"
+    with _enc_lock:
+        if key in _enc_cache:
+            return _enc_cache[key]
+        order = AI_ORDER if lane == "ai" else TX_ORDER
+        chosen = next((e for e in order if _test_encoder(e)), "libx264")
+        _enc_cache[key] = chosen
+        log.info("%s lane encoder: %s", lane, chosen)
+        return chosen
 
 
 # --------------------------------------------------------------------------- #
 # the ops
 # --------------------------------------------------------------------------- #
 
-def _stream_subprocess(lane, jid, argv, n_phases=1, phase_idx=0):
-    """Run a CLI, streaming its lada-style progress lines into the job."""
+def _stream_subprocess(lane, jid, argv):
+    """Run a CLI, streaming lada-style progress into the job. A watchdog kills a
+    stalled subprocess (no output for STALL_SECS) so a dead SMB mount can't wedge
+    the lane forever."""
     push_log(jid, "$ " + subprocess.list2cmdline(argv), "event")
-    kw = dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-    if IS_WIN:
-        kw["creationflags"] = subprocess.CREATE_NO_WINDOW
-    proc = subprocess.Popen(argv, **kw)
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, encoding="utf-8", errors="replace", bufsize=1,
+                            env=CHILD_ENV, creationflags=NOWIN)
     with lane.lock:
         lane.proc = proc
-    for line in proc.stdout:
-        line = line.rstrip("\n")
-        push_log(jid, line, "proc")
-        f = parse_progress(line)
-        if f:
-            if "progress" in f:
-                f["progress"] = round((phase_idx + f["progress"]) / n_phases, 3)
-            set_job(jid, **f)
-    proc.wait()
+    last = {"t": time.time()}
+    stop = threading.Event()
+
+    def watchdog():
+        while not stop.wait(15):
+            if lane.paused:
+                last["t"] = time.time()
+                continue
+            if time.time() - last["t"] > STALL_SECS:
+                push_log(jid, "watchdog: no output for %ss — killing stalled job" % STALL_SECS, "error")
+                lane.do_cancel()
+                return
+    threading.Thread(target=watchdog, daemon=True).start()
+
+    try:
+        for line in proc.stdout:
+            last["t"] = time.time()
+            line = line.rstrip("\n")
+            push_log(jid, line, "proc")
+            f = parse_progress(line)
+            if f:
+                set_job(jid, **f)
+        proc.wait()
+    finally:
+        stop.set()
     with lane.lock:
         cancelled = lane.cancel
     return proc.returncode, cancelled
 
 
+def _safe_model(o):
+    """Only honor a client-supplied upscale_model if it lives under models_dir
+    (defense against pickle-RCE via torch.load of an arbitrary path)."""
+    m = o.get("upscale_model") or ""
+    if m:
+        try:
+            real = os.path.realpath(to_local(m, longpath=False) or m)
+            root = os.path.realpath(CFG["models_dir"])
+            if os.path.commonpath([real, root]) == root and os.path.isfile(real):
+                return real
+        except Exception:  # noqa: BLE001
+            pass
+        push_log(o.get("_jid", ""), "ignoring out-of-tree upscale_model", "warn")
+    return CFG["upscale_model"]
+
+
 def run_job(lane, job):
     jid = job["id"]
     o = job["_opts"]
+    o["_jid"] = jid
     op = o.get("op") or "upscale"
-    out_dir_c = o["output_dir"]
-    out_dir = to_local(out_dir_c)
-    os.makedirs(out_dir, exist_ok=True)
+    out_dir = to_local(o["output_dir"])
     src = to_local(o["input"])
+    if not out_dir or not src:
+        raise RuntimeError("input/output_dir not within a configured path prefix")
+    os.makedirs(out_dir, exist_ok=True)
 
     set_job(jid, state="running", message="Starting " + op, started_at=time.time(), stage=op)
 
-    # optional: copy the SMB source local first to avoid per-frame network stalls
     tmp_copy = None
     if CFG["copy_local"] and op in ("upscale", "decensor", "decensor+upscale"):
         os.makedirs(CFG["local_temp"], exist_ok=True)
@@ -443,14 +518,12 @@ def run_job(lane, job):
         shutil.copyfile(src, tmp_copy)
         src = tmp_copy
 
-    # start the live-frame preview extractor (shared helper)
     stop_preview = threading.Event()
-    threading.Thread(target=preview_loop, args=(jid, out_dir, src, stop_preview),
-                     daemon=True).start()
+    threading.Thread(target=preview_loop, args=(jid, out_dir, src, stop_preview), daemon=True).start()
 
     try:
         if op == "transcode":
-            enc = o.get("encoder") or probe_encoder(CFG["transcode_encoder"])
+            enc = o.get("encoder") or resolve_lane_encoder("transcode")
             argv = [CFG["venv_python"], os.path.join(HERE, "transcode_cli.py"),
                     "--input", src, "--output-dir", out_dir,
                     "--ffmpeg", FFMPEG, "--ffprobe", FFPROBE, "--encoder", enc]
@@ -459,11 +532,11 @@ def run_job(lane, job):
                     argv += ["--" + k, str(o[k])]
             rc, cancelled = _stream_subprocess(lane, jid, argv)
         elif op == "upscale":
-            enc = o.get("encoder") or probe_encoder(CFG["ai_encoder"])
+            enc = o.get("encoder") or resolve_lane_encoder("ai")
             argv = [CFG["venv_python"], os.path.join(HERE, "upscale_cli.py"),
                     "--input", src, "--output-dir", out_dir,
                     "--ffmpeg", FFMPEG, "--encoder", enc,
-                    "--model", o.get("upscale_model") or CFG["upscale_model"],
+                    "--model", _safe_model(o),
                     "--device", "cuda:%d" % CFG["ai_gpu_index"]]
             if CFG["ai_fp16"] and not o.get("no_fp16"):
                 argv.append("--fp16")
@@ -497,7 +570,7 @@ def run_job(lane, job):
 
 
 # --------------------------------------------------------------------------- #
-# live before/after preview (same approach as lada_runner)
+# live before/after preview
 # --------------------------------------------------------------------------- #
 
 def _src_fps(path):
@@ -505,8 +578,8 @@ def _src_fps(path):
         r = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "v:0",
                             "-show_entries", "stream=r_frame_rate", "-of",
                             "default=nw=1:nk=1", path],
-                           capture_output=True, text=True, timeout=20,
-                           creationflags=(subprocess.CREATE_NO_WINDOW if IS_WIN else 0))
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=20, creationflags=NOWIN)
         num, _, den = r.stdout.strip().partition("/")
         return float(num) / float(den or 1)
     except Exception:  # noqa: BLE001
@@ -519,8 +592,8 @@ def _grab(src, t, dest):
         r = subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-ss", str(max(0.0, t)),
                             "-i", src, "-frames:v", "1", "-vf", "scale=480:-2",
                             "-q:v", "4", "-f", "image2", tmp],
-                           capture_output=True, text=True, timeout=25,
-                           creationflags=(subprocess.CREATE_NO_WINDOW if IS_WIN else 0))
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=25, creationflags=NOWIN)
         if r.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
             os.replace(tmp, dest)
             return True
@@ -542,8 +615,6 @@ def preview_loop(jid, out_dir, input_path, stop_evt):
     fps = _src_fps(input_path)
     if not fps:
         return
-    announced = False
-    misses = 0
     while not stop_evt.wait(2.0):
         try:
             with _jobs_lock:
@@ -555,16 +626,8 @@ def preview_loop(jid, out_dir, input_path, stop_evt):
             if t < 1.0:
                 continue
             part = _newest_video(out_dir)
-            if not part:
-                continue
-            if _grab(part, t, os.path.join(pdir, "after.jpg")):
-                misses = 0
+            if part and _grab(part, t, os.path.join(pdir, "after.jpg")):
                 _grab(input_path, t, os.path.join(pdir, "before.jpg"))
-                if not announced:
-                    announced = True
-                    push_log(jid, "preview: live frames available", "event")
-            else:
-                misses += 1
         except Exception:  # noqa: BLE001
             pass
 
@@ -574,7 +637,10 @@ def preview_path(jid, which):
         j = _jobs.get(jid)
     if not j:
         return None
-    p = os.path.join(to_local(j["_opts"]["output_dir"]), ".preview", which + ".jpg")
+    od = to_local(j["_opts"]["output_dir"])
+    if not od:
+        return None
+    p = os.path.join(od, ".preview", which + ".jpg")
     return p if os.path.isfile(p) else None
 
 
@@ -588,7 +654,7 @@ _gpu_lock = threading.Lock()
 
 def _numf(s):
     try:
-        return float(s)
+        return float(str(s).replace(",", "."))       # locale-tolerant
     except (ValueError, TypeError):
         return None
 
@@ -598,8 +664,8 @@ def read_nvidia():
         q = "utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw"
         out = subprocess.run(["nvidia-smi", "-i", str(CFG["ai_gpu_index"]),
                               "--query-gpu=" + q, "--format=csv,noheader,nounits"],
-                             capture_output=True, text=True, timeout=5,
-                             creationflags=(subprocess.CREATE_NO_WINDOW if IS_WIN else 0))
+                             capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=5, creationflags=NOWIN)
         v = [x.strip() for x in out.stdout.strip().splitlines()[0].split(",")]
         if len(v) >= 5:
             return {"name": "RTX (AI)", "util": _numf(v[0]), "mem_used": _numf(v[1]),
@@ -610,16 +676,20 @@ def read_nvidia():
 
 
 def read_igpu():
-    """Intel iGPU utilization from Windows perf counters (Video engines, summed)."""
     if not IS_WIN:
         return {}
     try:
         out = subprocess.run(
-            ["typeperf", r"\GPU Engine(*engtype_Video*)\Utilization Percentage", "-sc", "1"],
-            capture_output=True, text=True, timeout=8, creationflags=subprocess.CREATE_NO_WINDOW)
-        lines = [l for l in out.stdout.splitlines() if l.startswith('"')]
-        if len(lines) >= 2:
-            vals = [float(x.strip('"')) for x in lines[-1].split(",")[1:] if x.strip('"').replace(".", "", 1).replace("-", "", 1).isdigit()]
+            ["typeperf", r"\GPU Engine(*engtype_Video*)\Utilization Percentage", "-sc", "2"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10, creationflags=NOWIN)
+        rows = [l for l in out.stdout.splitlines() if l.startswith('"')]
+        if len(rows) >= 2:
+            vals = []
+            for x in rows[-1].split(",")[1:]:
+                n = _numf(x.strip().strip('"'))
+                if n is not None:
+                    vals.append(n)
             if vals:
                 return {"name": "iGPU (QSV)", "util": round(min(100.0, sum(vals)), 1)}
     except Exception:  # noqa: BLE001
@@ -628,12 +698,13 @@ def read_igpu():
 
 
 def gpu_poller():
+    tick = 0
     while True:
-        nv = read_nvidia()
-        ig = read_igpu()
         with _gpu_lock:
-            _gpu["nvidia"] = nv
-            _gpu["igpu"] = ig
+            _gpu["nvidia"] = read_nvidia()
+            if tick % 2 == 0:                         # iGPU counter is costly — poll half as often
+                _gpu["igpu"] = read_igpu()
+        tick += 1
         time.sleep(3)
 
 
@@ -641,10 +712,6 @@ def gpu_snapshot():
     with _gpu_lock:
         return {"nvidia": dict(_gpu["nvidia"]), "igpu": dict(_gpu["igpu"])}
 
-
-# --------------------------------------------------------------------------- #
-# node-level pause (drain): stop pulling new jobs
-# --------------------------------------------------------------------------- #
 
 _node = {"paused": False}
 
@@ -674,52 +741,56 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(payload).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
     def _authed(self):
-        return not TOKEN or self.headers.get("X-Lada-Token", "") == TOKEN
+        if not TOKEN:
+            return False   # no token configured -> deny (server also binds localhost)
+        return hmac.compare_digest(self.headers.get("X-Lada-Token", ""), TOKEN)
 
     def _body(self):
         n = int(self.headers.get("Content-Length", "0") or 0)
-        if n <= 0:
+        if n <= 0 or n > MAX_BODY:
             return {}
         try:
             return json.loads(self.rfile.read(n) or b"{}")
         except (ValueError, TypeError):
             return {}
 
-    def _send_file(self, path, ctype):
+    def _send_file(self, path, ctype, inject_token=False):
         try:
             with open(path, "rb") as fh:
                 body = fh.read()
         except OSError:
             return self._send(404, {"error": "not found"})
+        if inject_token:
+            body = body.replace(b"__RUNNER_TOKEN__", TOKEN.encode())
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    # ---- GET ----
     def do_GET(self):
         raw = self.path.split("?", 1)[0].rstrip("/")
         if raw in ("", "/"):
-            return self._send_file(os.path.join(HERE, "webui", "index.html"), "text/html")
+            return self._send_file(os.path.join(HERE, "webui", "index.html"),
+                                   "text/html", inject_token=True)
+        if not self._authed():
+            return self._send(401, {"error": "bad token"})
         if raw == "/health":
             return self._send(200, {
                 "ok": True, "node": CFG["node_name"], "kind": "windows",
-                "ops": enabled_ops(), "encoders": {"ai": probe_encoder(CFG["ai_encoder"]),
-                                                   "transcode": probe_encoder(CFG["transcode_encoder"])},
+                "ops": enabled_ops(),
+                "encoders": {"ai": resolve_lane_encoder("ai"),
+                             "transcode": resolve_lane_encoder("transcode")},
                 "lanes": {n: {"busy": l.busy(), "paused": l.paused, "gpu": l.gpu_label,
                               "job": l.running_id} for n, l in LANES.items()},
                 "paused": _node["paused"], "busy": any(l.busy() for l in LANES.values())})
         if raw == "/gpu":
-            # coordinator-compatible: the AI GPU in the flat shape
             with _gpu_lock:
                 return self._send(200, dict(_gpu["nvidia"]))
         if raw == "/stats":
@@ -731,8 +802,6 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             p = preview_path(m.group(1), m.group(2))
             return self._send_file(p, "image/jpeg") if p else self._send(404, {"error": "no preview"})
-        if not self._authed():
-            return self._send(401, {"error": "bad token"})
         if raw == "/jobs":
             with _jobs_lock:
                 return self._send(200, [public(j) for j in _jobs.values()])
@@ -749,7 +818,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, public(j)) if j else self._send(404, {"error": "no such job"})
         return self._send(404, {"error": "not found"})
 
-    # ---- POST ----
     def do_POST(self):
         raw = self.path.split("?", 1)[0].rstrip("/")
         if not self._authed():
@@ -761,6 +829,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "op '%s' not supported on this node" % op})
             if not b.get("input") or not b.get("output_dir"):
                 return self._send(400, {"error": "input and output_dir required"})
+            if to_local(b["input"]) is None or to_local(b["output_dir"]) is None:
+                return self._send(400, {"error": "input/output_dir must be within a configured path prefix"})
             if _node["paused"]:
                 return self._send(409, {"error": "node is paused/draining"})
             jid = uuid.uuid4().hex[:12]
@@ -770,6 +840,7 @@ class Handler(BaseHTTPRequestHandler):
                    "output_path": None, "error": None, "started_at": None, "_opts": b}
             with _jobs_lock:
                 _jobs[jid] = job
+                _evict_jobs()
             LANES[lane_for(op)].submit(jid)
             return self._send(202, public(job))
         m = re.match(r"^/jobs/([0-9a-f]+)/(cancel|pause|resume)$", raw)
@@ -784,7 +855,7 @@ class Handler(BaseHTTPRequestHandler):
             if action == "cancel":
                 if running:
                     lane.do_cancel()
-                elif j["state"] == "queued":
+                else:
                     set_job(jid, state="cancelled", message="Cancelled", _ended_at=time.time())
                 return self._send(202, {"ok": True})
             if not running:
@@ -801,20 +872,38 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
 
 
+def _shutdown():
+    for lane in LANES.values():
+        if lane.busy():
+            lane.do_cancel()
+
+
 def main():
     global LANES
     if psutil is None:
-        log.warning("psutil not installed — pause/resume + clean cancel unavailable")
+        log.error("psutil not installed — cancel can't kill child trees and pause/resume no-op. "
+                  "Install it in the venv.")
     LANES = {}
     if CFG["lanes"].get("ai"):
-        LANES["ai"] = Lane("ai", "nvidia", ["upscale"])
+        LANES["ai"] = Lane("ai", "nvidia")
     if CFG["lanes"].get("transcode"):
-        LANES["transcode"] = Lane("transcode", "igpu", ["transcode"])
+        LANES["transcode"] = Lane("transcode", "igpu")
+    atexit.register(_shutdown)
+    # warm encoder probes at startup so /health never blocks on ffmpeg
+    for lane in ("ai", "transcode"):
+        if CFG["lanes"].get(lane):
+            resolve_lane_encoder(lane)
     threading.Thread(target=gpu_poller, daemon=True).start()
-    httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    log.info("stashify-winrunner '%s' on :%s | ops=%s | ffmpeg=%s | token %s",
-             CFG["node_name"], PORT, enabled_ops(), FFMPEG, "on" if TOKEN else "off")
-    httpd.serve_forever()
+    bind = "0.0.0.0" if TOKEN else "127.0.0.1"
+    if not TOKEN:
+        log.warning("no token set — binding 127.0.0.1 only and DENYING API calls. Set a token to accept remote jobs.")
+    httpd = ThreadingHTTPServer((bind, PORT), Handler)
+    log.info("stashify-winrunner '%s' on %s:%s | ops=%s | ffmpeg=%s",
+             CFG["node_name"], bind, PORT, enabled_ops(), FFMPEG)
+    try:
+        httpd.serve_forever()
+    finally:
+        _shutdown()
 
 
 if __name__ == "__main__":

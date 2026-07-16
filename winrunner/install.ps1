@@ -82,8 +82,10 @@ $cfg = [ordered]@{
 }
 if ($existing -and $existing.path_map) { $cfg.path_map = $existing.path_map }  # preserve user edits
 $cfg | ConvertTo-Json -Depth 6 | Set-Content $cfgPath -Encoding utf8
-icacls $cfgPath /inheritance:r /grant:r "$($env:USERNAME):(R,W)" "Administrators:(F)" | Out-Null
-Write-Host "config -> $cfgPath (token-locked)"
+Write-Host "config -> $cfgPath"
+
+# long paths (>260 chars) for UNC media
+try { New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force | Out-Null } catch {}
 
 # --- 4. WinSW service (runs as YOU, for SMB access) ---
 $winsw = "$Root\$SvcId.exe"
@@ -119,14 +121,23 @@ $xml = @"
 "@
 $xmlPath = "$Root\$SvcId.xml"
 $xml | Set-Content $xmlPath -Encoding utf8
-icacls $xmlPath /inheritance:r /grant:r "$($env:USERNAME):(R)" "Administrators:(F)" "SYSTEM:(F)" | Out-Null
 
 & $winsw stop  2>$null | Out-Null
 & $winsw uninstall 2>$null | Out-Null
 Start-Sleep 1
-& $winsw install
+& $winsw install    # WinSW hands the credential to the SCM here
 & $winsw start
 Write-Host "service '$SvcId' installed + started" -ForegroundColor Green
+
+# The SCM now holds the logon credential — strip the cleartext password from the
+# on-disk XML so it isn't persisted, and ACL config + xml to the service account.
+$xml = $xml -replace '<password>.*?</password>', '<password><!-- stored in SCM --></password>'
+$xml | Set-Content $xmlPath -Encoding utf8
+$svcUser = $cred.UserName
+foreach ($f in @($cfgPath, $xmlPath)) {
+  icacls $f /inheritance:r /grant:r "$svcUser:(R)" "$($env:USERNAME):(R,W)" "Administrators:(F)" "SYSTEM:(F)" | Out-Null
+}
+Write-Host "secrets ACL-locked to $svcUser + admins"
 
 # --- 5. firewall (LAN only) so the coordinator can reach the runner ---
 if (-not (Get-NetFirewallRule -DisplayName "Stashify Runner" -ErrorAction SilentlyContinue)) {
@@ -143,8 +154,7 @@ $sc = $ws.CreateShortcut($lnk)
 $sc.TargetPath = "$Root\.venv\Scripts\pythonw.exe"
 $sc.Arguments = "`"$Root\app\tray.py`""
 $sc.WorkingDirectory = "$Root\app"
-$sc.IconLocation = "$Root\app\tray-icon.png"
-$sc.Save()
+$sc.Save()   # (no custom IconLocation: .png isn't a valid shortcut icon; the tray itself shows the Stashify glyph)
 Start-Process "$Root\.venv\Scripts\pythonw.exe" -ArgumentList "`"$Root\app\tray.py`""
 Write-Host "tray installed to Startup + launched"
 

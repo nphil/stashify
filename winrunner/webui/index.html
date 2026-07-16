@@ -67,7 +67,10 @@
   <div class="empty" id="empty">No jobs. This node accepts work dispatched by the Stashify coordinator.</div>
 </main>
 <script>
-var TOKEN = "";  // read-only stats are open; controls need the token (prompted once)
+// the runner injects its token into this page (same-origin dashboard); if opened
+// from elsewhere the placeholder stays and we prompt.
+var TOKEN = "__RUNNER_TOKEN__";
+if (TOKEN === "__RUNNER_" + "TOKEN__") { TOKEN = ""; }
 function h(id){return document.getElementById(id)}
 async function j(path,opts){opts=opts||{};opts.headers=Object.assign({"X-Lada-Token":TOKEN},opts.headers||{});
   var r=await fetch(path,opts);return r.json()}
@@ -121,7 +124,7 @@ async function tick(){
     box.appendChild(d);
   });
 }
-function needToken(){if(!TOKEN){TOKEN=prompt("Runner token (X-Lada-Token) for controls:")||""}}
+function needToken(){if(!TOKEN){TOKEN=prompt("Runner token (X-Lada-Token):")||""}}
 async function ctl(id,action){needToken();try{await j("/jobs/"+id+"/"+action,{method:"POST"})}catch(e){}tick()}
 h("nodebtn").onclick=async function(){needToken();var he=await j("/health");
   await j("/node/"+(he.paused?"resume":"pause"),{method:"POST"});tick()};

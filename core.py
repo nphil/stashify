@@ -370,7 +370,9 @@ def resolve_runner(cfg, op):
             continue
         if op not in (h.get("ops") or []) or h.get("paused"):
             continue
-        score = (2 if op in (c.get("prefer") or []) else 0) + (0 if h.get("busy") else 1)
+        # idle dominates preference: an idle node always outranks a busy one, and
+        # 'prefer' only breaks ties among equally-idle/equally-busy nodes.
+        score = (2 if not h.get("busy") else 0) + (1 if op in (c.get("prefer") or []) else 0)
         scored.append((score, {"url": url, "token": c.get("token", ""),
                                "name": c.get("name", "runner")}))
     if not scored:

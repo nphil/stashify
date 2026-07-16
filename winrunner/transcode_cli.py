@@ -35,7 +35,8 @@ def probe(ffprobe, path):
         r = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0",
                             "-show_entries", "stream=r_frame_rate,nb_frames,duration",
                             "-of", "default=nw=1", path],
-                           capture_output=True, text=True, timeout=30, creationflags=NOWIN)
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=30, creationflags=NOWIN)
         d = {}
         for line in r.stdout.splitlines():
             k, _, v = line.partition("=")
@@ -99,7 +100,8 @@ def main():
     log("$ " + subprocess.list2cmdline(cmd))
     t0 = time.time()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, bufsize=1, creationflags=NOWIN)
+                            text=True, encoding="utf-8", errors="replace", bufsize=1,
+                            creationflags=NOWIN)
     frame = 0
     speed = 0.0
     cur_fps = 0.0
