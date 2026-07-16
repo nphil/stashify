@@ -384,15 +384,37 @@
     c._refs.stats = el("div", "stats");
     c.appendChild(c._refs.stats);
     if (j.state === "running") {
-      // live video feed (lada only): tail-follow of the file being written.
-      // Kept hidden until it actually has decodable data (no dead 0:00 shell).
-      var lv = el("video", "livevid");
-      lv.muted = true; lv.autoplay = true; lv.controls = true; lv.playsInline = true;
-      lv.hidden = true;
-      lv.addEventListener("loadeddata", function () { lv.hidden = false; });
-      c._refs.live = lv;
-      c.appendChild(lv);
-      // live before/after frame preview (appears once the first frames land)
+      // Live compare (lada): the decensored feed (tail of the file being
+      // written) next to the CENSORED ORIGINAL, seek-locked to its playhead.
+      var duo = el("div", "duo");
+      duo.hidden = true;
+      var mkv = function (label, live) {
+        var f = el("figure");
+        var v = el("video");
+        v.muted = true; v.playsInline = true;
+        if (live) { v.autoplay = true; v.controls = true; }
+        else { v.preload = "auto"; }
+        f.appendChild(v);
+        var cap = el("figcaption", live ? "lbl-live" : null, label);
+        cap.onclick = function () { duo.classList.toggle("stacked"); };
+        cap.title = "toggle large view";
+        f.appendChild(cap);
+        duo.appendChild(f);
+        return v;
+      };
+      var cens = mkv("Censored (original)", false);
+      var lv = mkv("Decensored · live", true);
+      lv.addEventListener("loadeddata", function () { duo.hidden = false; });
+      // keep the original's frame locked to the live playhead
+      cens.addEventListener("loadedmetadata", function () { cens.pause(); });
+      lv.addEventListener("timeupdate", function () {
+        if (cens.readyState >= 1 && Math.abs(cens.currentTime - lv.currentTime) > 0.5) {
+          cens.currentTime = lv.currentTime;
+        }
+      });
+      c._refs.live = lv; c._refs.cens = cens; c._refs.duo = duo;
+      c.appendChild(duo);
+      // still-frame before/after (DeepMosaics jobs; lada uses the duo above)
       var pv = el("div", "pv");
       pv.hidden = true;
       var mk = function (which, label) {
@@ -439,7 +461,8 @@
     r.bar.className = "bar" + (j.paused ? " is-paused" : "");
     r.fill.style.width = pct + "%";
     if (r.stats) fillStats(r.stats, j, pct);
-    if (r.pv && j.preview) {
+    if (r.pv && j.preview && j.backend !== "lada") {
+      // still-frame pair (DeepMosaics): lada gets the synced video duo instead
       var now = Date.now();
       if (now - r.pv._last > 2000) {          // refresh pace ~ the extractor's
         r.pv._last = now;
@@ -454,8 +477,9 @@
     }
     if (r.live && j.backend === "lada" && j.preview && !r.live.src) {
       // attach once, after the first fragments exist (preview implies output);
-      // the 'loadeddata' listener unhides it when frames are actually decodable
+      // 'loadeddata' on the live feed unhides the whole duo
       r.live.src = workerUrl("jobs/" + j.id + "/live.mp4");
+      if (r.cens) r.cens.src = workerUrl("vid/" + j.scene_id);
       r.live.play && r.live.play().catch(function () {});
     }
     if (r.pause) {
