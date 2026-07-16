@@ -383,7 +383,32 @@
     c.appendChild(bar);
     c._refs.stats = el("div", "stats");
     c.appendChild(c._refs.stats);
-    if (j.state === "running") c.appendChild(logBox(j, true));
+    if (j.state === "running") {
+      // live video feed (lada only): tail-follow of the file being written
+      var lv = el("video", "livevid");
+      lv.muted = true; lv.autoplay = true; lv.controls = true; lv.playsInline = true;
+      lv.hidden = true;
+      c._refs.live = lv;
+      c.appendChild(lv);
+      // live before/after frame preview (appears once the first frames land)
+      var pv = el("div", "pv");
+      pv.hidden = true;
+      var mk = function (which, label) {
+        var f = el("figure");
+        var img = el("img");
+        img.alt = label;
+        f.appendChild(img);
+        f.appendChild(el("figcaption", null, label));
+        pv.appendChild(f);
+        return img;
+      };
+      c._refs.pvBefore = mk("before", "Censored");
+      c._refs.pvAfter = mk("after", "Decensored");
+      c._refs.pv = pv;
+      pv._last = 0;
+      c.appendChild(pv);
+      c.appendChild(logBox(j, true));
+    }
     var ctl = el("div", "row");
     if (j.state === "running") {
       var pr = el("button", "btn", "Pause");
@@ -412,6 +437,21 @@
     r.bar.className = "bar" + (j.paused ? " is-paused" : "");
     r.fill.style.width = pct + "%";
     if (r.stats) fillStats(r.stats, j, pct);
+    if (r.pv && j.preview) {
+      r.pv.hidden = false;
+      var now = Date.now();
+      if (now - r.pv._last > 3500) {          // refresh pace ~ the extractor's
+        r.pv._last = now;
+        r.pvBefore.src = workerUrl("jobs/" + j.id + "/preview/before.jpg") + "?t=" + now;
+        r.pvAfter.src = workerUrl("jobs/" + j.id + "/preview/after.jpg") + "?t=" + now;
+      }
+    }
+    if (r.live && j.backend === "lada" && j.preview && r.live.hidden) {
+      // attach once, after the first fragments exist (preview implies output)
+      r.live.hidden = false;
+      r.live.src = workerUrl("jobs/" + j.id + "/live.mp4");
+      r.live.play && r.live.play().catch(function () {});
+    }
     if (r.pause) {
       r.pause.textContent = j.paused ? "Resume" : "Pause";
       r.pause.dataset.act = j.paused ? "resume" : "pause";

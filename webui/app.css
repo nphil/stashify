@@ -166,6 +166,24 @@ select {
 .job .jt .livedot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex: none; animation: livepulse 1.4s ease-in-out infinite; }
 @keyframes livepulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
+/* ---- live video feed (in-progress decensor) ---- */
+.livevid {
+  width: 100%; display: block; margin-top: 8px; border-radius: 6px;
+  background: #000; border: 1px solid var(--line); max-height: 220px;
+}
+
+/* ---- live before/after preview ---- */
+.pv { display: flex; gap: 6px; margin-top: 8px; }
+.pv figure { flex: 1; margin: 0; min-width: 0; }
+.pv img {
+  width: 100%; display: block; border-radius: 6px; background: #000;
+  border: 1px solid var(--line); aspect-ratio: 16/9; object-fit: contain;
+}
+.pv figcaption {
+  text-align: center; font-size: 9px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.05em; margin-top: 3px;
+}
+
 /* ---- live log terminal ---- */
 .logwrap { margin-top: 8px; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; background: #0e1013; }
 .loghead {

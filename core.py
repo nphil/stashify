@@ -206,6 +206,25 @@ def _fire_remote(name):
         return False
 
 
+# Live-preview registration: the running backend advertises where its
+# work-in-progress frames can be tapped (server.py's preview poller extracts
+# before/after JPEGs from it). Single running job -> a simple module global.
+_live_preview = {}
+
+
+def set_live_preview(**info):
+    _live_preview.clear()
+    _live_preview.update(info)
+
+
+def clear_live_preview():
+    _live_preview.clear()
+
+
+def get_live_preview():
+    return dict(_live_preview)
+
+
 def reset_cancel():
     with _active_lock:
         _active["cancel"] = False
@@ -335,6 +354,7 @@ def backend_deepmosaics(cfg, input_path, result_dir, on_line=None, log_cb=None):
             "set MOSAIC_POSITION_MODEL_PATH or drop mosaic_position.pth into /models."
         )
     temp_dir = tempfile.mkdtemp(prefix="dm_tmp_")
+    set_live_preview(type="deepmosaics", temp_dir=temp_dir, input=input_path)
     try:
         run_cmd(
             [
@@ -352,6 +372,7 @@ def backend_deepmosaics(cfg, input_path, result_dir, on_line=None, log_cb=None):
             cwd=dm_dir, tag="deepmosaics", on_line=on_line, log_cb=log_cb,
         )
     finally:
+        clear_live_preview()
         shutil.rmtree(temp_dir, ignore_errors=True)
     return newest_video(result_dir)
 
@@ -450,6 +471,11 @@ def backend_lada(cfg, input_path, result_dir, on_line=None, log_cb=None):
     set_remote_controls(cancel=lambda: _post("cancel"),
                         pause=lambda: _post("pause"),
                         resume=lambda: _post("resume"))
+    # The runner writes a fragmented mp4 (--mp4-fast-start): the worker can
+    # tail-follow the growing file for the live video feed, and the runner
+    # extracts before/after compare frames (rid/base let the worker fetch them).
+    set_live_preview(type="lada", out_dir=sub, input=input_path,
+                     rid=rid, base=base, token=token)
     cursor = 0
     try:
         while True:
@@ -504,6 +530,7 @@ def backend_lada(cfg, input_path, result_dir, on_line=None, log_cb=None):
         return dest
     finally:
         clear_remote_controls()
+        clear_live_preview()
         shutil.rmtree(sub, ignore_errors=True)
 
 

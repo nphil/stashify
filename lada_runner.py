@@ -154,15 +154,102 @@ def _stage_of(line):
     return None
 
 
+# --------------------------------------------------------------------------- #
+# live before/after frame extraction
+#
+# The output is a growing fragmented mp4, whose container duration reads 0
+# mid-write — so we derive the encode position from our own parsed progress
+# (frames done / source fps) and extract with the bundled ffmpeg 7.x. JPEGs
+# land in <out_dir>/.preview/ and are served at /jobs/<id>/preview/*.jpg.
+# --------------------------------------------------------------------------- #
+
+def _src_fps(path):
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                            "-show_entries", "stream=r_frame_rate",
+                            "-of", "default=nw=1:nk=1", path],
+                           capture_output=True, text=True, timeout=15)
+        num, _, den = r.stdout.strip().partition("/")
+        return float(num) / float(den or 1)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _grab(src, t, dest):
+    """Extract one frame; returns (ok, error-string)."""
+    tmp = dest + ".tmp"
+    try:
+        r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
+                            "-ss", str(max(0.0, t)), "-i", src,
+                            "-frames:v", "1", "-vf", "scale=480:-2",
+                            "-q:v", "4", "-f", "image2", tmp],
+                           capture_output=True, text=True, timeout=25)
+        if r.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
+            os.replace(tmp, dest)
+            return True, ""
+        err = (r.stderr or "").strip()[-200:] or ("rc=%s empty output" % r.returncode)
+    except Exception as exc:  # noqa: BLE001
+        err = str(exc)
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    return False, err
+
+
+def _preview_loop(jid, out_dir, input_path, stop_evt):
+    pdir = os.path.join(out_dir, ".preview")
+    os.makedirs(pdir, exist_ok=True)
+    fps = _src_fps(input_path)
+    if not fps:
+        push_log(jid, "preview: could not read source fps; preview disabled", "warn")
+        return
+    announced = failed = False
+    while not stop_evt.wait(3.0):
+        try:
+            with _jobs_lock:
+                j = _jobs.get(jid)
+                frame = j.get("frame") if j else None
+            if not frame:
+                continue
+            t = frame / fps - 2.0        # trail the encoder by a safety margin
+            if t < 1.0:
+                continue
+            part = _newest_video(out_dir)
+            if not part:
+                continue
+            ok, err = _grab(part, t, os.path.join(pdir, "after.jpg"))
+            if ok:
+                _grab(input_path, t, os.path.join(pdir, "before.jpg"))
+                if not announced:
+                    announced = True
+                    push_log(jid, "preview: live frames available", "event")
+            elif not failed:
+                failed = True             # log the first failure once, not a flood
+                push_log(jid, "preview grab failed: " + err, "warn")
+        except Exception as exc:  # noqa: BLE001 - preview must never break the job
+            if not failed:
+                failed = True
+                push_log(jid, "preview loop error: " + str(exc), "warn")
+
+
+def preview_path(jid, which):
+    with _jobs_lock:
+        j = _jobs.get(jid)
+    if not j:
+        return None
+    p = os.path.join(j["_opts"]["output_dir"], ".preview", which + ".jpg")
+    return p if os.path.isfile(p) else None
+
+
 def run_job(job):
     jid = job["id"]
     o = job["_opts"]
     out_dir = o["output_dir"]
     os.makedirs(out_dir, exist_ok=True)
-    # Default to libx264: lada's own default is hevc_nvenc, but NVENC needs
-    # driver >= 610 (NVENC API 13.1) and 580 is the FINAL Pascal branch — the
-    # P40 can never satisfy it. Turing+ runners can override via job payload
-    # or LADA_DEFAULT_ENCODER.
+    # Encoder priority: per-job override > LADA_DEFAULT_ENCODER (set by the
+    # entrypoint's NVENC probe: hevc_nvenc when the GPU/driver can open it,
+    # libx264 otherwise) > libx264.
     encoder = o.get("encoder") or os.environ.get("LADA_DEFAULT_ENCODER", "libx264")
     argv = [
         LADA_CLI,
@@ -173,12 +260,18 @@ def run_job(job):
         "--mosaic-restoration-model", o.get("restoration_model") or "basicvsrpp-v1.2",
         "--mosaic-detection-model", o.get("detection_model") or "v4-fast",
         "--encoder", encoder,
+        "--mp4-fast-start",              # fragmented mp4: the growing file is decodable
+        "--temporary-directory", out_dir,  # keep the in-progress file on the shared mount
+                                           # (default /tmp would hide it from live preview/feed)
     ]
 
     set_job(jid, state="running", message="Starting lada-cli", started_at=time.time())
     push_log(jid, "$ " + " ".join(argv), "event")
     with _active_lock:
         _active["cancel"] = False
+    stop_preview = threading.Event()
+    threading.Thread(target=_preview_loop, args=(jid, out_dir, o["input"], stop_preview),
+                     daemon=True).start()
 
     env = os.environ.copy()
     env["LADA_MODEL_WEIGHTS_DIR"] = MODELS_DIR
@@ -238,6 +331,7 @@ def run_job(job):
                 set_job(jid, **fields)
         proc.wait()
     finally:
+        stop_preview.set()
         with _active_lock:
             proc_cancel = _active["cancel"]
             _active["proc"] = None
@@ -321,6 +415,22 @@ class Handler(BaseHTTPRequestHandler):
                 busy = _running_id is not None
             return self._send(200, {"ok": True, "device": os.environ.get("LADA_DEVICE", "cuda"),
                                     "models": models, "busy": busy})
+        m = re.match(r"^/jobs/([0-9a-f]+)/preview/(before|after)\.jpg$", raw)
+        if m:
+            p = preview_path(m.group(1), m.group(2))
+            if not p:
+                return self._send(404, {"error": "no preview yet"})
+            try:
+                with open(p, "rb") as fh:
+                    body = fh.read()
+            except OSError:
+                return self._send(404, {"error": "no preview yet"})
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return self.wfile.write(body)
         if not self._authed():
             return self._send(401, {"error": "bad token"})
         m = re.match(r"^/jobs/([0-9a-f]+)/log$", raw)

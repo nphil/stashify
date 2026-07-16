@@ -238,6 +238,131 @@ def gpu_poller():
         time.sleep(2)
 
 
+# --------------------------------------------------------------------------- #
+# live before/after frame preview
+#
+# While a job runs, the backend registers where its work-in-progress lives
+# (core.set_live_preview). Every few seconds this poller extracts the newest
+# decensored frame plus the matching original frame as small JPEGs, which the
+# dashboard shows side by side. Files land under PREVIEW_DIR/<job_id>/.
+# --------------------------------------------------------------------------- #
+
+PREVIEW_DIR = os.environ.get("PREVIEW_DIR", "/tmp/decensor_preview")
+_IMG_EXTS = (".jpg", ".jpeg", ".png")
+
+
+def _ff(args, timeout=20):
+    """Run ffmpeg/ffprobe quietly; True on success."""
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return r.returncode == 0, r.stdout.strip()
+    except Exception:  # noqa: BLE001
+        return False, ""
+
+
+def _jpeg(src_args, dest, scale="scale=480:-2"):
+    """Extract one frame -> dest (atomic via tmp+replace)."""
+    tmp = dest + ".tmp.jpg"
+    ok, _ = _ff(["ffmpeg", "-y", "-loglevel", "error"] + src_args +
+                ["-frames:v", "1", "-vf", scale, "-q:v", "4", tmp])
+    if ok and os.path.getsize(tmp) > 0:
+        os.replace(tmp, dest)
+        return True
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    return False
+
+
+def _preview_lada(info, dest_dir):
+    """The runner extracts the frames (its ffmpeg understands the growing
+    fragmented mp4 and it knows the true encode position); just mirror them."""
+    import requests
+
+    headers = {"X-Lada-Token": info.get("token", "")}
+    for which in ("after", "before"):
+        try:
+            r = requests.get("%s/jobs/%s/preview/%s.jpg" % (info["base"], info["rid"], which),
+                             headers=headers, timeout=10)
+        except Exception:  # noqa: BLE001
+            return
+        if r.status_code != 200 or not r.content:
+            return
+        tmp = os.path.join(dest_dir, which + ".tmp")
+        with open(tmp, "wb") as fh:
+            fh.write(r.content)
+        os.replace(tmp, os.path.join(dest_dir, which + ".jpg"))
+
+
+def _preview_deepmosaics(info, dest_dir):
+    """Newest processed frame image in the temp dir; the matching original is the
+    same-named file in a sibling subdir (DeepMosaics keeps both stages on disk)."""
+    temp = info["temp_dir"]
+    newest, newest_m = None, 0
+    for root, _dirs, files in os.walk(temp):
+        for f in files:
+            if f.lower().endswith(_IMG_EXTS):
+                p = os.path.join(root, f)
+                try:
+                    m = os.path.getmtime(p)
+                except OSError:
+                    continue
+                if m > newest_m:
+                    newest, newest_m = p, m
+    if not newest or time.time() - newest_m < 0.5:   # skip a file mid-write
+        return
+    if not _jpeg(["-i", newest], os.path.join(dest_dir, "after.jpg")):
+        return
+    base = os.path.basename(newest)
+    ndir = os.path.dirname(newest)
+    for root, _dirs, files in os.walk(temp):         # same name, different stage dir
+        if root != ndir and base in files:
+            _jpeg(["-i", os.path.join(root, base)], os.path.join(dest_dir, "before.jpg"))
+            return
+
+
+def preview_poller():
+    extractors = {"lada": _preview_lada, "deepmosaics": _preview_deepmosaics}
+    while True:
+        time.sleep(3)
+        with _jobs_lock:
+            jid = _running_job_id
+        if not jid:
+            continue
+        info = core.get_live_preview()
+        fn = extractors.get(info.get("type"))
+        if not fn:
+            continue
+        dest = os.path.join(PREVIEW_DIR, jid)
+        try:
+            os.makedirs(dest, exist_ok=True)
+            fn(info, dest)
+        except Exception:  # noqa: BLE001 - preview is best-effort, never fatal
+            pass
+
+
+def preview_file(job_id, which):
+    p = os.path.join(PREVIEW_DIR, job_id, which + ".jpg")
+    return p if os.path.isfile(p) else None
+
+
+def live_source(job_id):
+    """The growing output file for the running lada job, or None."""
+    with _jobs_lock:
+        if _running_job_id != job_id:
+            return None
+    info = core.get_live_preview()
+    if info.get("type") != "lada":
+        return None
+    try:
+        vids = [os.path.join(info["out_dir"], f) for f in os.listdir(info["out_dir"])
+                if os.path.splitext(f)[1].lower() in core.VIDEO_EXTS]
+    except OSError:
+        return None
+    return max(vids, key=os.path.getmtime) if vids else None
+
+
 def get_stash():
     """Lazily build (and cache) the StashInterface on the worker thread."""
     global _stash
@@ -280,6 +405,7 @@ def public(job):
     with _gpu_lock:
         out["gpu_stats"] = dict(_gpu)
     out["log_cursor"] = job_log_cursor(job.get("id"))
+    out["preview"] = preview_file(job.get("id"), "after") is not None
     return out
 
 
@@ -323,9 +449,10 @@ def job_config(job):
 
 def do_process(job):
     job_id = job["id"]
-    set_job(job_id, state="running", message="Starting", started_at=time.time(),
-            paused=False, stage=None, frame=None, total_frames=None, fps=None, eta=None)
     cfg = job_config(job)
+    set_job(job_id, state="running", message="Starting", started_at=time.time(),
+            paused=False, stage=None, frame=None, total_frames=None, fps=None, eta=None,
+            backend=cfg.get("backend"))
     stash = get_stash()
     info = core.process_to_review(stash, cfg, job["scene_id"],
                                   progress=progress_cb(job_id), log_cb=raw_log_sink(job_id))
@@ -531,6 +658,53 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/api/(img|vid)/(\d+)$", path)
         if m:
             return self.proxy_media(m.group(1), m.group(2))
+        # Live video feed: tail-follow the growing fragmented mp4 the lada
+        # runner is writing. The browser plays it like a live stream — no
+        # transcoding, a few seconds behind the encoder. Ends when the job does.
+        m = re.match(r"^/api/jobs/([0-9a-f]+)/live\.mp4$", path)
+        if m:
+            job_id = m.group(1)
+            part = live_source(job_id)
+            if not part:
+                return self._send(404, {"error": "no live stream for this job"})
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Cache-Control", "no-store")
+            self._cors()
+            self.end_headers()   # no Content-Length: stream until the job ends
+            try:
+                with open(part, "rb") as fh:
+                    while True:
+                        chunk = fh.read(65536)
+                        if chunk:
+                            self.wfile.write(chunk)
+                            continue
+                        with _jobs_lock:
+                            still = _running_job_id == job_id
+                        if not still:
+                            break            # job finished/cancelled -> end of stream
+                        time.sleep(0.5)      # at EOF but encoder still writing: tail
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            return
+        # Live before/after preview frames (also <img>-loaded, so unauth'd).
+        m = re.match(r"^/api/jobs/([0-9a-f]+)/preview/(before|after)\.jpg$", path)
+        if m:
+            p = preview_file(m.group(1), m.group(2))
+            if not p:
+                return self._send(404, {"error": "no preview yet"})
+            try:
+                with open(p, "rb") as fh:
+                    body = fh.read()
+            except OSError:
+                return self._send(404, {"error": "no preview yet"})
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Cache-Control", "no-store")
+            self._cors()
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return self.wfile.write(body)
         if not self._authed():
             return self._send(401, {"error": "bad token"})
         if path == "/api/scenes":
@@ -644,6 +818,7 @@ def main():
 
     threading.Thread(target=worker_loop, daemon=True).start()
     threading.Thread(target=gpu_poller, daemon=True).start()
+    threading.Thread(target=preview_poller, daemon=True).start()
     httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     logging.info(f"decensor server listening on :{PORT} (token {'on' if TOKEN else 'off'})")
     httpd.serve_forever()

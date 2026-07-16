@@ -14,17 +14,27 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy
 
-# opencv/torch runtime libs + build helpers lada's install needs
+# opencv/torch runtime libs + toolchain for the ffmpeg/PyAV source builds below
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git curl ca-certificates xz-utils gettext patch \
         libgl1 libglib2.0-0 libgomp1 \
+        build-essential pkg-config nasm libx264-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# static ffmpeg + ffprobe with NVENC & x264 (same source Lada's own image uses)
-RUN curl -fsSL https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz -o /tmp/ff.tar.xz \
-    && mkdir -p /tmp/ff && tar -xJf /tmp/ff.tar.xz -C /tmp/ff --strip-components=1 \
-    && cp /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/ \
-    && rm -rf /tmp/ff /tmp/ff.tar.xz
+# ffmpeg with NVENC that ACTUALLY works on the P40: driver 580 (the final
+# Pascal branch) tops out at NVENC API 13.0, but every current prebuilt ffmpeg
+# (BtbN master, Debian trixie, PyAV wheels) is compiled against 13.1 headers
+# and refuses with "minimum required driver 610". So build ffmpeg 7.1 against
+# the sdk/13.0 header branch — shared libs, so PyAV (Lada's export path) can
+# link against it too.
+RUN git clone --branch sdk/13.0 --depth 1 https://github.com/FFmpeg/nv-codec-headers.git /tmp/nvh \
+    && make -C /tmp/nvh install && rm -rf /tmp/nvh
+RUN curl -fsSL https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz | tar -xJ -C /tmp \
+    && cd /tmp/ffmpeg-7.1.1 \
+    && ./configure --prefix=/usr/local --enable-gpl --enable-libx264 \
+         --enable-nvenc --enable-nvdec --enable-shared --disable-static --disable-doc \
+    && make -j"$(nproc)" && make install && ldconfig \
+    && rm -rf /tmp/ffmpeg-7.1.1
 
 # uv (astral) for Lada's dependency resolution
 RUN pip install uv
@@ -34,6 +44,13 @@ WORKDIR /opt
 RUN git clone --depth 1 https://github.com/ladaapp/lada.git
 WORKDIR /opt/lada
 RUN uv sync --extra nvidia-legacy
+# Ship BOTH PyAV variants; the entrypoint probes NVENC at startup and installs
+# whichever works (latest-first, with the sdk/13.0-linked build as fallback):
+#   modern = stock binary wheel (bundled latest libav; NVENC needs driver >=610)
+#   legacy = source-built against our /usr/local ffmpeg (API 13.0; P40/driver 580)
+# A modern GPU keeps the latest ffmpeg stack; the P40 auto-falls-back.
+RUN pip download av==16.1.0 --only-binary=:all: --no-deps -d /opt/wheels/modern \
+    && pip wheel --no-binary av --no-deps av==16.1.0 -w /opt/wheels/legacy
 
 COPY lada_runner.py /opt/lada/lada_runner.py
 COPY lada_entrypoint.sh /usr/local/bin/lada_entrypoint.sh

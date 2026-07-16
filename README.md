@@ -170,8 +170,19 @@ P40/GTX 10xx: "no kernel image"). `Dockerfile.lada` builds Lada from source with
 its `nvidia-legacy` extra — torch 2.8.0 from the **cu126** index, which still
 ships `sm_61` kernels — and runs fp32 (`--no-fp16`). The compose `lada` service
 wraps it in a small HTTP runner (`lada_runner.py`) the worker dispatches to;
-model weights download on first start into `lada-models/` (~1.5 GB) and results
+model weights download on first start into `lada-models/` (~130 MB) and results
 hand off via the shared `/scratch` mount. One Lada job runs at a time.
+
+**NVENC, latest-first with automatic Pascal fallback.** Current ffmpeg/PyAV
+builds are compiled against NVENC API **13.1**, which requires driver ≥ 610 —
+and 580 is the *final* driver branch for Pascal, so stock builds can never
+NVENC-encode on a P40. The image therefore ships two PyAV builds: the stock
+wheel (latest bundled libav) and one linked against an ffmpeg built with the
+`sdk/13.0` headers (P40-compatible; newer drivers run it too). On every start
+the entrypoint *actually opens* an `hevc_nvenc` encoder to probe: latest works →
+keep latest; otherwise swap to the legacy build; neither → `libx264` on CPU.
+So the same image uses the newest ffmpeg on a modern card and still hardware-
+encodes on the P40. Override per job (`encoder`) or via `LADA_DEFAULT_ENCODER`.
 
 ---
 
