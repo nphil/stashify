@@ -11,14 +11,16 @@
 #   ... -SkipDownload               # parts already in $InstallDir\parts
 param(
     [string]$Version = "0.7.2",
-    [string]$InstallDir = "$env:LOCALAPPDATA\StashifyRunner\jasna",
+    [string]$Root = "$env:LOCALAPPDATA\StashifyRunner",
+    [string]$InstallDir = "",
     [switch]$SkipDownload
 )
 $ErrorActionPreference = "Stop"
+if (-not $InstallDir) { $InstallDir = Join-Path $Root "jasna" }
 $rel = "https://github.com/Kruk2/jasna/releases/download/v$Version"
 $parts = @("jasna-windows-v$Version.7z.001", "jasna-windows-v$Version.7z.002", "jasna-windows-v$Version.7z.003")
 $partsDir = Join-Path $InstallDir "parts"
-$cfgPath = "$env:LOCALAPPDATA\StashifyRunner\config.json"
+$cfgPath = Join-Path $Root "config.json"
 
 New-Item -ItemType Directory -Force $partsDir | Out-Null
 

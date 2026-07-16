@@ -1,0 +1,38 @@
+name: winrunner-release
+
+# Tag `winrunner-v*` to publish a Windows-runner release:
+#   - stashify-winrunner.zip        (the winrunner/ payload; stable asset name so
+#                                    the bootstrap can use /releases/latest/download/)
+#   - setup-stashify-runner.ps1     (single-file bootstrap users actually download)
+
+on:
+  push:
+    tags: ["winrunner-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build payload zip
+        run: |
+          cd winrunner
+          zip -r ../stashify-winrunner.zip . -x "config.json" -x "tmp/*" -x "logs/*"
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Windows Runner ${{ github.ref_name }}
+          body: |
+            **One-file install on a new machine:** download `setup-stashify-runner.ps1` and run:
+            ```powershell
+            powershell -ExecutionPolicy Bypass -File setup-stashify-runner.ps1
+            ```
+            Add `-WithJasna` to also install the Jasna decensor engine (~4.1 GB; NVIDIA compute >= 7.5, driver >= 580). Use `-JasnaDir "D:\big\drive"` to keep the models off C:.
+
+            The zip is the raw runner payload the bootstrap downloads; grab it only for offline/manual installs (unzip and run `install.ps1`).
+          files: |
+            stashify-winrunner.zip
+            winrunner/setup-stashify-runner.ps1
