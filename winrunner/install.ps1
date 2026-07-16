@@ -96,10 +96,10 @@ if (-not (Test-Path $winsw)) {
 }
 # Run the service as a WINDOWS account whose Credential Manager has the NAS creds.
 # This is almost always your own login. NOTE: this is NOT the NAS/SMB username
-# (e.g. 'smbuser') — that account doesn't exist on Windows.
+# (e.g. 'smbuser') - that account doesn't exist on Windows.
 $me = "$env:USERDOMAIN\$env:USERNAME"
 Write-Host "The service will run as your Windows account: $me" -ForegroundColor Cyan
-Write-Host "  (Enter your WINDOWS login password below — not your NAS/SMB password.)"
+Write-Host "  (Enter your WINDOWS login password below - not your NAS/SMB password.)"
 $pw = Read-Host "Windows password for $me" -AsSecureString
 $cred = New-Object System.Management.Automation.PSCredential($me, $pw)
 # validate it resolves to a real Windows principal (guards against typing the NAS user)
