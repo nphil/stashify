@@ -21,10 +21,12 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
-# One run per ref; new pushes to main cancel the in-progress build.
+# One run per ref. Do NOT cancel in-progress builds: the runner image takes
+# ~25 min cold, and killing it for a small follow-up commit leaves ghcr without
+# the image entirely (this bit us on the very first publish). New pushes queue.
 concurrency:
   group: docker-publish-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
