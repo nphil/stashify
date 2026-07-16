@@ -39,7 +39,7 @@ New-Item -ItemType Directory -Force $Root, "$Root\app", "$Root\models", "$Root\l
 # --- 1. code ---
 Copy-Item "$Src\*.py" "$Root\app\" -Force
 Copy-Item "$Src\webui" "$Root\app\" -Recurse -Force
-Copy-Item "$Src\tray-icon.png" "$Root\app\" -Force
+Copy-Item "$Src\tray-icon.png", "$Src\run-hidden.vbs" "$Root\app\" -Force
 Write-Host "code -> $Root\app"
 
 # --- 2. deps ---
@@ -93,8 +93,12 @@ try { New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem"
 $winsw = "$Root\$SvcId.exe"
 if (Test-Path $winsw) { & $winsw stop 2>$null | Out-Null; & $winsw uninstall 2>$null | Out-Null; Write-Host "removed old WinSW service" }
 
+# Launch via a VBS wrapper so there is NO console window (uv's venv pythonw.exe
+# trampolines to the console python.exe, which would flash/hold a terminal).
+$wscript = "$env:SystemRoot\System32\wscript.exe"
+$vbs = "$Root\app\run-hidden.vbs"
 $me = "$env:USERDOMAIN\$env:USERNAME"
-$action = New-ScheduledTaskAction -Execute $pyw -Argument "`"$Root\app\runner.py`""
+$action = New-ScheduledTaskAction -Execute $wscript -Argument "//nologo `"$vbs`" `"$py`" `"$Root\app\runner.py`""
 $action.WorkingDirectory = "$Root\app"
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $me
 $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Limited
@@ -118,11 +122,13 @@ if (-not (Get-NetFirewallRule -DisplayName "Stashify Runner" -ErrorAction Silent
   Write-Host "firewall: allowed TCP $Port (private networks)"
 }
 
-# --- 6. tray at login ---
+# --- 6. tray at login (also windowless, via the VBS wrapper) ---
 $lnk = "$([Environment]::GetFolderPath('Startup'))\Stashify Runner Tray.lnk"
 $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
-$sc.TargetPath = $pyw; $sc.Arguments = "`"$Root\app\tray.py`""; $sc.WorkingDirectory = "$Root\app"; $sc.Save()
-Start-Process $pyw -ArgumentList "`"$Root\app\tray.py`""
+$sc.TargetPath = $wscript
+$sc.Arguments = "//nologo `"$vbs`" `"$py`" `"$Root\app\tray.py`""
+$sc.WorkingDirectory = "$Root\app"; $sc.Save()
+Start-Process $wscript -ArgumentList "//nologo `"$vbs`" `"$py`" `"$Root\app\tray.py`""
 Write-Host "tray installed to Startup + launched"
 
 # --- 7. health ---
