@@ -205,7 +205,7 @@ def _preview_loop(jid, out_dir, input_path, stop_evt):
         push_log(jid, "preview: could not read source fps; preview disabled", "warn")
         return
     announced = failed = False
-    while not stop_evt.wait(3.0):
+    while not stop_evt.wait(2.0):
         try:
             with _jobs_lock:
                 j = _jobs.get(jid)

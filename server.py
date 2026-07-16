@@ -325,7 +325,7 @@ def _preview_deepmosaics(info, dest_dir):
 def preview_poller():
     extractors = {"lada": _preview_lada, "deepmosaics": _preview_deepmosaics}
     while True:
-        time.sleep(3)
+        time.sleep(2)
         with _jobs_lock:
             jid = _running_job_id
         if not jid:

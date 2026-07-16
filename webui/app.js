@@ -384,10 +384,12 @@
     c._refs.stats = el("div", "stats");
     c.appendChild(c._refs.stats);
     if (j.state === "running") {
-      // live video feed (lada only): tail-follow of the file being written
+      // live video feed (lada only): tail-follow of the file being written.
+      // Kept hidden until it actually has decodable data (no dead 0:00 shell).
       var lv = el("video", "livevid");
       lv.muted = true; lv.autoplay = true; lv.controls = true; lv.playsInline = true;
       lv.hidden = true;
+      lv.addEventListener("loadeddata", function () { lv.hidden = false; });
       c._refs.live = lv;
       c.appendChild(lv);
       // live before/after frame preview (appears once the first frames land)
@@ -438,17 +440,21 @@
     r.fill.style.width = pct + "%";
     if (r.stats) fillStats(r.stats, j, pct);
     if (r.pv && j.preview) {
-      r.pv.hidden = false;
       var now = Date.now();
-      if (now - r.pv._last > 3500) {          // refresh pace ~ the extractor's
+      if (now - r.pv._last > 2000) {          // refresh pace ~ the extractor's
         r.pv._last = now;
-        r.pvBefore.src = workerUrl("jobs/" + j.id + "/preview/before.jpg") + "?t=" + now;
-        r.pvAfter.src = workerUrl("jobs/" + j.id + "/preview/after.jpg") + "?t=" + now;
+        // preload off-DOM, swap only on success: no broken icons, no flicker
+        [[r.pvBefore, "before"], [r.pvAfter, "after"]].forEach(function (p) {
+          var url = workerUrl("jobs/" + j.id + "/preview/" + p[1] + ".jpg") + "?t=" + now;
+          var tmp = new Image();
+          tmp.onload = function () { p[0].src = url; r.pv.hidden = false; };
+          tmp.src = url;
+        });
       }
     }
-    if (r.live && j.backend === "lada" && j.preview && r.live.hidden) {
-      // attach once, after the first fragments exist (preview implies output)
-      r.live.hidden = false;
+    if (r.live && j.backend === "lada" && j.preview && !r.live.src) {
+      // attach once, after the first fragments exist (preview implies output);
+      // the 'loadeddata' listener unhides it when frames are actually decodable
       r.live.src = workerUrl("jobs/" + j.id + "/live.mp4");
       r.live.play && r.live.play().catch(function () {});
     }
