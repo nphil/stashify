@@ -2,29 +2,30 @@
   Stashify Windows Runner - installer.
 
   Sets up compute node #2 (this Windows box) for the Stashify coordinator:
-  provisions a Python venv (torch cu124 + SR/video deps), installs ffmpeg,
-  registers the runner as an auto-starting Windows SERVICE via WinSW, opens the
-  firewall, and wires the tray app to launch at login.
+  provisions a Python venv (torch cu124 + SR/video deps), installs ffmpeg, and
+  registers the runner to AUTO-START as a scheduled task running AS YOU.
 
-  WHY IT RUNS AS YOU (not LocalSystem): the runner reaches your NAS media over
-  SMB. A LocalSystem service authenticates as the *machine account*, which the
-  NAS denies - so the service must run under a user account whose Credential
-  Manager holds the NAS creds. This script defaults to the current user.
+  WHY A LOGON TASK (not a service): the runner reaches your NAS media over SMB.
+  A LocalSystem service authenticates as the *machine account*, which the NAS
+  denies; and WinSW's per-user service account is unreliable. A scheduled task
+  running as your own account uses your saved NAS credentials, needs no stored
+  password, and starts when you log in (fine for a desktop you use). To instead
+  run at boot before login you'd need a service with your password saved.
 
   Run in an ELEVATED PowerShell (Run as administrator):
       powershell -ExecutionPolicy Bypass -File install.ps1
-
-  Re-run any time to update code + restart the service.
+  Add -SkipDeps to update code/task only (skip the venv/torch/ffmpeg/model steps).
 #>
 param(
-  [string]$Root   = "$env:LOCALAPPDATA\StashifyRunner",
-  [int]   $Port   = 8712,
-  [string]$Token  = "",                    # blank -> read from an existing config.json
-  [switch]$SkipDeps                        # skip venv/torch/ffmpeg (code/service update only)
+  [string]$Root = "$env:LOCALAPPDATA\StashifyRunner",
+  [int]   $Port = 8712,
+  [string]$Token = "",
+  [switch]$SkipDeps
 )
 $ErrorActionPreference = "Stop"
 $SvcId = "stashify-runner"
-$Src   = Split-Path -Parent $MyInvocation.MyCommand.Path   # the winrunner/ folder
+$TaskName = "StashifyRunner"
+$Src   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)   # PS 5.1 Set-Content adds a BOM that breaks json.load
 function Write-Text($path, $text) { [System.IO.File]::WriteAllText($path, $text, $Utf8NoBom) }
 
@@ -41,7 +42,7 @@ Copy-Item "$Src\webui" "$Root\app\" -Recurse -Force
 Copy-Item "$Src\tray-icon.png" "$Root\app\" -Force
 Write-Host "code -> $Root\app"
 
-# --- 2. deps: venv + torch (cu124) + reqs; ffmpeg; SPAN model ---
+# --- 2. deps ---
 if (-not $SkipDeps) {
   if (-not (Get-Command uv -ErrorAction SilentlyContinue)) { throw "uv not found. Install: winget install astral-sh.uv" }
   if (-not (Test-Path "$Root\.venv")) { uv venv --python 3.12 "$Root\.venv" }
@@ -49,7 +50,6 @@ if (-not $SkipDeps) {
   Write-Host "installing torch (cu124) + deps (a few GB, one-time)..."
   uv pip install --python $py torch torchvision --index-url https://download.pytorch.org/whl/cu124
   uv pip install --python $py -r "$Src\requirements.txt"
-
   if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -and
       -not (Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Gyan.FFmpeg*" -ErrorAction SilentlyContinue)) {
     Write-Host "installing ffmpeg (Gyan full build)..."
@@ -61,11 +61,12 @@ if (-not $SkipDeps) {
     Invoke-WebRequest "https://raw.githubusercontent.com/jcj83429/upscaling/f73a3a02874360ec6ced18f8bdd8e43b5d7bba57/2xLiveActionV1_SPAN/2xLiveActionV1_SPAN_490000.pth" -OutFile $model
   }
 }
-$py     = "$Root\.venv\Scripts\python.exe"
+$py  = "$Root\.venv\Scripts\python.exe"
+$pyw = "$Root\.venv\Scripts\pythonw.exe"
 $ffmpeg = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
 if (-not $ffmpeg) { $ffmpeg = (Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Gyan.FFmpeg*\*\bin\ffmpeg.exe" | Select-Object -First 1).FullName }
 
-# --- 3. config.json (keep existing token unless one was passed) ---
+# --- 3. config.json (BOM-free; keep existing token unless one is passed) ---
 $cfgPath = "$Root\config.json"
 $existing = if (Test-Path $cfgPath) { Get-Content $cfgPath -Raw | ConvertFrom-Json } else { $null }
 if (-not $Token) { $Token = if ($existing) { $existing.token } else { (Read-Host "Runner token (match the coordinator's WORKER_TOKEN)") } }
@@ -82,96 +83,53 @@ $cfg = [ordered]@{
   upscale_model = "$Root\models\2xLiveActionV1_SPAN_490000.pth"
   ai_fp16 = $true; ai_gpu_index = 0; copy_local = $false; local_temp = "$Root\tmp"
 }
-if ($existing -and $existing.path_map) { $cfg.path_map = $existing.path_map }  # preserve user edits
+if ($existing -and $existing.path_map) { $cfg.path_map = $existing.path_map }
 Write-Text $cfgPath ($cfg | ConvertTo-Json -Depth 6)
+icacls $cfgPath /inheritance:r /grant:r "${env:USERNAME}:(R,W)" "Administrators:(F)" | Out-Null
 Write-Host "config -> $cfgPath"
-
-# long paths (>260 chars) for UNC media
 try { New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force | Out-Null } catch {}
 
-# --- 4. WinSW service (runs as YOU, for SMB access) ---
+# --- 4. remove any old WinSW service; register the logon task ---
 $winsw = "$Root\$SvcId.exe"
-if (-not (Test-Path $winsw)) {
-  Invoke-WebRequest "https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe" -OutFile $winsw
-}
-# Run the service as a WINDOWS account whose Credential Manager has the NAS creds.
-# This is almost always your own login. NOTE: this is NOT the NAS/SMB username
-# (e.g. 'smbuser') - that account doesn't exist on Windows.
+if (Test-Path $winsw) { & $winsw stop 2>$null | Out-Null; & $winsw uninstall 2>$null | Out-Null; Write-Host "removed old WinSW service" }
+
 $me = "$env:USERDOMAIN\$env:USERNAME"
-Write-Host "The service will run as your Windows account: $me" -ForegroundColor Cyan
-Write-Host "  (Enter your WINDOWS login password below - not your NAS/SMB password.)"
-$pw = Read-Host "Windows password for $me" -AsSecureString
-$cred = New-Object System.Management.Automation.PSCredential($me, $pw)
-# validate it resolves to a real Windows principal (guards against typing the NAS user)
-try { [void]([System.Security.Principal.NTAccount]$cred.UserName).Translate([System.Security.Principal.SecurityIdentifier]) }
-catch { throw "'$($cred.UserName)' is not a Windows account. Run install.ps1 again and use your Windows login ($me), not the NAS SMB user." }
-$xml = @"
-<service>
-  <id>$SvcId</id>
-  <name>Stashify Windows Runner</name>
-  <description>GPU compute node for Stashify (upscale on NVIDIA, transcode on iGPU).</description>
-  <executable>$py</executable>
-  <arguments>-u "$Root\app\runner.py"</arguments>
-  <workingdirectory>$Root\app</workingdirectory>
-  <env name="STASHIFY_RUNNER_CONFIG" value="$cfgPath" />
-  <env name="PYTHONUNBUFFERED" value="1" />
-  <startmode>Automatic</startmode>
-  <delayedAutoStart>true</delayedAutoStart>
-  <depend>LanmanWorkstation</depend>
-  <serviceaccount>
-    <username>$($cred.UserName)</username>
-    <password>$($cred.GetNetworkCredential().Password)</password>
-    <allowservicelogon>true</allowservicelogon>
-  </serviceaccount>
-  <onfailure action="restart" delay="10 sec" />
-  <onfailure action="restart" delay="30 sec" />
-  <resetfailure>1 hour</resetfailure>
-  <log mode="roll-by-size-time"><sizeThreshold>10240</sizeThreshold><pattern>yyyyMMdd</pattern></log>
-  <logpath>$Root\logs</logpath>
-  <stoptimeout>20 sec</stoptimeout>
-</service>
-"@
-$xmlPath = "$Root\$SvcId.xml"
-Write-Text $xmlPath $xml
+$action = New-ScheduledTaskAction -Execute $pyw -Argument "`"$Root\app\runner.py`""
+$action.WorkingDirectory = "$Root\app"
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $me
+$principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Limited
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+  -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) `
+  -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 
-& $winsw stop  2>$null | Out-Null
-& $winsw uninstall 2>$null | Out-Null
-Start-Sleep 1
-& $winsw install    # WinSW hands the credential to the SCM here
-& $winsw start
-Write-Host "service '$SvcId' installed + started" -ForegroundColor Green
+# (re)start now: stop any prior instance holding the port, then launch
+Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" |
+  Where-Object { $_.CommandLine -like "*StashifyRunner*runner.py*" } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Start-Sleep 2
+Start-ScheduledTask -TaskName $TaskName
+Write-Host "task '$TaskName' registered + started (runs as $env:USERNAME at logon)" -ForegroundColor Green
 
-# The SCM now holds the logon credential - strip the cleartext password from the
-# on-disk XML so it isn't persisted, and ACL config + xml to the service account.
-$xml = $xml -replace '<password>.*?</password>', '<password><!-- stored in SCM --></password>'
-Write-Text $xmlPath $xml
-$svcUser = $cred.UserName
-foreach ($f in @($cfgPath, $xmlPath)) {
-  icacls $f /inheritance:r /grant:r "${svcUser}:(R)" "${env:USERNAME}:(R,W)" "Administrators:(F)" "SYSTEM:(F)" | Out-Null
-}
-Write-Host "secrets ACL-locked to $svcUser + admins"
-
-# --- 5. firewall (LAN only) so the coordinator can reach the runner ---
+# --- 5. firewall (LAN) ---
 if (-not (Get-NetFirewallRule -DisplayName "Stashify Runner" -ErrorAction SilentlyContinue)) {
-  New-NetFirewallRule -DisplayName "Stashify Runner" -Direction Inbound -Action Allow `
-    -Protocol TCP -LocalPort $Port -Profile Private | Out-Null
+  New-NetFirewallRule -DisplayName "Stashify Runner" -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -Profile Private | Out-Null
   Write-Host "firewall: allowed TCP $Port (private networks)"
 }
 
 # --- 6. tray at login ---
-$startup = [Environment]::GetFolderPath("Startup")
-$lnk = "$startup\Stashify Runner Tray.lnk"
-$ws = New-Object -ComObject WScript.Shell
-$sc = $ws.CreateShortcut($lnk)
-$sc.TargetPath = "$Root\.venv\Scripts\pythonw.exe"
-$sc.Arguments = "`"$Root\app\tray.py`""
-$sc.WorkingDirectory = "$Root\app"
-$sc.Save()   # (no custom IconLocation: .png isn't a valid shortcut icon; the tray itself shows the Stashify glyph)
-Start-Process "$Root\.venv\Scripts\pythonw.exe" -ArgumentList "`"$Root\app\tray.py`""
+$lnk = "$([Environment]::GetFolderPath('Startup'))\Stashify Runner Tray.lnk"
+$sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+$sc.TargetPath = $pyw; $sc.Arguments = "`"$Root\app\tray.py`""; $sc.WorkingDirectory = "$Root\app"; $sc.Save()
+Start-Process $pyw -ArgumentList "`"$Root\app\tray.py`""
 Write-Host "tray installed to Startup + launched"
 
-Start-Sleep 4
-try { $h = Invoke-RestMethod "http://localhost:$Port/health" -TimeoutSec 8
-  Write-Host "`nHEALTHY: node=$($h.node) ops=$($h.ops -join '/') encoders(ai=$($h.encoders.ai), transcode=$($h.encoders.transcode))" -ForegroundColor Green
-  Write-Host "Dashboard: http://localhost:$Port/  (or http://$($env:COMPUTERNAME):$Port/ on your LAN)"
-} catch { Write-Warning "service started but /health not answering yet - check $Root\logs" }
+# --- 7. health ---
+Start-Sleep 5
+try {
+  $t = (Get-Content $cfgPath -Raw | ConvertFrom-Json).token
+  $h = Invoke-RestMethod "http://localhost:$Port/health" -Headers @{ "X-Lada-Token" = $t } -TimeoutSec 8
+  Write-Host "`nHEALTHY: node=$($h.node) ops=$($h.ops -join '/') encoders(ai=$($h.encoders.ai) transcode=$($h.encoders.transcode))" -ForegroundColor Green
+  Write-Host "Dashboard: http://localhost:$Port/  (LAN: http://$($env:COMPUTERNAME):$Port/)"
+} catch { Write-Warning "started but /health not answering yet - check $Root\logs\runner.log" }

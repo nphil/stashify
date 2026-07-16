@@ -50,6 +50,17 @@ MAX_BODY = 64 * 1024                                             # /run body cap
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
                     datefmt="%H:%M:%S", stream=sys.stdout)
 log = logging.getLogger("stashify-runner")
+# also log to a file so it works when launched windowless (pythonw / scheduled task)
+try:
+    from logging.handlers import RotatingFileHandler
+    _ld = os.path.join(os.environ.get("LOCALAPPDATA", HERE), "StashifyRunner", "logs")
+    os.makedirs(_ld, exist_ok=True)
+    _fh = RotatingFileHandler(os.path.join(_ld, "runner.log"), maxBytes=2_000_000,
+                              backupCount=3, encoding="utf-8")
+    _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logging.getLogger().addHandler(_fh)
+except Exception:  # noqa: BLE001
+    pass
 
 
 # --------------------------------------------------------------------------- #
