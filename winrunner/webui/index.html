@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stashify Runner</title>
+<style>
+  :root{--bg:#16181b;--panel:#23272b;--panel2:#2c3136;--line:rgba(255,255,255,.10);
+    --text:#f2f3f4;--muted:#9aa0a6;--accent:#3b82f6;--accent2:#2dd4bf;--ok:#6ac06a;--danger:#c0392b;--amber:#e0a54a;}
+  *{box-sizing:border-box}html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,"Segoe UI",Roboto,Arial,sans-serif}
+  .top{display:flex;align-items:center;gap:12px;padding:12px 18px;background:linear-gradient(180deg,var(--panel2),var(--panel));border-bottom:1px solid var(--line)}
+  .logo{width:34px;height:34px;border-radius:8px}
+  .ttl{font-weight:700;font-size:16px}.sub{color:var(--muted);font-size:11px}
+  .node{margin-left:auto;font:12px ui-monospace,Consolas,monospace;color:var(--muted)}
+  .node .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);margin-right:5px}
+  .node.ok .dot{background:var(--ok);box-shadow:0 0 6px var(--ok)}.node.err .dot{background:var(--danger)}
+  main{padding:16px;max-width:1100px;margin:0 auto}
+  .gpus{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}
+  @media(max-width:640px){.gpus{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  .gname{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px}
+  .gname .lane{margin-left:auto;font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+  .gauge{height:8px;background:rgba(255,255,255,.1);border-radius:5px;overflow:hidden;margin:8px 0 6px}
+  .gauge .fill{height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .4s}
+  .gstats{display:flex;flex-wrap:wrap;gap:6px}
+  .chip{background:rgba(255,255,255,.05);border:1px solid var(--line);border-radius:6px;padding:3px 7px;font-size:11px;color:var(--muted)}
+  .chip b{color:var(--text);font-weight:600}
+  .bar-actions{display:flex;gap:8px;margin-bottom:14px}
+  .btn{cursor:pointer;background:#3a4046;color:#fff;border:1px solid var(--line);border-radius:8px;padding:7px 12px;font-size:13px}
+  .btn:hover{background:#454c53}.btn.warn{background:var(--amber);border-color:var(--amber);color:#20242a}
+  .btn.on{background:var(--danger);border-color:var(--danger)}
+  h2{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:6px 0 8px}
+  .job{border:1px solid var(--line);border-radius:9px;padding:10px 12px;margin-bottom:9px;background:var(--panel2)}
+  .job .jt{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600}
+  .job .op{font-size:10px;text-transform:uppercase;letter-spacing:.04em;background:rgba(59,130,246,.18);color:#9dc3ff;border-radius:5px;padding:2px 6px}
+  .job .st{margin-left:auto;font-size:11px;color:var(--muted)}
+  .jbar{height:6px;background:rgba(255,255,255,.1);border-radius:5px;overflow:hidden;margin:7px 0}
+  .jbar .f{height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .4s}
+  .js{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}
+  .jrow{display:flex;gap:6px;margin-top:7px}.jrow .btn{flex:0 0 auto;padding:5px 10px;font-size:12px}
+  .empty{color:var(--muted);font-size:12px;padding:6px 2px}
+  .done .st{color:var(--ok)}.error .st{color:var(--danger)}
+</style>
+</head>
+<body>
+<header class="top">
+  <img class="logo" src="https://raw.githubusercontent.com/nphil/stashify/main/assets/icon-256.png" alt="">
+  <div><div class="ttl">Stashify Runner</div><div class="sub">GPU compute node</div></div>
+  <div class="node" id="node"><span class="dot"></span><span id="nodetext">connecting…</span></div>
+</header>
+<main>
+  <div class="gpus">
+    <div class="card"><div class="gname"><span id="ai-name">NVIDIA</span><span class="lane">AI lane</span></div>
+      <div class="gauge"><div class="fill" id="ai-fill"></div></div>
+      <div class="gstats" id="ai-stats"></div></div>
+    <div class="card"><div class="gname"><span id="ig-name">iGPU</span><span class="lane">transcode lane</span></div>
+      <div class="gauge"><div class="fill" id="ig-fill"></div></div>
+      <div class="gstats" id="ig-stats"></div></div>
+  </div>
+  <div class="bar-actions">
+    <button class="btn" id="nodebtn">Pause node</button>
+    <span class="sub" id="encinfo" style="align-self:center"></span>
+  </div>
+  <h2>Jobs</h2>
+  <div id="jobs"></div>
+  <div class="empty" id="empty">No jobs. This node accepts work dispatched by the Stashify coordinator.</div>
+</main>
+<script>
+var TOKEN = "";  // read-only stats are open; controls need the token (prompted once)
+function h(id){return document.getElementById(id)}
+async function j(path,opts){opts=opts||{};opts.headers=Object.assign({"X-Lada-Token":TOKEN},opts.headers||{});
+  var r=await fetch(path,opts);return r.json()}
+function chip(g,l,v){if(v==null||v==="")return;var s=document.createElement("span");s.className="chip";
+  s.innerHTML=l+" <b>"+v+"</b>";g.appendChild(s)}
+function fmtDur(s){s=Math.round(s||0);var m=Math.floor(s/60),x=s%60;return m+":"+(x<10?"0":"")+x}
+
+async function tick(){
+  var st,he;
+  try{ he=await j("/health"); st=await j("/stats"); }catch(e){ h("node").className="node err"; h("nodetext").textContent="unreachable"; return; }
+  h("node").className="node "+(he.busy?"ok":"ok");
+  h("nodetext").textContent=he.node+" · "+he.ops.join("/")+(he.paused?" · PAUSED":"");
+  h("encinfo").textContent="encoders: ai="+he.encoders.ai+"  transcode="+he.encoders.transcode;
+  h("nodebtn").textContent=he.paused?"Resume node":"Pause node";
+  h("nodebtn").className="btn"+(he.paused?" on":"");
+  // gpus
+  var nv=st.gpus.nvidia||{},ig=st.gpus.igpu||{};
+  h("ai-name").textContent=nv.name||"NVIDIA (AI)";
+  h("ai-fill").style.width=(nv.util||0)+"%";
+  var a=h("ai-stats");a.innerHTML="";chip(a,"util",(nv.util!=null?Math.round(nv.util)+"%":"—"));
+  if(nv.mem_used!=null)chip(a,"vram",Math.round(nv.mem_used)+"/"+Math.round(nv.mem_total)+"MB");
+  if(nv.temp!=null)chip(a,"temp",Math.round(nv.temp)+"°C");if(nv.power!=null)chip(a,"power",Math.round(nv.power)+"W");
+  h("ig-name").textContent=ig.name||"iGPU (QSV)";
+  h("ig-fill").style.width=(ig.util||0)+"%";
+  var b=h("ig-stats");b.innerHTML="";chip(b,"util",(ig.util!=null?Math.round(ig.util)+"%":"—"));
+  chip(b,"lane",st.lanes.transcode&&st.lanes.transcode.busy?"busy":"idle");
+  // jobs
+  var jobs=[];try{jobs=await j("/jobs")}catch(e){}
+  jobs.reverse();h("empty").style.display=jobs.length?"none":"block";
+  var box=h("jobs");box.innerHTML="";
+  jobs.forEach(function(job){
+    var pct=Math.round((job.progress||0)*100);
+    var d=document.createElement("div");d.className="job "+(job.state==="done"?"done":job.state==="error"?"error":"");
+    var name=(job.output_path||job._opts&&job._opts.input||job.id);
+    d.innerHTML='<div class="jt"><span class="op">'+job.op+'</span>'+
+      '<span>'+(String(name).split(/[\\\/]/).pop())+'</span>'+
+      '<span class="st">'+job.state+'</span></div>'+
+      '<div class="jbar"><div class="f" style="width:'+pct+'%"></div></div>';
+    var s=document.createElement("div");s.className="js";
+    chip(s,"prog",pct+"%");if(job.frame!=null&&job.total_frames)chip(s,"frame",job.frame+"/"+job.total_frames);
+    if(job.fps!=null)chip(s,"fps",Math.round(job.fps*10)/10);if(job.speed!=null)chip(s,"speed",job.speed+"x");
+    if(job.eta!=null)chip(s,"eta",fmtDur(job.eta));if(job.elapsed!=null)chip(s,"elapsed",fmtDur(job.elapsed));
+    d.appendChild(s);
+    if(job.state==="running"||job.state==="queued"){
+      var r=document.createElement("div");r.className="jrow";
+      if(job.state==="running"){var p=document.createElement("button");p.className="btn";p.textContent=job.paused?"Resume":"Pause";
+        p.onclick=function(){ctl(job.id,job.paused?"resume":"pause")};r.appendChild(p)}
+      var c=document.createElement("button");c.className="btn on";c.textContent="Cancel";
+      c.onclick=function(){ctl(job.id,"cancel")};r.appendChild(c);d.appendChild(r);
+    }
+    box.appendChild(d);
+  });
+}
+function needToken(){if(!TOKEN){TOKEN=prompt("Runner token (X-Lada-Token) for controls:")||""}}
+async function ctl(id,action){needToken();try{await j("/jobs/"+id+"/"+action,{method:"POST"})}catch(e){}tick()}
+h("nodebtn").onclick=async function(){needToken();var he=await j("/health");
+  await j("/node/"+(he.paused?"resume":"pause"),{method:"POST"});tick()};
+tick();setInterval(tick,2000);
+</script>
+</body>
+</html>

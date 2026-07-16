@@ -10,3 +10,8 @@ data/
 # secrets & host-local overrides (never commit)
 .env
 docker-compose.override.yml
+
+# Windows runner runtime (venv/config/service live in %LOCALAPPDATA%, not the repo)
+winrunner/.venv/
+winrunner/tmp/
+winrunner/*.local.json

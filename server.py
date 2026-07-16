@@ -90,12 +90,14 @@ def stash_gql(query, variables=None):
 
 # Per-request overrides the UI may send -> cfg keys.
 OVERRIDES = {
-    "backend": "backend",                  # lada | upscale | command
+    "backend": "backend",                  # lada | upscale | transcode | command
     "post_upscale": "postUpscale",         # lada: chain decensor -> upscale on the runner
     "gpu_id": "gpuId",
     "detection_model": "ladaDetModel",     # v4-fast | v4-accurate | v2
     "restoration_model": "ladaRestModel",
     "upscale_model": "ladaUpscaleModel",
+    "transcode_height": "transcodeHeight",
+    "transcode_quality": "transcodeQuality",
 }
 
 _jobs = {}

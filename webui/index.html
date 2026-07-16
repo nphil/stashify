@@ -46,10 +46,16 @@
           <option value="lada">Decensor (Lada)</option>
           <option value="lada+up">Decensor + upscale</option>
           <option value="upscale">Upscale only (2x)</option>
+          <option value="transcode">Transcode (HEVC)</option>
         </select>
         <select id="ladaq" title="Lada detection model">
           <option value="v4-fast">fast detect</option>
           <option value="v4-accurate">accurate detect</option>
+        </select>
+        <select id="txq" title="Transcode target" hidden>
+          <option value="">keep resolution</option>
+          <option value="1080">1080p</option>
+          <option value="720">720p</option>
         </select>
         <button id="decensorSel" class="btn btn-primary" disabled>Decensor selected (0)</button>
       </div>

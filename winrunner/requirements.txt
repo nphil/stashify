@@ -1,0 +1,8 @@
+# Stashify Windows runner deps (installed into the runner venv by install.ps1).
+# torch + torchvision are installed separately from the CUDA wheel index.
+requests
+psutil
+av
+spandrel
+pystray
+pillow

@@ -1,0 +1,29 @@
+{
+  "node_name": "desktop-3080",
+  "port": 8712,
+  "token": "CHANGEME-same-as-worker-WORKER_TOKEN",
+
+  "_comment_paths": "Map the container paths the coordinator sends to how THIS machine reaches the same files (UNC/SMB or local). Longest prefix wins. Both the NAS worker and this runner must ultimately point at the same bytes.",
+  "path_map": [
+    { "prefix": "/stuff2",  "local": "\\\\192.168.1.69\\Stuff" },
+    { "prefix": "/stuff",   "local": "\\\\192.168.1.69\\Download\\torrents\\Stuff" },
+    { "prefix": "/scratch", "local": "\\\\192.168.1.69\\appdata\\stashify\\scratch" }
+  ],
+
+  "lanes": { "ai": true, "transcode": true },
+
+  "_comment_encoders": "auto = probe hevc_nvenc (needs NVIDIA driver >=610) then hevc_qsv (iGPU) then libx264. Or force one.",
+  "ai_encoder": "auto",
+  "transcode_encoder": "auto",
+
+  "_comment_ai": "The AI lane runs upscale/decensor as a subprocess under this venv python.",
+  "venv_python": "%LOCALAPPDATA%\\StashifyRunner\\.venv\\Scripts\\python.exe",
+  "ffmpeg": "auto",
+  "upscale_model": "%LOCALAPPDATA%\\StashifyRunner\\models\\2xLiveActionV1_SPAN_490000.pth",
+  "ai_fp16": true,
+  "ai_gpu_index": 0,
+
+  "_comment_copy_local": "Copy SMB input to a local temp before processing (avoids per-frame network stalls on big files). Output still lands on the shared scratch.",
+  "copy_local": false,
+  "local_temp": "%LOCALAPPDATA%\\StashifyRunner\\tmp"
+}

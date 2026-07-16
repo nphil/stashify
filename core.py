@@ -11,6 +11,7 @@ while the worker logs plainly to stdout.
 
 import os
 import re
+import json
 import time
 import uuid
 import shlex
@@ -95,6 +96,15 @@ DEFAULTS = {
     "ladaDevice": "cuda",
     "ladaEncoder": "",               # "" = runner default (NVENC probe result)
     "ladaUpscaleModel": "",          # "" = runner default (2xLiveActionV1_SPAN)
+    # multi-runner registry (optional): a JSON array in the RUNNERS env var of
+    # {name,url,token,ops:[...],prefer:[...]}; jobs route to a capable node,
+    # falling back to the single ladaUrl runner. Lets the always-on P40 keep
+    # decensoring while an intermittent desktop box takes upscale/transcode.
+    "runners": [],
+    # transcode op params (backend=transcode)
+    "transcodeCodec": "",            # informational; encoder decides
+    "transcodeHeight": "",           # "" = keep source resolution
+    "transcodeQuality": "24",
 }
 
 SCENE_FRAGMENT = """
@@ -128,11 +138,12 @@ def validate(cfg):
 
     backend = cfg["backend"]
     if backend not in BACKENDS:
-        problems.append(f"backend '{backend}' (use lada | upscale | command)")
+        problems.append(f"backend '{backend}' (use lada | upscale | transcode | command)")
     if backend == "command" and not str(cfg["commandTemplate"]).strip():
         problems.append("Command Template")
-    if backend in ("lada", "upscale") and not str(cfg["ladaUrl"]).strip():
-        problems.append("Runner URL (LADA_URL)")
+    if backend in ("lada", "upscale", "transcode") and not (
+            str(cfg["ladaUrl"]).strip() or cfg.get("runners")):
+        problems.append("a runner (LADA_URL or RUNNERS)")
 
     if problems:
         message = "Missing/invalid config: " + ", ".join(problems)
@@ -333,9 +344,44 @@ def backend_command(cfg, input_path, result_dir, on_line=None, log_cb=None):
     return newest_video(result_dir)
 
 
+def resolve_runner(cfg, op):
+    """Pick a runner (url, token, name) that can do `op`. Health-checks each
+    candidate, skips offline/unreachable ones, and prefers a runner that tags
+    `op` in its 'prefer' list and is idle. Falls back to the single ladaUrl
+    runner (which is treated as capable of everything it reports)."""
+    import requests
+
+    candidates = list(cfg.get("runners") or [])
+    if str(cfg.get("ladaUrl") or "").strip():
+        candidates.append({"name": "default", "url": cfg["ladaUrl"],
+                           "token": cfg.get("ladaToken", ""), "ops": None, "prefer": []})
+    scored = []
+    for c in candidates:
+        url = str(c.get("url") or "").rstrip("/")
+        if not url:
+            continue
+        declared = c.get("ops")
+        if declared is not None and op not in declared:
+            continue
+        try:
+            h = requests.get(url + "/health",
+                             headers={"X-Lada-Token": c.get("token", "")}, timeout=4).json()
+        except Exception:  # noqa: BLE001 - offline node: skip, try the next
+            continue
+        if op not in (h.get("ops") or []) or h.get("paused"):
+            continue
+        score = (2 if op in (c.get("prefer") or []) else 0) + (0 if h.get("busy") else 1)
+        scored.append((score, {"url": url, "token": c.get("token", ""),
+                               "name": c.get("name", "runner")}))
+    if not scored:
+        raise RuntimeError(f"no online runner can handle '{op}'")
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[0][1]
+
+
 def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None):
-    """Dispatch a GPU job (decensor / upscale / chain) to the compute runner
-    (lada_runner.py) over HTTP.
+    """Dispatch a GPU job (decensor / upscale / transcode / chain) to a compute
+    runner (lada_runner.py or the Windows runner) over HTTP.
 
     The runner writes its output into a shared scratch dir (both containers
     mount it at the same path); we tail its log — relaying each line through
@@ -344,17 +390,21 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None)
     Cancel/pause/resume forward to the runner via the remote-control hooks."""
     import requests
 
-    base = str(cfg.get("ladaUrl") or "").rstrip("/")
-    if not base:
-        raise RuntimeError("Runner backend selected but LADA_URL is not set.")
-    token = str(cfg.get("ladaToken") or "")
+    runner = resolve_runner(cfg, op)
+    base = runner["url"]
+    token = runner["token"]
     headers = {"Content-Type": "application/json"}
     if token:
         headers["X-Lada-Token"] = token
+    log.info(f"routing {op} -> runner '{runner['name']}' ({base})")
 
     scratch = str(cfg.get("ladaScratch") or "/scratch")
     sub = os.path.join(scratch, "lada_" + uuid.uuid4().hex[:10])
     os.makedirs(sub, exist_ok=True)
+    try:
+        os.chmod(sub, 0o777)   # a remote (Windows/SMB) runner must be able to write here
+    except OSError:
+        pass
 
     payload = {
         "op": op,
@@ -366,6 +416,9 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None)
         "device": cfg.get("ladaDevice") or "cuda",
         "encoder": cfg.get("ladaEncoder") or "",
         "upscale_model": cfg.get("ladaUpscaleModel") or "",
+        "codec": cfg.get("transcodeCodec") or "",
+        "height": cfg.get("transcodeHeight") or "",
+        "quality": cfg.get("transcodeQuality") or "24",
     }
 
     def _post(action):
@@ -459,9 +512,14 @@ def backend_upscale(cfg, input_path, result_dir, on_line=None, log_cb=None):
     return _runner_dispatch(cfg, input_path, result_dir, "upscale", on_line=on_line, log_cb=log_cb)
 
 
+def backend_transcode(cfg, input_path, result_dir, on_line=None, log_cb=None):
+    return _runner_dispatch(cfg, input_path, result_dir, "transcode", on_line=on_line, log_cb=log_cb)
+
+
 BACKENDS = {
     "lada": backend_lada,
     "upscale": backend_upscale,
+    "transcode": backend_transcode,
     "command": backend_command,
 }
 
@@ -581,8 +639,7 @@ def process_scene(stash, cfg, scene, trigger_tag_id, done_tag_id):
         os.makedirs(cfg["outputDir"], exist_ok=True)
         stem = re.sub(r"\s+", "_", os.path.splitext(os.path.basename(input_path))[0])
         ext = os.path.splitext(produced)[1] or ".mp4"
-        suffix = "_upscaled" if cfg["backend"] == "upscale" else "_decensored"
-        dest = unique_path(cfg["outputDir"], f"{stem}{suffix}", ext)
+        dest = unique_path(cfg["outputDir"], f"{stem}{op_suffix(cfg['backend'])}", ext)
         shutil.move(produced, dest)
         _chown_like(dest, input_path)
         log.info(f"Wrote cleaned file: {dest}")
@@ -730,6 +787,9 @@ _ENV_MAP = {
     "ladaDevice": "LADA_DEVICE",
     "ladaEncoder": "LADA_ENCODER",
     "ladaUpscaleModel": "LADA_UPSCALE_MODEL",
+    "transcodeCodec": "TRANSCODE_CODEC",
+    "transcodeHeight": "TRANSCODE_HEIGHT",
+    "transcodeQuality": "TRANSCODE_QUALITY",
 }
 _ENV_BOOL = {
     "postUpscale": "POST_UPSCALE",
@@ -753,6 +813,13 @@ def config_from_env():
             cfg[key] = val
     for key, env in _ENV_BOOL.items():
         cfg[key] = env_bool(env, cfg[key])
+    raw = os.environ.get("RUNNERS")
+    if raw:
+        try:
+            cfg["runners"] = json.loads(raw)
+        except (ValueError, TypeError):
+            log.warning("RUNNERS env is not valid JSON — ignoring the registry.")
+            cfg["runners"] = []
     return cfg
 
 
@@ -783,11 +850,23 @@ def stash_from_env():
 PREVIEW_TAG = "Decensored (preview)"   # legacy name; preview tag is op-aware now
 
 
+def op_label(backend):
+    return {"upscale": "Upscaled", "transcode": "Transcoded"}.get(backend, "Decensored")
+
+
+def op_suffix(backend):
+    return {"upscale": "_upscaled", "transcode": "_transcoded"}.get(backend, "_decensored")
+
+
 def op_tag_names(cfg):
-    """Tags describing what was done to the scene: Decensored, Upscaled, or both
-    (lada + postUpscale chain). Applied to the original on replace."""
-    if cfg["backend"] == "upscale":
+    """Tags describing what was done to the scene: Decensored, Upscaled,
+    Transcoded, or a combination (lada + postUpscale chain). Applied to the
+    original on replace."""
+    b = cfg["backend"]
+    if b == "upscale":
         return ["Upscaled"]
+    if b == "transcode":
+        return ["Transcoded"]
     tags = [str(cfg.get("doneTag") or "Decensored")]
     if cfg.get("postUpscale"):
         tags.append("Upscaled")
@@ -873,9 +952,8 @@ def process_to_review(stash, cfg, scene_id, progress=None, log_cb=None):
         os.makedirs(cfg["outputDir"], exist_ok=True)
         stem = re.sub(r"\s+", "_", os.path.splitext(os.path.basename(input_path))[0])
         ext = os.path.splitext(produced)[1] or ".mp4"
-        # suffix matches the operation: upscale-only jobs aren't "decensored"
-        suffix = "_upscaled" if cfg["backend"] == "upscale" else "_decensored"
-        dest = unique_path(cfg["outputDir"], f"{stem}{suffix}", ext)
+        # suffix matches the operation (upscaled / transcoded / decensored)
+        dest = unique_path(cfg["outputDir"], f"{stem}{op_suffix(cfg['backend'])}", ext)
         shutil.move(produced, dest)
         _chown_like(dest, input_path)
 
@@ -884,7 +962,7 @@ def process_to_review(stash, cfg, scene_id, progress=None, log_cb=None):
             f={"path": {"value": dest, "modifier": "EQUALS"}}, fragment="id"
         )
         review_id = matches[0]["id"] if matches else None
-        label = "Upscaled" if cfg["backend"] == "upscale" else "Decensored"
+        label = op_label(cfg["backend"])
         if review_id:
             preview_tag = stash.find_tag(f"{label} (preview)", create=True)
             update = {"id": review_id, "tag_ids": [preview_tag["id"]]}

@@ -71,7 +71,7 @@
     } catch (e) { /* worker may accept unauthenticated */ }
   }
   var health = null;
-  var ENGINE_LABEL = { "lada": "lada", "lada+up": "lada + upscale", "upscale": "upscale 2x" };
+  var ENGINE_LABEL = { "lada": "lada", "lada+up": "lada + upscale", "upscale": "upscale 2x", "transcode": "transcode" };
   function connLabel() {
     // reflect the SELECTED engine, not the worker's env default
     return ENGINE_LABEL[$("engine").value] || (health ? health.backend : "?");
@@ -180,7 +180,8 @@
   }
   function refreshSelBtn() {
     var b = $("decensorSel");
-    var verb = $("engine").value === "upscale" ? "Upscale" : "Decensor";
+    var e = $("engine").value;
+    var verb = e === "upscale" ? "Upscale" : (e === "transcode" ? "Transcode" : "Decensor");
     b.textContent = verb + " selected (" + state.sel.size + ")";
     b.disabled = state.sel.size === 0;
   }
@@ -189,9 +190,11 @@
     var ids = Array.from(state.sel);
     if (!ids.length) return;
     var eng = $("engine").value;
-    var extra = { backend: eng === "upscale" ? "upscale" : "lada" };
-    if (eng !== "upscale") extra.detection_model = $("ladaq").value;
+    var backend = eng === "upscale" ? "upscale" : (eng === "transcode" ? "transcode" : "lada");
+    var extra = { backend: backend };
+    if (backend === "lada") extra.detection_model = $("ladaq").value;
     if (eng === "lada+up") extra.post_upscale = true;
+    if (eng === "transcode" && $("txq").value) extra.transcode_height = $("txq").value;
     var ok = 0;
     for (var i = 0; i < ids.length; i++) {
       try {
@@ -575,7 +578,9 @@
       if (sq) $("ladaq").value = sq;
     } catch (e) {}
     var syncEngine = function () {
-      $("ladaq").hidden = $("engine").value === "upscale";   // detect model is decensor-only
+      var e = $("engine").value;
+      $("ladaq").hidden = e === "upscale" || e === "transcode";   // detect model is decensor-only
+      $("txq").hidden = e !== "transcode";
       refreshSelBtn();
       renderConn();
     };
