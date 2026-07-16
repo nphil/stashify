@@ -2,7 +2,7 @@
 
 A protocol-compatible sibling of lada_runner.py that runs on a Windows desktop
 and puts BOTH GPUs to work:
-  - AI lane      (NVIDIA, e.g. RTX 3080): upscale (SPAN, fp16) [+ decensor later]
+  - AI lane      (NVIDIA, e.g. RTX 3080): upscale (SPAN, fp16) + decensor (Jasna)
   - Transcode lane (Intel iGPU QuickSync): distributed transcoding
 
 The two lanes run concurrently (different hardware). The Stashify coordinator on
@@ -115,6 +115,13 @@ def load_config():
     cfg.setdefault("copy_local", False)
     cfg["venv_python"] = _expand(cfg.get("venv_python") or sys.executable)
     cfg["upscale_model"] = _expand(cfg.get("upscale_model") or "")
+    # decensor engine: a frozen jasna.exe (github.com/Kruk2/jasna). The op is
+    # advertised only when this path exists, so config can pre-set it safely.
+    cfg["jasna_exe"] = _expand(cfg.get("jasna_exe") or "")
+    cfg.setdefault("jasna_detection_model", "rfdetr-v5")
+    cfg.setdefault("jasna_max_clip_size", 90)    # 90 fits 10GB VRAM; 180 needs 12GB+
+    cfg.setdefault("jasna_encoder_settings", "")  # e.g. "cq=23,lookahead=32"
+    cfg.setdefault("jasna_no_compile", False)     # skip TRT compile of BasicVSR++
     cfg["local_temp"] = _expand(cfg.get("local_temp") or os.path.join(HERE, "tmp"))
     cfg["ffmpeg"] = resolve_ffmpeg(cfg.get("ffmpeg", "auto"))
     cfg["path_map"] = sorted(
@@ -452,10 +459,11 @@ def resolve_lane_encoder(lane):
 # the ops
 # --------------------------------------------------------------------------- #
 
-def _stream_subprocess(lane, jid, argv):
+def _stream_subprocess(lane, jid, argv, scale=None):
     """Run a CLI, streaming lada-style progress into the job. A watchdog kills a
     stalled subprocess (no output for STALL_SECS) so a dead SMB mount can't wedge
-    the lane forever."""
+    the lane forever. scale=(phase_idx, n_phases) maps this CLI's 0-100% into its
+    slice of the whole job so a decensor+upscale chain doesn't bounce back to 0."""
     push_log(jid, "$ " + subprocess.list2cmdline(argv), "event")
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, encoding="utf-8", errors="replace", bufsize=1,
@@ -483,6 +491,9 @@ def _stream_subprocess(lane, jid, argv):
             push_log(jid, line, "proc")
             f = parse_progress(line)
             if f:
+                if scale and "progress" in f:
+                    idx, n = scale
+                    f["progress"] = round((idx + f["progress"]) / n, 3)
                 set_job(jid, **f)
         proc.wait()
     finally:
@@ -522,6 +533,8 @@ def run_job(lane, job):
     set_job(jid, state="running", message="Starting " + op, started_at=time.time(), stage=op)
 
     tmp_copy = None
+    mid_dir = None
+    jasna_work = None
     if CFG["copy_local"] and op in ("upscale", "decensor", "decensor+upscale"):
         os.makedirs(CFG["local_temp"], exist_ok=True)
         tmp_copy = os.path.join(CFG["local_temp"], "in_" + jid + os.path.splitext(src)[1])
@@ -552,6 +565,47 @@ def run_job(lane, job):
             if CFG["ai_fp16"] and not o.get("no_fp16"):
                 argv.append("--fp16")
             rc, cancelled = _stream_subprocess(lane, jid, argv)
+        elif op in ("decensor", "decensor+upscale"):
+            if not decensor_available():
+                raise RuntimeError("decensor not available: set jasna_exe in config")
+            chain = (op == "decensor+upscale")
+            n_phases = 2 if chain else 1
+            if chain:
+                mid_dir = os.path.join(CFG["local_temp"], "mid_" + jid)
+                os.makedirs(mid_dir, exist_ok=True)
+            # job-scoped so OUR finally can clean it: a cancel/stall tree-kill
+            # never lets decensor_cli run its own cleanup, and jasna's temp
+            # .hevc intermediate in there is multi-GB
+            jasna_work = os.path.join(CFG["local_temp"], "jasna_" + jid)
+            argv = [CFG["venv_python"], os.path.join(HERE, "decensor_cli.py"),
+                    "--input", src, "--output-dir", mid_dir or out_dir,
+                    "--jasna", CFG["jasna_exe"],
+                    "--device", "cuda:%d" % CFG["ai_gpu_index"],
+                    "--detection-model", CFG["jasna_detection_model"],
+                    "--max-clip-size", str(CFG["jasna_max_clip_size"]),
+                    "--working-dir", jasna_work]
+            if CFG["jasna_encoder_settings"]:
+                argv += ["--encoder-settings", str(CFG["jasna_encoder_settings"])]
+            if CFG["jasna_no_compile"]:
+                argv.append("--no-compile")
+            rc, cancelled = _stream_subprocess(lane, jid, argv, scale=(0, n_phases))
+            if chain and rc == 0 and not cancelled:
+                mid = _newest_video(mid_dir)
+                if not mid:
+                    rc = 1
+                    push_log(jid, "chain: decensor produced no output", "error")
+                else:
+                    set_job(jid, stage="upscale", message="Upscaling decensored output")
+                    push_log(jid, "chain: upscaling decensored output", "event")
+                    enc = o.get("encoder") or resolve_lane_encoder("ai")
+                    argv = [CFG["venv_python"], os.path.join(HERE, "upscale_cli.py"),
+                            "--input", mid, "--output-dir", out_dir,
+                            "--ffmpeg", FFMPEG, "--encoder", enc,
+                            "--model", _safe_model(o),
+                            "--device", "cuda:%d" % CFG["ai_gpu_index"]]
+                    if CFG["ai_fp16"] and not o.get("no_fp16"):
+                        argv.append("--fp16")
+                    rc, cancelled = _stream_subprocess(lane, jid, argv, scale=(1, n_phases))
         else:
             raise RuntimeError("unsupported op on this runner: " + op)
     finally:
@@ -561,6 +615,10 @@ def run_job(lane, job):
                 os.remove(tmp_copy)
             except OSError:
                 pass
+        if mid_dir:
+            shutil.rmtree(mid_dir, ignore_errors=True)
+        if jasna_work:
+            shutil.rmtree(jasna_work, ignore_errors=True)
 
     if cancelled:
         set_job(jid, state="cancelled", message="Cancelled", _ended_at=time.time())
@@ -731,11 +789,15 @@ _node = {"paused": False}
 # HTTP
 # --------------------------------------------------------------------------- #
 
+def decensor_available():
+    return bool(CFG["jasna_exe"]) and os.path.isfile(CFG["jasna_exe"])
+
+
 def enabled_ops():
     ops = []
     if CFG["lanes"].get("ai"):
         ops += ["upscale"]
-        if CFG.get("enable_decensor"):
+        if decensor_available():
             ops += ["decensor", "decensor+upscale"]
     if CFG["lanes"].get("transcode"):
         ops += ["transcode"]
@@ -892,11 +954,25 @@ def _shutdown():
             lane.do_cancel()
 
 
+def _sweep_temp():
+    """Remove job leftovers (jasna_*/mid_* dirs, in_* copies) from local_temp.
+    Nothing is active at startup, so anything matching is an orphan from a
+    crash/power-loss - a killed runner can't run its per-job cleanup."""
+    try:
+        for name in os.listdir(CFG["local_temp"]):
+            if name.startswith(("jasna_", "mid_", "in_")):
+                p = os.path.join(CFG["local_temp"], name)
+                shutil.rmtree(p, ignore_errors=True) if os.path.isdir(p) else os.remove(p)
+    except OSError:
+        pass
+
+
 def main():
     global LANES
     if psutil is None:
         log.error("psutil not installed - cancel can't kill child trees and pause/resume no-op. "
                   "Install it in the venv.")
+    _sweep_temp()
     LANES = {}
     if CFG["lanes"].get("ai"):
         LANES["ai"] = Lane("ai", "nvidia")

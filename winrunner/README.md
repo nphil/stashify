@@ -15,7 +15,8 @@ over SMB, does the work, and hands the output back on the shared `/scratch`.
 
 | Lane | Hardware | Op | Notes |
 |---|---|---|---|
-| AI | NVIDIA (e.g. RTX 3080) | `upscale` | SPAN 2× (spandrel), fp16. `decensor` is a future lane (needs a Lada Windows build). |
+| AI | NVIDIA (e.g. RTX 3080) | `upscale` | SPAN 2× (spandrel), fp16. |
+| AI | NVIDIA (Turing+, cc ≥ 7.5) | `decensor`, `decensor+upscale` | [Jasna](https://github.com/Kruk2/jasna) (RF-DETR detection + BasicVSR++ restore, TensorRT). Optional — run `install-jasna.ps1` (~4.1 GB self-contained release; needs NVIDIA driver ≥ 580). First job compiles TensorRT engines (15–60 min, cached). The chain op decensors then SPAN-upscales. |
 | Transcode | Intel iGPU | `transcode` | QuickSync HEVC (`hevc_qsv`); target resolution + quality. |
 
 Both lanes are independent queues, so an upscale and a transcode run at the same

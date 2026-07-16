@@ -25,5 +25,12 @@
 
   "_comment_copy_local": "Copy SMB input to a local temp before processing (avoids per-frame network stalls on big files). Output still lands on the shared scratch.",
   "copy_local": false,
-  "local_temp": "%LOCALAPPDATA%\\StashifyRunner\\tmp"
+  "local_temp": "%LOCALAPPDATA%\\StashifyRunner\\tmp",
+
+  "_comment_decensor": "Optional mosaic-removal via a frozen jasna.exe (github.com/Kruk2/jasna; install-jasna.ps1 sets this up). decensor ops are advertised only while jasna_exe exists. max_clip_size 90 fits a 10GB card; 180 needs 12GB+. First run compiles TensorRT engines (15-60 min).",
+  "jasna_exe": "",
+  "jasna_detection_model": "rfdetr-v5",
+  "jasna_max_clip_size": 90,
+  "jasna_encoder_settings": "",
+  "jasna_no_compile": false
 }
