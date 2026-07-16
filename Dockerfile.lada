@@ -1,4 +1,5 @@
-# Lada compute-node image for the Tesla P40 (Pascal, compute 6.1).
+# stashify-runner — Stashify's Lada compute-node image, built for the
+# Tesla P40 (Pascal, compute 6.1). Published as ghcr.io/nphil/stashify-runner.
 #
 # The stock ghcr.io/ladaapp image is CUDA 12.8 and errors "no kernel image" on
 # Pascal, so we build from source with Lada's own `nvidia-legacy` extra, which
@@ -6,7 +7,7 @@
 # still ship sm_61 kernels. Runs fp32 (--no-fp16) since the P40 has no usable
 # fp16. Bundles a static ffmpeg (NVENC + x264) so encoding can use the P40.
 #
-# Build:  docker build -f Dockerfile.lada -t stashy-lada:latest .
+# Build:  docker build -f Dockerfile.lada -t ghcr.io/nphil/stashify-runner:latest .
 FROM python:3.13-slim-trixie
 
 ENV DEBIAN_FRONTEND=noninteractive \

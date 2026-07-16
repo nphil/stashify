@@ -1,7 +1,9 @@
-# Thin coordinator: HTTP API + dashboard + Stash integration + runner dispatch.
+# Stashify — thin coordinator: HTTP API + dashboard + Stash integration +
+# runner dispatch. Published as ghcr.io/nphil/stashify.
 #
 # All GPU work (Lada decensoring, SPAN upscaling) happens in the compute runner
-# container (Dockerfile.lada); this image needs neither CUDA nor ffmpeg. It went
+# container (Dockerfile.lada, the stashify-runner image); this image needs
+# neither CUDA nor ffmpeg. It went
 # from a ~6 GB PyTorch stack to ~150 MB when DeepMosaics/Real-ESRGAN moved out.
 FROM python:3.12-slim
 

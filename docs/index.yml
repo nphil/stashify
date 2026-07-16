@@ -1,11 +1,12 @@
-# Stash plugin source for stash-decensor.
+# Stash plugin source for Stashify.
 # Stash: Settings > Plugins > Available Plugins > Add Source
-#   Name: Decensor    URL: https://nphil.github.io/stash-decensor/index.yml
-- id: decensor
-  name: Decensor
+#   Name: Stashify    URL: https://nphil.github.io/stashify/index.yml
+- id: stashify
+  name: Stashify
   metadata:
-    description: Remove mosaic censorship from Stash scenes on demand via a DeepMosaics + Real-ESRGAN worker container. Adds a scene-page panel and a standalone dashboard.
-  version: 1.1.0-409a248
-  date: 2026-07-15 17:44:37
-  path: decensor.zip
-  sha256: 2a52a22e10f94837b94346d1e898f522046409fd36464d6c05190f7b7f2dabe1
+    description: Stashify — upscale & decensor for Stash. Remove mosaic censorship (Lada, temporal) and upscale scenes (SPAN 2x live-action) on demand via the Stashify worker + GPU runner. Adds a scene-page panel and a standalone dashboard.
+  sourcerepository: https://github.com/nphil/stashify
+  version: 2.0.0
+  date: 2026-07-15 21:40:00
+  path: stashify.zip
+  sha256: 95fb7dc8ba0ea53aa791f2bbaed8ebb7b1fbd9ed3d7b04277bcc7f9d706e0feb

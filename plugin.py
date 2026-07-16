@@ -19,7 +19,7 @@ from stashapi.stashapp import StashInterface
 import core
 
 # Plugin id == yml filename stem; used to read settings back out of the config.
-PLUGIN_ID = "decensor"
+PLUGIN_ID = "stashify"
 
 
 def resolve_config(stash, args):
@@ -60,7 +60,7 @@ def main():
             scene_ids=args.get("scene_ids") or args.get("sceneIds"),
         )
     except ValueError as exc:  # config validation failed
-        slog.error(f"{exc} Fix under Settings > Plugins > Decensor.")
+        slog.error(f"{exc} Fix under Settings > Plugins > Stashify.")
         raise SystemExit(1)
 
 

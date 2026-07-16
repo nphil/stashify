@@ -2,7 +2,7 @@
 invocation with live progress/log + cancel/pause/resume.
 
 This is the first "runner" of the eventual coordinator/runner distributed
-system: the decensor worker (coordinator) POSTs a job here, tails the log, and
+system: the Stashify worker (coordinator) POSTs a job here, tails the log, and
 reads the produced file back off a shared scratch mount. Nothing Stash-aware
 lives here — it only turns an input video path into a restored output file.
 
@@ -449,7 +449,7 @@ def worker_loop():
 # --------------------------------------------------------------------------- #
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "lada-runner/1.0"
+    server_version = "stashify-runner/1.0"
 
     def log_message(self, fmt, *args):
         logging.debug("%s - %s", self.address_string(), fmt % args)
@@ -560,7 +560,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     threading.Thread(target=worker_loop, daemon=True).start()
     httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    logging.info("lada runner listening on :%s (token %s, models %s)",
+    logging.info("stashify-runner listening on :%s (token %s, models %s)",
                  PORT, "on" if TOKEN else "off", MODELS_DIR)
     httpd.serve_forever()
 

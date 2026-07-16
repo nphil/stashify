@@ -1,6 +1,6 @@
-# Decensor worker for unRAID / Docker  (BeastNAS deploy).
+# Stashify worker for unRAID / Docker  (BeastNAS deploy).
 #
-# Build & run from this directory:  docker compose up -d --build
+# Run from this directory:  docker compose up -d
 #
 # Secrets come from a local .env file next to this compose (gitignored):
 #   STASH_API_KEY=<from Stash > Settings > Security, or its config.yml>
@@ -12,20 +12,21 @@
 #   /mnt/user/Download/torrents/Stuff -> /stuff
 #   /mnt/user/Stuff                   -> /stuff2
 services:
-  decensor:
-    # Local build (default). To deploy the prebuilt GHCR image instead, comment
-    # out `build: .` and set `image: ghcr.io/nphil/stash-decensor:latest`, then:
+  stashify:
+    # Prebuilt GHCR image (default):
     #   docker login ghcr.io -u nphil   # one-time (private package)
     #   docker compose pull && docker compose up -d
-    build: .
-    image: stashy-decensor:latest
-    container_name: stashy-decensor
+    # For local dev, comment out `image:`, uncomment `build:`, then:
+    #   docker compose up -d --build
+    image: ghcr.io/nphil/stashify:latest
+    # build: .
+    container_name: Stashify
     labels:
       # unRAID Docker tab reads these: container icon + a WebUI link.
-      net.unraid.docker.icon: "https://raw.githubusercontent.com/nphil/stash-decensor/main/assets/icon-256.png"
-      net.unraid.docker.webui: "https://decensor.nateshome.net/"
+      net.unraid.docker.icon: "https://raw.githubusercontent.com/nphil/stashify/main/assets/icon-256.png"
+      net.unraid.docker.webui: "https://stashify.nateshome.net/"
     # Thin coordinator: NO GPU, no CUDA, no models — all compute happens in the
-    # `lada` runner service below.
+    # `runner` service below.
     ports:
       - "8710:8710"          # the on-demand HTTP API the Stash UI button calls
     environment:
@@ -40,7 +41,7 @@ services:
 
       # --- pipeline: dispatched to the compute runner ---
       BACKEND: "lada"                    # lada | upscale | command
-      LADA_URL: "http://lada:8711"
+      LADA_URL: "http://runner:8711"
       LADA_TOKEN: "${WORKER_TOKEN:-}"
       LADA_SCRATCH: "/scratch"
 
@@ -56,15 +57,19 @@ services:
 
   # Compute runner (Pascal cu126 build): Lada decensoring + SPAN upscaling +
   # GPU telemetry. The first "runner" of the coordinator/runner design.
-  lada:
-    build:
-      context: .
-      dockerfile: Dockerfile.lada
-    image: stashy-lada:latest
-    container_name: stashy-lada
+  runner:
+    # Prebuilt GHCR image (default). For local dev, comment out `image:` and
+    # uncomment `build:` below.
+    image: ghcr.io/nphil/stashify-runner:latest
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile.lada
+    container_name: Stashify-Runner
     labels:
-      net.unraid.docker.icon: "https://raw.githubusercontent.com/nphil/stash-decensor/main/assets/icon-256.png"
+      net.unraid.docker.icon: "https://raw.githubusercontent.com/nphil/stashify/main/assets/icon-256.png"
     runtime: nvidia
+    ports:
+      - "8711:8711"          # exposed so unRAID-template / other-host deployments can reach the runner
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
@@ -81,10 +86,10 @@ services:
 
 # unRAID without the compose plugin? Equivalent docker run (fill in the secrets):
 #
-#   docker run -d --name stashy-decensor -p 8710:8710 \
+#   docker run -d --name Stashify -p 8710:8710 \
 #     -e STASH_URL=http://192.168.1.69:6969 -e STASH_API_KEY=<key> -e WORKER_TOKEN=<token> \
 #     -e BACKEND=lada -e LADA_URL=http://<runner-host>:8711 -e LADA_TOKEN=<token> \
 #     -e OUTPUT_DIR=/stuff2/decensored \
 #     -v /mnt/user/Download/torrents/Stuff:/stuff -v /mnt/user/Stuff:/stuff2 \
 #     -v /mnt/user/appdata/decensor/scratch:/scratch \
-#     stashy-decensor:latest
+#     ghcr.io/nphil/stashify:latest

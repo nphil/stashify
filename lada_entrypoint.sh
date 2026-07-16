@@ -69,5 +69,5 @@ fi
 
 export LADA_DEFAULT_ENCODER="${LADA_DEFAULT_ENCODER:-$ENC}"
 echo "[lada] default encoder: $LADA_DEFAULT_ENCODER"
-echo "[lada] starting runner on :${PORT:-8711}"
+echo "[lada] starting stashify-runner on :${PORT:-8711}"
 exec python3 /opt/lada/lada_runner.py

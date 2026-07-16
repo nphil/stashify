@@ -1,30 +1,55 @@
-name: Build & publish worker image
+name: Build & publish images
 
-# Builds the decensor worker image in the cloud (no local Docker needed) and
-# pushes it to GitHub Container Registry. Triggers:
-#   - pushing a version tag (v1.2.3)  -> tags 1.2.3, 1.2, latest, sha-xxxxxxx
-#   - manual run (Actions tab / gh)   -> tags latest, sha-xxxxxxx
+# Builds the Stashify worker and runner images in the cloud (no local Docker
+# needed) and pushes them to GitHub Container Registry. Triggers:
+#   - pushing to main (ignoring docs/assets/unraid/markdown-only changes)
+#   - pushing a version tag (v1.2.3)  -> semver tags + sha
+#   - manual run (Actions tab / gh)
 #
 # Deploy on unRAID by pulling instead of building:
 #   docker login ghcr.io -u nphil        # one-time (private package)
-#   # in docker-compose.yml: image: ghcr.io/nphil/stash-decensor:latest  (drop `build: .`)
 #   docker compose pull && docker compose up -d
 
 on:
   push:
+    branches: ['main']
+    paths-ignore:
+      - 'docs/**'
+      - 'assets/**'
+      - 'unraid/**'
+      - '**.md'
     tags: ['v*']
   workflow_dispatch:
 
+# One run per ref; new pushes to main cancel the in-progress build.
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}   # nphil/stash-decensor
 
 jobs:
   build-push:
     runs-on: ubuntu-latest
+    # The runner image is large (torch cu126 wheels + an ffmpeg compile take
+    # ~20-30 min on a cold cache) — keep the timeout at 60m or above.
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: worker
+            image: ghcr.io/nphil/stashify
+            dockerfile: Dockerfile
+            context: .
+          - name: runner
+            image: ghcr.io/nphil/stashify-runner
+            dockerfile: Dockerfile.lada
+            context: .
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,21 +68,22 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ matrix.image }}
           tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=sha,format=short
-            type=raw,value=latest
 
       - name: Build & push
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}

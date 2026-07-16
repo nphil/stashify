@@ -495,7 +495,7 @@ def worker_loop():
 # --------------------------------------------------------------------------- #
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "decensor/1.0"
+    server_version = "Stashify/1.0"
 
     def log_message(self, fmt, *args):  # quieter access log
         logging.debug("%s - %s", self.address_string(), fmt % args)
@@ -801,7 +801,7 @@ def main():
     threading.Thread(target=gpu_poller, daemon=True).start()
     threading.Thread(target=preview_poller, daemon=True).start()
     httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    logging.info(f"decensor server listening on :{PORT} (token {'on' if TOKEN else 'off'})")
+    logging.info(f"Stashify server listening on :{PORT} (token {'on' if TOKEN else 'off'})")
     httpd.serve_forever()
 
 

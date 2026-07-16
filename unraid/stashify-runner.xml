@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>Stashify-Runner</Name>
+  <Repository>ghcr.io/nphil/stashify-runner:latest</Repository>
+  <Registry>https://github.com/nphil/stashify/pkgs/container/stashify-runner</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/nphil/stashify/issues</Support>
+  <Project>https://github.com/nphil/stashify</Project>
+  <Overview>GPU compute runner for Stashify. Bundles Lada (mosaic removal / decensoring), SPAN 2x live-action upscaling, and NVENC encoding behind an app-agnostic HTTP API on port 8711 — the Stashify coordinator submits jobs to it, and other apps can use the same API. Media mounts are read-only; all writing happens in /scratch, which must be the SAME host dir the Stashify container mounts at /scratch.</Overview>
+  <Category>MediaApp:Video Tools: MediaServer:Video:</Category>
+  <WebUI/>
+  <TemplateURL/>
+  <Icon>https://raw.githubusercontent.com/nphil/stashify/main/assets/icon-256.png</Icon>
+  <ExtraParams>--runtime=nvidia</ExtraParams>
+  <PostArgs/>
+  <Requires>The unRAID NVIDIA Driver plugin (for the GPU). Pairs with the Stashify container.</Requires>
+  <Config Name="Runner API Port" Target="8711" Default="8711" Mode="tcp" Description="HTTP API port for job submission/status." Type="Port" Display="always" Required="true" Mask="false">8711</Config>
+  <Config Name="Listen Port" Target="PORT" Default="8711" Mode="" Description="Port the runner API listens on inside the container (keep in sync with the port mapping)." Type="Variable" Display="advanced" Required="true" Mask="false">8711</Config>
+  <Config Name="Runner Token" Target="LADA_TOKEN" Default="" Mode="" Description="Optional shared secret for the runner API; must match LADA_TOKEN on the Stashify container." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="GPU ID" Target="GPU_ID" Default="0" Mode="" Description="GPU index to use." Type="Variable" Display="advanced" Required="false" Mask="false">0</Config>
+  <Config Name="Lada Device" Target="LADA_DEVICE" Default="cuda" Mode="" Description="Compute device for Lada ('cuda' or 'cpu' — CPU is extremely slow)." Type="Variable" Display="advanced" Required="true" Mask="false">cuda</Config>
+  <Config Name="NVIDIA Visible Devices" Target="NVIDIA_VISIBLE_DEVICES" Default="all" Mode="" Description="Which GPUs to expose (device UUID or 'all')." Type="Variable" Display="advanced" Required="true" Mask="false">all</Config>
+  <Config Name="NVIDIA Driver Capabilities" Target="NVIDIA_DRIVER_CAPABILITIES" Default="compute,utility,video" Mode="" Description="Driver capabilities; 'video' is required for NVENC encoding." Type="Variable" Display="advanced" Required="true" Mask="false">compute,utility,video</Config>
+  <Config Name="Media (matches Stash /stuff)" Target="/stuff" Default="/mnt/user/Download/torrents/Stuff" Mode="ro" Description="Read-only source media. Mount at the SAME container path Stash and Stashify use." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/Download/torrents/Stuff</Config>
+  <Config Name="Media (matches Stash /stuff2)" Target="/stuff2" Default="/mnt/user/Stuff" Mode="ro" Description="Read-only source media. Mount at the SAME container path Stash and Stashify use." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/Stuff</Config>
+  <Config Name="Scratch (shared with Stashify)" Target="/scratch" Default="/mnt/user/appdata/decensor/scratch" Mode="rw" Description="Working dir for in-flight jobs and outputs. MUST be the same host dir the Stashify container mounts at /scratch." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/decensor/scratch</Config>
+  <Config Name="Models (persist)" Target="/models" Default="/mnt/user/appdata/decensor/lada-models" Mode="rw" Description="Persists Lada/SPAN model weights across container updates." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/decensor/lada-models</Config>
+</Container>

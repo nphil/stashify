@@ -1,4 +1,4 @@
-// Decensor dashboard — a standalone WebUI for the decensor worker.
+// Stashify dashboard — a standalone WebUI for the Stashify worker.
 // Served same-origin with Stash (via the reverse-proxy path), so it talks to
 // Stash's own GraphQL/media over the session cookie and to the worker for jobs.
 (function () {
@@ -67,7 +67,7 @@
     if (typeof window.__WT === "string" && window.__WT !== "__WORKER_TOKEN__") { TOKEN = window.__WT; return; }
     try {
       var d = await stashGQL("query { configuration { plugins } }");
-      TOKEN = (((d.configuration || {}).plugins || {}).decensor || {}).workerToken || "";
+      TOKEN = (((d.configuration || {}).plugins || {}).stashify || {}).workerToken || "";
     } catch (e) { /* worker may accept unauthenticated */ }
   }
   var health = null;

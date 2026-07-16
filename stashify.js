@@ -1,4 +1,4 @@
-// Decensor — Stash UI widget.
+// Stashify — Stash UI widget.
 // Adds an on-scene-page panel: a button to decensor the current scene via the
 // worker container, a live progress bar, then a review player with
 // "Replace original" / "Discard". Self-contained (no csLib/PluginApi coupling)
@@ -7,7 +7,7 @@
 (function () {
   "use strict";
 
-  var PLUGIN_ID = "decensor";
+  var PLUGIN_ID = "stashify";
   var POLL_MS = 1500;
   var cfgCache = null;
   var current = { sceneId: null, jobId: null, timer: null };
@@ -119,7 +119,7 @@
 
   async function workerFetch(path, opts) {
     var cfg = await loadConfig();
-    if (!cfg.url) throw new Error("Set the Worker URL in Settings > Plugins > Decensor.");
+    if (!cfg.url) throw new Error("Set the Worker URL in Settings > Plugins > Stashify.");
     if (mixedContent(cfg.url)) throw new Error(MIXED_MSG);
     opts = opts || {};
     var headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
@@ -149,7 +149,7 @@
     panel.id = "decensor-panel";
     panel.innerHTML =
       '<div class="decensor-head">' +
-        '<span class="decensor-title">🩹 Decensor</span>' +
+        '<span class="decensor-title">🩹 Stashify</span>' +
         '<button class="decensor-x" title="hide">×</button>' +
       "</div>" +
       '<div class="decensor-body"></div>';

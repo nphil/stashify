@@ -86,7 +86,7 @@ DEFAULTS = {
     # generic command backend
     "commandTemplate": "",
     # Lada/compute runner (separate GPU container; see lada_runner.py)
-    "ladaUrl": "",                   # e.g. http://stashy-lada:8711
+    "ladaUrl": "",                   # e.g. http://runner:8711
     "ladaToken": "",
     "ladaScratch": "/scratch",       # shared mount both worker + runner see
     "ladaRestModel": "basicvsrpp-v1.2",
