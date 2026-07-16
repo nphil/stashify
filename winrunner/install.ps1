@@ -1,5 +1,5 @@
 <#
-  Stashify Windows Runner — installer.
+  Stashify Windows Runner - installer.
 
   Sets up compute node #2 (this Windows box) for the Stashify coordinator:
   provisions a Python venv (torch cu124 + SR/video deps), installs ffmpeg,
@@ -8,7 +8,7 @@
 
   WHY IT RUNS AS YOU (not LocalSystem): the runner reaches your NAS media over
   SMB. A LocalSystem service authenticates as the *machine account*, which the
-  NAS denies — so the service must run under a user account whose Credential
+  NAS denies - so the service must run under a user account whose Credential
   Manager holds the NAS creds. This script defaults to the current user.
 
   Run in an ELEVATED PowerShell (Run as administrator):
@@ -129,13 +129,13 @@ Start-Sleep 1
 & $winsw start
 Write-Host "service '$SvcId' installed + started" -ForegroundColor Green
 
-# The SCM now holds the logon credential — strip the cleartext password from the
+# The SCM now holds the logon credential - strip the cleartext password from the
 # on-disk XML so it isn't persisted, and ACL config + xml to the service account.
 $xml = $xml -replace '<password>.*?</password>', '<password><!-- stored in SCM --></password>'
 $xml | Set-Content $xmlPath -Encoding utf8
 $svcUser = $cred.UserName
 foreach ($f in @($cfgPath, $xmlPath)) {
-  icacls $f /inheritance:r /grant:r "$svcUser:(R)" "$($env:USERNAME):(R,W)" "Administrators:(F)" "SYSTEM:(F)" | Out-Null
+  icacls $f /inheritance:r /grant:r "${svcUser}:(R)" "${env:USERNAME}:(R,W)" "Administrators:(F)" "SYSTEM:(F)" | Out-Null
 }
 Write-Host "secrets ACL-locked to $svcUser + admins"
 
@@ -162,4 +162,4 @@ Start-Sleep 4
 try { $h = Invoke-RestMethod "http://localhost:$Port/health" -TimeoutSec 8
   Write-Host "`nHEALTHY: node=$($h.node) ops=$($h.ops -join '/') encoders(ai=$($h.encoders.ai), transcode=$($h.encoders.transcode))" -ForegroundColor Green
   Write-Host "Dashboard: http://localhost:$Port/  (or http://$($env:COMPUTERNAME):$Port/ on your LAN)"
-} catch { Write-Warning "service started but /health not answering yet — check $Root\logs" }
+} catch { Write-Warning "service started but /health not answering yet - check $Root\logs" }

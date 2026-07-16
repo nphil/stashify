@@ -9,4 +9,4 @@ Get-NetFirewallRule -DisplayName "Stashify Runner" -ErrorAction SilentlyContinue
 $lnk = "$([Environment]::GetFolderPath('Startup'))\Stashify Runner Tray.lnk"
 if (Test-Path $lnk) { Remove-Item $lnk -Force }
 Get-Process pythonw -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$Root*" } | Stop-Process -Force -ErrorAction SilentlyContinue
-Write-Host "uninstalled (kept $Root — delete manually to remove venv/models/config)"
+Write-Host "uninstalled (kept $Root - delete manually to remove venv/models/config)"
