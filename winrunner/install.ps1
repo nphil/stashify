@@ -25,6 +25,8 @@ param(
 $ErrorActionPreference = "Stop"
 $SvcId = "stashify-runner"
 $Src   = Split-Path -Parent $MyInvocation.MyCommand.Path   # the winrunner/ folder
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)   # PS 5.1 Set-Content adds a BOM that breaks json.load
+function Write-Text($path, $text) { [System.IO.File]::WriteAllText($path, $text, $Utf8NoBom) }
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
   throw "Run this in an elevated PowerShell (Run as administrator)."
@@ -81,7 +83,7 @@ $cfg = [ordered]@{
   ai_fp16 = $true; ai_gpu_index = 0; copy_local = $false; local_temp = "$Root\tmp"
 }
 if ($existing -and $existing.path_map) { $cfg.path_map = $existing.path_map }  # preserve user edits
-$cfg | ConvertTo-Json -Depth 6 | Set-Content $cfgPath -Encoding utf8
+Write-Text $cfgPath ($cfg | ConvertTo-Json -Depth 6)
 Write-Host "config -> $cfgPath"
 
 # long paths (>260 chars) for UNC media
@@ -92,7 +94,17 @@ $winsw = "$Root\$SvcId.exe"
 if (-not (Test-Path $winsw)) {
   Invoke-WebRequest "https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe" -OutFile $winsw
 }
-$cred = Get-Credential -UserName "$env:USERDOMAIN\$env:USERNAME" -Message "Windows account to run the runner service as (needs your NAS SMB creds saved). Your own account is fine."
+# Run the service as a WINDOWS account whose Credential Manager has the NAS creds.
+# This is almost always your own login. NOTE: this is NOT the NAS/SMB username
+# (e.g. 'smbuser') — that account doesn't exist on Windows.
+$me = "$env:USERDOMAIN\$env:USERNAME"
+Write-Host "The service will run as your Windows account: $me" -ForegroundColor Cyan
+Write-Host "  (Enter your WINDOWS login password below — not your NAS/SMB password.)"
+$pw = Read-Host "Windows password for $me" -AsSecureString
+$cred = New-Object System.Management.Automation.PSCredential($me, $pw)
+# validate it resolves to a real Windows principal (guards against typing the NAS user)
+try { [void]([System.Security.Principal.NTAccount]$cred.UserName).Translate([System.Security.Principal.SecurityIdentifier]) }
+catch { throw "'$($cred.UserName)' is not a Windows account. Run install.ps1 again and use your Windows login ($me), not the NAS SMB user." }
 $xml = @"
 <service>
   <id>$SvcId</id>
@@ -120,7 +132,7 @@ $xml = @"
 </service>
 "@
 $xmlPath = "$Root\$SvcId.xml"
-$xml | Set-Content $xmlPath -Encoding utf8
+Write-Text $xmlPath $xml
 
 & $winsw stop  2>$null | Out-Null
 & $winsw uninstall 2>$null | Out-Null
@@ -132,7 +144,7 @@ Write-Host "service '$SvcId' installed + started" -ForegroundColor Green
 # The SCM now holds the logon credential - strip the cleartext password from the
 # on-disk XML so it isn't persisted, and ACL config + xml to the service account.
 $xml = $xml -replace '<password>.*?</password>', '<password><!-- stored in SCM --></password>'
-$xml | Set-Content $xmlPath -Encoding utf8
+Write-Text $xmlPath $xml
 $svcUser = $cred.UserName
 foreach ($f in @($cfgPath, $xmlPath)) {
   icacls $f /inheritance:r /grant:r "${svcUser}:(R)" "${env:USERNAME}:(R,W)" "Administrators:(F)" "SYSTEM:(F)" | Out-Null

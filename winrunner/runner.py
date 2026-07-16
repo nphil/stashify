@@ -1,4 +1,4 @@
-"""Stashify Windows runner — compute node #2.
+"""Stashify Windows runner - compute node #2.
 
 A protocol-compatible sibling of lada_runner.py that runs on a Windows desktop
 and puts BOTH GPUs to work:
@@ -81,13 +81,13 @@ def load_config():
     cfg = {}
     try:
         if os.path.isfile(path):
-            with open(path, "r", encoding="utf-8") as fh:
+            with open(path, "r", encoding="utf-8-sig") as fh:   # tolerate a BOM
                 cfg = json.load(fh)
         else:
-            log.warning("no config at %s — using example defaults", path)
+            log.warning("no config at %s - using example defaults", path)
             ex = os.path.join(HERE, "config.example.json")
             if os.path.isfile(ex):
-                with open(ex, "r", encoding="utf-8") as fh:
+                with open(ex, "r", encoding="utf-8-sig") as fh:
                     cfg = json.load(fh)
     except Exception as exc:  # noqa: BLE001 - degrade, don't crash-loop
         log.error("config load failed (%s); continuing with defaults", exc)
@@ -171,7 +171,7 @@ def to_container(local_path):
 
 
 # --------------------------------------------------------------------------- #
-# progress parsing — anchored to the lada-style lines our CLIs emit
+# progress parsing - anchored to the lada-style lines our CLIs emit
 #   "upscaling: 42%| |Processed: 00:12 (1234f) | Remaining: 01:23 | Speed: 12.3f/s"
 # --------------------------------------------------------------------------- #
 
@@ -246,7 +246,7 @@ def push_log(jid, text, level="proc"):
     if not text:
         return
     if len(text) > 400:
-        text = text[:400] + "…"
+        text = text[:400] + "..."
     with _logs_lock:
         dq = _logs.get(jid) or _logs.setdefault(jid, deque(maxlen=LOG_MAX))
         seq = _logseq.get(jid, 0) + 1
@@ -400,7 +400,7 @@ def lane_for(op):
 
 
 # --------------------------------------------------------------------------- #
-# encoder capability probe — per lane, once at startup (never in a request)
+# encoder capability probe - per lane, once at startup (never in a request)
 # --------------------------------------------------------------------------- #
 
 _enc_cache = {}
@@ -460,7 +460,7 @@ def _stream_subprocess(lane, jid, argv):
                 last["t"] = time.time()
                 continue
             if time.time() - last["t"] > STALL_SECS:
-                push_log(jid, "watchdog: no output for %ss — killing stalled job" % STALL_SECS, "error")
+                push_log(jid, "watchdog: no output for %ss - killing stalled job" % STALL_SECS, "error")
                 lane.do_cancel()
                 return
     threading.Thread(target=watchdog, daemon=True).start()
@@ -514,7 +514,7 @@ def run_job(lane, job):
     if CFG["copy_local"] and op in ("upscale", "decensor", "decensor+upscale"):
         os.makedirs(CFG["local_temp"], exist_ok=True)
         tmp_copy = os.path.join(CFG["local_temp"], "in_" + jid + os.path.splitext(src)[1])
-        push_log(jid, "copying source local…", "event")
+        push_log(jid, "copying source local...", "event")
         shutil.copyfile(src, tmp_copy)
         src = tmp_copy
 
@@ -702,7 +702,7 @@ def gpu_poller():
     while True:
         with _gpu_lock:
             _gpu["nvidia"] = read_nvidia()
-            if tick % 2 == 0:                         # iGPU counter is costly — poll half as often
+            if tick % 2 == 0:                         # iGPU counter is costly - poll half as often
                 _gpu["igpu"] = read_igpu()
         tick += 1
         time.sleep(3)
@@ -881,7 +881,7 @@ def _shutdown():
 def main():
     global LANES
     if psutil is None:
-        log.error("psutil not installed — cancel can't kill child trees and pause/resume no-op. "
+        log.error("psutil not installed - cancel can't kill child trees and pause/resume no-op. "
                   "Install it in the venv.")
     LANES = {}
     if CFG["lanes"].get("ai"):
@@ -896,7 +896,7 @@ def main():
     threading.Thread(target=gpu_poller, daemon=True).start()
     bind = "0.0.0.0" if TOKEN else "127.0.0.1"
     if not TOKEN:
-        log.warning("no token set — binding 127.0.0.1 only and DENYING API calls. Set a token to accept remote jobs.")
+        log.warning("no token set - binding 127.0.0.1 only and DENYING API calls. Set a token to accept remote jobs.")
     httpd = ThreadingHTTPServer((bind, PORT), Handler)
     log.info("stashify-winrunner '%s' on %s:%s | ops=%s | ffmpeg=%s",
              CFG["node_name"], bind, PORT, enabled_ops(), FFMPEG)
