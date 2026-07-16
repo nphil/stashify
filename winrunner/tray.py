@@ -9,8 +9,10 @@ Runs in the user session (the runner itself is the headless scheduled task); it
 talks to the local runner over HTTP.
 """
 import os
+import re
 import sys
 import json
+import html
 import webbrowser
 import subprocess
 import urllib.request
@@ -57,14 +59,35 @@ def api(path, method="GET"):
 class Poller(QThread):
     data = Signal(dict)
 
+    def __init__(self):
+        super().__init__()
+        self._cursors = {}      # jid -> last seen log seq
+
     def run(self):
         while not self.isInterruptionRequested():
-            out = {"online": False}
+            out = {"online": False, "log": []}
             try:
                 out["health"] = api("/health")
                 out["stats"] = api("/stats")
                 out["jobs"] = api("/jobs")
                 out["online"] = True
+                active = [j for j in out["jobs"] if j.get("state") in ("queued", "running")]
+                for j in active[:2]:
+                    jid = j.get("id", "")
+                    try:
+                        r = api("/jobs/%s/log?after=%d" % (jid, self._cursors.get(jid, 0)))
+                        lines = r.get("lines") or []
+                        if lines:
+                            self._cursors[jid] = lines[-1].get("seq", 0)
+                            for x in lines:
+                                out["log"].append({"op": j.get("op") or "",
+                                                   "level": x.get("level", "proc"),
+                                                   "text": x.get("text", "")})
+                    except Exception:  # noqa: BLE001 - log fetch is best-effort
+                        pass
+                gone = set(self._cursors) - {j.get("id") for j in out["jobs"]}
+                for jid in gone:
+                    self._cursors.pop(jid, None)
             except Exception:  # noqa: BLE001
                 pass
             self.data.emit(out)
@@ -150,6 +173,51 @@ class JobRow(QFrame):
             v.addWidget(_lbl("  ·  ".join(bits), muted=True, size=10))
 
 
+_LOG_COLORS = {"error": C["down"], "warn": C["warn"], "event": C["primary"]}
+_RE_NUMS = re.compile(r"[\d][\d.,:]*")
+_RE_BAR = re.compile(r"\|[#\s.▁-▉]*\|")   # tqdm bar visual - waste of width
+
+
+class LogBox(QFrame):
+    """Tiny live log tail. Lines that differ only by numbers (progress ticks,
+    fps, ETAs) update the existing line in place instead of appending, so a
+    tqdm-style stream stays a single line; genuinely new text gets a new line."""
+    MAX_LINES = 6
+
+    def __init__(self):
+        super().__init__()
+        self.setStyleSheet("QFrame{background:%s;border:1px solid %s;border-radius:8px;}"
+                           % (C["card"], C["line"]))
+        v = QVBoxLayout(self); v.setContentsMargins(9, 6, 9, 6)
+        self.lab = QLabel("")
+        self.lab.setTextFormat(Qt.RichText)
+        self.lab.setStyleSheet("color:%s;font-family:Consolas,monospace;font-size:9px;"
+                               "background:transparent;border:none;" % C["muted"])
+        v.addWidget(self.lab)
+        self.entries = []   # [norm_key, text, level]
+
+    def push(self, text, level="proc"):
+        t = _RE_BAR.sub("|", str(text or "").strip())[:110]
+        if not t:
+            return
+        norm = _RE_NUMS.sub("#", t)
+        if self.entries and self.entries[-1][0] == norm:
+            self.entries[-1][1] = t
+            self.entries[-1][2] = level
+        else:
+            self.entries.append([norm, t, level])
+            del self.entries[:-self.MAX_LINES]
+        self._render()
+
+    def _render(self):
+        rows = []
+        for _, t, level in self.entries:
+            disp = html.escape(t if len(t) <= 58 else t[:57] + "…")
+            rows.append('<span style="color:%s">%s</span>'
+                        % (_LOG_COLORS.get(level, C["muted"]), disp))
+        self.lab.setText("<br>".join(rows))
+
+
 # --------------------------------------------------------------------------- #
 # the flyout
 # --------------------------------------------------------------------------- #
@@ -194,6 +262,9 @@ class Flyout(QWidget):
         self.jobsLbl = _lbl("JOBS", muted=True, size=10); v.addWidget(self.jobsLbl)
         self.jobsBox = QVBoxLayout(); self.jobsBox.setSpacing(6); v.addLayout(self.jobsBox)
         self.noJobs = _lbl("No active jobs.", muted=True, size=11); self.jobsBox.addWidget(self.noJobs)
+
+        # live log tail (hidden while idle to keep the panel compact)
+        self.logBox = LogBox(); self.logBox.setVisible(False); v.addWidget(self.logBox)
 
         # footer
         foot = QHBoxLayout(); foot.setSpacing(8)
@@ -250,6 +321,9 @@ class Flyout(QWidget):
         self.noJobs.setVisible(not active)
         for j in active[:4]:
             row = JobRow(j); self.jobsBox.addWidget(row); self._job_rows.append(row)
+        for ln in d.get("log") or []:
+            self.logBox.push(ln.get("text", ""), ln.get("level", "proc"))
+        self.logBox.setVisible(bool(active) and bool(self.logBox.entries))
         self.adjustSize()
 
     def toggle_pause(self):
