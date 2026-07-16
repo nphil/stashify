@@ -855,7 +855,10 @@ class Handler(BaseHTTPRequestHandler):
             url = str(b.get("url", "")).rstrip("/")
             if not url.startswith("http"):
                 return self._send(400, {"error": "a valid http(s) url is required"})
-            entry = {"name": b.get("name") or url, "url": url, "token": b.get("token") or "",
+            # discovered/added runners usually share the fleet token; without a
+            # default they'd probe online (/ping is unauth) but 401 on dispatch
+            entry = {"name": b.get("name") or url, "url": url,
+                     "token": b.get("token") or os.environ.get("WORKER_TOKEN", ""),
                      "ops": b.get("ops") or None, "prefer": b.get("prefer") or []}
             with _runners_lock:
                 store = [r for r in load_store() if str(r.get("url", "")).rstrip("/") != url]
