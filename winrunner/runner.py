@@ -815,6 +815,21 @@ def enabled_ops():
     return ops
 
 
+def enabled_engines():
+    """Per-op engine identity so the coordinator + dashboard can name what
+    actually runs on this node (Jasna here, not just 'decensor'). Only enabled
+    ops appear; additive - the coordinator tolerates its absence on older runners."""
+    ops = enabled_ops()
+    eng = {}
+    if "decensor" in ops:
+        eng["decensor"] = "jasna"
+    if "decensor+upscale" in ops:
+        eng["decensor+upscale"] = "jasna"
+    if "upscale" in ops:
+        eng["upscale"] = "span"
+    return eng
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "stashify-winrunner/1.0"
 
@@ -865,13 +880,14 @@ class Handler(BaseHTTPRequestHandler):
                                    "text/html", inject_token=True)
         if raw == "/ping":            # unauth discovery beacon (no sensitive data)
             return self._send(200, {"stashify": True, "node": CFG["node_name"],
-                                    "kind": "windows", "ops": enabled_ops()})
+                                    "kind": "windows", "ops": enabled_ops(),
+                                    "engines": enabled_engines()})
         if not self._authed():
             return self._send(401, {"error": "bad token"})
         if raw == "/health":
             return self._send(200, {
                 "ok": True, "node": CFG["node_name"], "kind": "windows",
-                "ops": enabled_ops(),
+                "ops": enabled_ops(), "engines": enabled_engines(),
                 "encoders": {"ai": resolve_lane_encoder("ai"),
                              "transcode": resolve_lane_encoder("transcode")},
                 "lanes": {n: {"busy": l.busy(), "paused": l.paused, "gpu": l.gpu_label,

@@ -98,6 +98,8 @@ OVERRIDES = {
     "upscale_model": "ladaUpscaleModel",
     "transcode_height": "transcodeHeight",
     "transcode_quality": "transcodeQuality",
+    "runner": "targetRunner",              # pin this job to a specific runner (name or url)
+    "engine": "targetEngine",              # pin this job to a specific engine (lada | jasna | span)
 }
 
 # --------------------------------------------------------------------------- #
@@ -162,6 +164,7 @@ def probe_runner(r):
 
     url = str(r.get("url", "")).rstrip("/")
     out = {"name": r.get("name") or url, "url": url, "ops": r.get("ops"),
+           "engines": r.get("engines"),
            "prefer": r.get("prefer") or [], "source": r.get("_source", "manual"),
            "online": False, "busy": None, "node": None, "kind": None, "note": None}
     if not url:
@@ -170,13 +173,15 @@ def probe_runner(r):
     try:
         h = requests.get(url + "/health", headers={"X-Lada-Token": tok}, timeout=4).json()
         out.update(online=True, busy=h.get("busy"), node=h.get("node"),
-                   kind=h.get("kind"), ops=h.get("ops") or r.get("ops"), paused=h.get("paused"))
+                   kind=h.get("kind"), ops=h.get("ops") or r.get("ops"),
+                   engines=h.get("engines") or r.get("engines"), paused=h.get("paused"))
     except Exception:  # noqa: BLE001 - maybe reachable but token-gated
         try:
             p = requests.get(url + "/ping", timeout=3).json()
             if p.get("stashify"):
                 out.update(online=True, node=p.get("node"), kind=p.get("kind"),
-                           ops=p.get("ops") or r.get("ops"), note="token mismatch")
+                           ops=p.get("ops") or r.get("ops"),
+                           engines=p.get("engines") or r.get("engines"), note="token mismatch")
         except Exception:  # noqa: BLE001
             pass
     return out
@@ -206,6 +211,7 @@ def discover_runners(timeout=0.5):
             if p.get("stashify"):
                 return {"name": p.get("node") or ("%s:%d" % (ip, port)),
                         "url": "http://%s:%d" % (ip, port), "ops": p.get("ops"),
+                        "engines": p.get("engines"),
                         "kind": p.get("kind"), "_source": "discovered"}
         except Exception:  # noqa: BLE001
             return None
@@ -467,6 +473,8 @@ def new_job(scene_id, overrides):
         "output_path": None,
         "error": None,
         "stage": None,
+        "runner": None,
+        "engine": None,
         "frame": None,
         "total_frames": None,
         "fps": None,
@@ -584,6 +592,7 @@ def worker_loop():
         with _jobs_lock:
             _running_job_id = job_id
         core.set_log(JobLog(job_id))       # route this job's pipeline logs into its buffer
+        core.set_job_stamp(lambda **f: set_job(job_id, **f))   # let the backend stamp runner/engine
         try:
             ACTIONS[action](job)
         except core.Cancelled:
@@ -595,6 +604,7 @@ def worker_loop():
             set_job(job_id, state="error", message=str(exc), error=str(exc), _ended_at=time.time())
         finally:
             core.set_log(BASE_LOG)
+            core.clear_job_stamp()
             with _jobs_lock:
                 _running_job_id = None
 
@@ -814,8 +824,35 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/runners":
             from concurrent.futures import ThreadPoolExecutor
             rs = merged_runners()
+            # resolve_runner also treats LADA_URL as a candidate ("default"); surface
+            # it here too (deduped by url) so the dashboard's pickers + enable gate see
+            # every routable node, not just registered ones.
+            lada = os.environ.get("LADA_URL", "").strip().rstrip("/")
+            if lada and not any(str(r.get("url", "")).rstrip("/") == lada for r in rs):
+                rs = rs + [{"name": "default", "url": lada,
+                            "token": os.environ.get("LADA_TOKEN") or os.environ.get("WORKER_TOKEN", ""),
+                            "_source": "env"}]
             with ThreadPoolExecutor(max_workers=8) as ex:
                 return self._send(200, list(ex.map(probe_runner, rs)))
+        if path == "/api/route-preview":
+            # "which runner + engine would handle this right now" for the dashboard,
+            # honoring the same targetEngine/targetRunner pins a real job would use.
+            from urllib.parse import urlparse, parse_qs
+            q = parse_qs(urlparse(self.path).query)
+            # parse_qs decodes '+' to space; ops never contain spaces, so restore it
+            # ('decensor upscale' -> 'decensor+upscale') to accept an unencoded plus.
+            op = (q.get("op") or [""])[0].replace(" ", "+")
+            if op not in ("decensor", "decensor+upscale", "upscale", "transcode"):
+                return self._send(400, {"error": "valid op required"})
+            cfg = core.config_from_env()
+            cfg["runners"] = merged_runners()
+            eng = (q.get("engine") or [""])[0]
+            run = (q.get("runner") or [""])[0]
+            if eng and eng.lower() != "auto":
+                cfg["targetEngine"] = eng
+            if run and run.lower() != "auto":
+                cfg["targetRunner"] = run
+            return self._send(200, core.preview_route(cfg, op))
         m = re.match(r"^/api/jobs/([0-9a-f]+)/log$", path)
         if m:
             from urllib.parse import urlparse, parse_qs

@@ -487,14 +487,16 @@ class Handler(BaseHTTPRequestHandler):
             import socket
             return self._send(200, {"stashify": True,
                                     "node": os.environ.get("NODE_NAME") or socket.gethostname(),
-                                    "kind": "linux", "ops": ["decensor", "upscale", "decensor+upscale"]})
+                                    "kind": "linux", "ops": ["decensor", "upscale", "decensor+upscale"],
+                                    "engines": {"decensor": "lada", "decensor+upscale": "lada", "upscale": "span"}})
         if raw == "/health" or raw == "":
             models = sorted(os.listdir(MODELS_DIR)) if os.path.isdir(MODELS_DIR) else []
             with _jobs_lock:
                 busy = _running_id is not None
             return self._send(200, {"ok": True, "device": os.environ.get("LADA_DEVICE", "cuda"),
                                     "models": models, "busy": busy,
-                                    "ops": ["decensor", "upscale", "decensor+upscale"]})
+                                    "ops": ["decensor", "upscale", "decensor+upscale"],
+                                    "engines": {"decensor": "lada", "decensor+upscale": "lada", "upscale": "span"}})
         if raw == "/gpu":
             return self._send(200, read_gpu())
         m = re.match(r"^/jobs/([0-9a-f]+)/preview/(before|after)\.jpg$", raw)

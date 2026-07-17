@@ -84,12 +84,97 @@
   async function updateConn() {
     try {
       health = await workerFetch("health");
-      $("engine").disabled = !health.lada;      // every engine runs on the runner
-      $("engine").title = health.lada ? "Engine" : "compute runner offline";
       renderConn();
     } catch (e) {
       conn.className = "conn err"; conn.textContent = "worker unreachable";
     }
+    loadRunnerCaps();   // independent of health; drives the engine/runner pickers
+  }
+
+  // ---- engine + runner pickers (built from live runner capabilities) ----- //
+  var ENGINE_NICE = { lada: "Lada", jasna: "Jasna", span: "SPAN 2×" };
+  function engNice(e) { return ENGINE_NICE[e] || e || ""; }
+  function opForOperation(op) {
+    return op === "lada" ? "decensor"
+      : op === "lada+up" ? "decensor+upscale"
+      : op === "upscale" ? "upscale"
+      : op === "transcode" ? "transcode" : op;
+  }
+  state.runnerCaps = [];                 // online runners: [{name, ops, engines, ...}]
+  var _pinRestore = { engine: null, runner: null };   // localStorage values, applied once options exist
+
+  async function loadRunnerCaps() {
+    try {
+      var rs = await workerFetch("runners");
+      state.runnerCaps = (rs || []).filter(function (r) { return r.online; });
+    } catch (e) { /* keep last-known caps */ }
+    rebuildPins();
+    var any = state.runnerCaps.length > 0;   // gate the controls on real availability, not env
+    ["engine", "enginePin", "runnerPin"].forEach(function (id) { var s = $(id); if (s) s.disabled = !any; });
+    if ($("engine")) $("engine").title = any ? "Operation" : "no compute runner online";
+  }
+  function runnersForOp(op) {
+    return state.runnerCaps.filter(function (r) { return (r.ops || []).indexOf(op) >= 0; });
+  }
+  function enginesForOp(op) {
+    var set = [];
+    runnersForOp(op).forEach(function (r) {
+      var e = (r.engines || {})[op];
+      if (e && set.indexOf(e) < 0) set.push(e);
+    });
+    return set;
+  }
+  function fillSelect(sel, autoLabel, values, labelFn, restore) {
+    var want = restore || sel.value;       // preserve the current choice across rebuilds
+    sel.innerHTML = "";
+    var o0 = document.createElement("option");
+    o0.value = "auto"; o0.textContent = autoLabel; sel.appendChild(o0);
+    values.forEach(function (v) {
+      var o = document.createElement("option");
+      o.value = v; o.textContent = labelFn ? labelFn(v) : v; sel.appendChild(o);
+    });
+    sel.value = Array.prototype.some.call(sel.options, function (o) { return o.value === want; }) ? want : "auto";
+  }
+  function rebuildPins() {
+    var epin = $("enginePin"), rpin = $("runnerPin");
+    if (!epin || !rpin) return;
+    // One-shot restore: consume the saved pins on the first rebuild that has real
+    // capabilities, then null them so subsequent rebuilds preserve the LIVE
+    // selection (fillSelect falls back to sel.value). Without this, a saved pin
+    // that's never valid for the current op would clobber the user's choice on
+    // every periodic refresh.
+    var haveCaps = state.runnerCaps.length > 0;
+    var wantE = _pinRestore.engine, wantR = _pinRestore.runner;
+    if (haveCaps) { _pinRestore.engine = null; _pinRestore.runner = null; }
+    var op = opForOperation($("engine").value);
+    // engine pin — only where there's a real engine choice (never for transcode)
+    var engines = op === "transcode" ? [] : enginesForOp(op);
+    fillSelect(epin, "Auto engine", engines, engNice, wantE);
+    epin.hidden = op === "transcode" || engines.length === 0;
+    // runner pin — online runners that can do op and match the chosen engine
+    var chosenEng = epin.value;
+    var runners = runnersForOp(op).filter(function (r) {
+      return chosenEng === "auto" || (r.engines || {})[op] === chosenEng;
+    }).map(function (r) { return r.name; });
+    fillSelect(rpin, "Auto runner", runners, null, wantR);
+  }
+  var _previewTimer;
+  function updatePreview() { clearTimeout(_previewTimer); _previewTimer = setTimeout(doPreview, 150); }
+  async function doPreview() {
+    var will = $("routeWill");
+    if (!will) return;
+    var op = opForOperation($("engine").value);
+    var eng = $("enginePin") ? $("enginePin").value : "auto";
+    var run = $("runnerPin") ? $("runnerPin").value : "auto";
+    try {
+      var res = await workerFetch("route-preview?op=" + encodeURIComponent(op) +
+        "&engine=" + encodeURIComponent(eng) + "&runner=" + encodeURIComponent(run));
+      if (res.error) { will.className = "routewill err"; will.textContent = "→ " + res.error; }
+      else {
+        will.className = "routewill";
+        will.textContent = "→ " + (res.runner || "?") + (res.engine ? " · " + engNice(res.engine) : "");
+      }
+    } catch (e) { will.className = "routewill"; will.textContent = ""; }
   }
 
   // ---- scene browser ----------------------------------------------------- //
@@ -195,6 +280,10 @@
     if (backend === "lada") extra.detection_model = $("ladaq").value;
     if (eng === "lada+up") extra.post_upscale = true;
     if (eng === "transcode" && $("txq").value) extra.transcode_height = $("txq").value;
+    // per-job overrides: pin a specific engine and/or runner (Auto = coordinator decides)
+    var epin = $("enginePin"), rpin = $("runnerPin");
+    if (epin && epin.value !== "auto" && !epin.hidden) extra.engine = epin.value;
+    if (rpin && rpin.value !== "auto") extra.runner = rpin.value;
     var ok = 0;
     for (var i = 0; i < ids.length; i++) {
       try {
@@ -273,12 +362,15 @@
     if (val == null || val === "") return;
     var s = el("div", "stat");
     s.appendChild(el("span", "sl", label));
-    s.appendChild(el("span", "sv", val));
+    var v = el("span", "sv");
+    v.textContent = val;      // val can carry runner/engine/stage from a runner - never innerHTML (XSS)
+    s.appendChild(v);
     g.appendChild(s);
   }
   function fillStats(g, j, pct) {
     g.innerHTML = "";
     statChip(g, "progress", pct + "%");
+    if (j.runner) statChip(g, "runner", j.runner + (j.engine ? " · " + engNice(j.engine) : ""));
     if (j.stage) statChip(g, "stage", j.stage);
     if (j.frame != null && j.total_frames) statChip(g, "frame", j.frame + " / " + j.total_frames);
     if (j.fps != null) statChip(g, "fps", Math.round(j.fps * 10) / 10);
@@ -575,6 +667,8 @@
     box.innerHTML = "";
     if (!list.length) { box.innerHTML = "<div class='empty'>No runners yet. Add or discover one.</div>"; }
     list.forEach(function (r) { box.appendChild(runnerCard(r)); });
+    state.runnerCaps = list.filter(function (r) { return r.online; });   // keep the pickers fresh
+    rebuildPins();
   }
 
   function runnerCard(r) {
@@ -589,7 +683,8 @@
       var ops = el("div", "rc-ops");
       r.ops.forEach(function (op) {
         var prefer = (r.prefer || []).indexOf(op) >= 0;
-        ops.appendChild(el("span", "op" + (prefer ? " prefer" : ""), op));
+        var eng = (r.engines || {})[op];
+        ops.appendChild(el("span", "op" + (prefer ? " prefer" : ""), esc(op + (eng ? " · " + engNice(eng) : ""))));
       });
       main.appendChild(ops);
     }
@@ -678,18 +773,31 @@
       var se = localStorage.getItem("dc_engine"), sq = localStorage.getItem("dc_ladaq");
       if (se && ENGINE_LABEL[se]) $("engine").value = se;
       if (sq) $("ladaq").value = sq;
+      _pinRestore.engine = localStorage.getItem("dc_enginePin");   // applied once options exist
+      _pinRestore.runner = localStorage.getItem("dc_runnerPin");
     } catch (e) {}
     var syncEngine = function () {
       var e = $("engine").value;
-      $("ladaq").hidden = e === "upscale" || e === "transcode";   // detect model is decensor-only
+      rebuildPins();                                              // refresh engine/runner options
+      var jasna = $("enginePin") && $("enginePin").value === "jasna";
+      $("ladaq").hidden = e === "upscale" || e === "transcode" || jasna;  // Lada-only detect model
       $("txq").hidden = e !== "transcode";
       refreshSelBtn();
       renderConn();
+      updatePreview();
     };
     syncEngine();
     $("engine").onchange = function () {
       syncEngine();
       try { localStorage.setItem("dc_engine", $("engine").value); } catch (e) {}
+    };
+    $("enginePin").onchange = function () {
+      syncEngine();       // refilter the runner pin, refresh ladaq visibility + preview
+      try { localStorage.setItem("dc_enginePin", $("enginePin").value); } catch (e) {}
+    };
+    $("runnerPin").onchange = function () {
+      updatePreview();
+      try { localStorage.setItem("dc_runnerPin", $("runnerPin").value); } catch (e) {}
     };
     $("ladaq").onchange = function () {
       try { localStorage.setItem("dc_ladaq", $("ladaq").value); } catch (e) {}

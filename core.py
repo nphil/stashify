@@ -216,6 +216,30 @@ def get_live_preview():
     return dict(_live_preview)
 
 
+# Stamp metadata (which runner + engine actually handled the job) onto the
+# running job so the dashboard can show it. The server registers a setter bound
+# to the current job id; single running job -> a module global is enough (same
+# assumption as set_log / the remote controls above).
+_job_stamp = {"fn": None}
+
+
+def set_job_stamp(fn):
+    _job_stamp["fn"] = fn
+
+
+def clear_job_stamp():
+    _job_stamp["fn"] = None
+
+
+def stamp_job(**fields):
+    fn = _job_stamp.get("fn")
+    if fn:
+        try:
+            fn(**fields)
+        except Exception:  # noqa: BLE001 - a stamp failure must never affect the job
+            pass
+
+
 def reset_cancel():
     with _active_lock:
         _active["cancel"] = False
@@ -345,20 +369,37 @@ def backend_command(cfg, input_path, result_dir, on_line=None, log_cb=None):
 
 
 def resolve_runner(cfg, op):
-    """Pick a runner (url, token, name) that can do `op`. Health-checks each
-    candidate, skips offline/unreachable ones, and prefers a runner that tags
-    `op` in its 'prefer' list and is idle. Falls back to the single ladaUrl
-    runner (which is treated as capable of everything it reports)."""
+    """Pick a runner (url, token, name, engine) that can do `op`. Health-checks
+    each candidate, skips offline/unreachable ones, and prefers a runner that
+    tags `op` in its 'prefer' list and is idle. Falls back to the single ladaUrl
+    runner (which is treated as capable of everything it reports).
+
+    Optional per-job pins (from the dashboard, via cfg):
+      - targetRunner: only this runner (matched on name OR url) is eligible.
+      - targetEngine: only runners whose engine for `op` equals this are eligible.
+    A pin that matches no online/capable runner raises (fail loud) rather than
+    silently rerouting - the user's intent is honored."""
     import requests
+
+    target_runner = str(cfg.get("targetRunner") or "").strip().rstrip("/")
+    target_engine = str(cfg.get("targetEngine") or "").strip()
+    if target_runner.lower() == "auto":
+        target_runner = ""
+    if target_engine.lower() == "auto":
+        target_engine = ""
 
     candidates = list(cfg.get("runners") or [])
     if str(cfg.get("ladaUrl") or "").strip():
         candidates.append({"name": "default", "url": cfg["ladaUrl"],
-                           "token": cfg.get("ladaToken", ""), "ops": None, "prefer": []})
+                           "token": cfg.get("ladaToken", ""), "ops": None,
+                           "prefer": [], "engines": None})
     scored = []
     for c in candidates:
         url = str(c.get("url") or "").rstrip("/")
         if not url:
+            continue
+        name = c.get("name", "runner")
+        if target_runner and target_runner not in (name, url):
             continue
         declared = c.get("ops")
         if declared is not None and op not in declared:
@@ -370,15 +411,33 @@ def resolve_runner(cfg, op):
             continue
         if op not in (h.get("ops") or []) or h.get("paused"):
             continue
+        engine = (h.get("engines") or {}).get(op) or (c.get("engines") or {}).get(op)
+        if target_engine and engine != target_engine:
+            continue
         # idle dominates preference: an idle node always outranks a busy one, and
         # 'prefer' only breaks ties among equally-idle/equally-busy nodes.
         score = (2 if not h.get("busy") else 0) + (1 if op in (c.get("prefer") or []) else 0)
         scored.append((score, {"url": url, "token": c.get("token", ""),
-                               "name": c.get("name", "runner")}))
+                               "name": name, "engine": engine}))
     if not scored:
+        if target_runner:
+            raise RuntimeError(f"runner '{target_runner}' is offline or can't do '{op}'")
+        if target_engine:
+            raise RuntimeError(f"no online runner provides engine '{target_engine}' for '{op}'")
         raise RuntimeError(f"no online runner can handle '{op}'")
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored[0][1]
+
+
+def preview_route(cfg, op):
+    """Dry-run of resolve_runner for the dashboard: which runner + engine WOULD
+    handle this op right now (honoring any targetRunner/targetEngine pin).
+    Returns {"runner","engine"} or {"error"}; never dispatches a job."""
+    try:
+        r = resolve_runner(cfg, op)
+        return {"runner": r.get("name"), "engine": r.get("engine")}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
 
 
 def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None):
@@ -398,7 +457,9 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None)
     headers = {"Content-Type": "application/json"}
     if token:
         headers["X-Lada-Token"] = token
-    log.info(f"routing {op} -> runner '{runner['name']}' ({base})")
+    log.info(f"routing {op} -> runner '{runner['name']}' ({base}) engine={runner.get('engine')}")
+    # record which node/engine actually handled this job, for the dashboard
+    stamp_job(runner=runner.get("name"), engine=runner.get("engine"))
 
     scratch = str(cfg.get("ladaScratch") or "/scratch")
     sub = os.path.join(scratch, "lada_" + uuid.uuid4().hex[:10])

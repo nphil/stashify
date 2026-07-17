@@ -73,21 +73,28 @@
           <option value="">All tags</option>
         </select>
         <span class="spacer"></span>
-        <select id="engine" title="Engine">
-          <option value="lada">Decensor (Lada)</option>
+        <select id="engine" title="Operation">
+          <option value="lada">Decensor</option>
           <option value="lada+up">Decensor + upscale</option>
           <option value="upscale">Upscale only (2x)</option>
           <option value="transcode">Transcode (HEVC)</option>
         </select>
+        <select id="enginePin" title="Engine (Auto = coordinator picks)">
+          <option value="auto">Auto engine</option>
+        </select>
         <select id="ladaq" title="Lada detection model">
           <option value="v4-fast">fast detect</option>
           <option value="v4-accurate">accurate detect</option>
+        </select>
+        <select id="runnerPin" title="Runner (Auto = load-balanced)">
+          <option value="auto">Auto runner</option>
         </select>
         <select id="txq" title="Transcode target" hidden>
           <option value="">keep resolution</option>
           <option value="1080">1080p</option>
           <option value="720">720p</option>
         </select>
+        <span id="routeWill" class="routewill" title="Where this job will run"></span>
         <button id="decensorSel" class="btn btn-primary" disabled>Decensor selected (0)</button>
       </div>
       <div id="grid" class="grid" aria-live="polite"></div>
