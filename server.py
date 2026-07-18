@@ -101,6 +101,10 @@ OVERRIDES = {
     "runner": "targetRunner",              # pin this job to a specific runner (name or url)
     "engine": "targetEngine",              # pin this job to a specific engine (lada | jasna | span)
     "secondary": "secondary",              # decensor secondary restoration (rtx-super-res; jasna-only)
+    "rtx_quality": "rtx_quality",          # rtx-super-res: low | medium | high | ultra
+    "rtx_scale": "rtx_scale",              # rtx-super-res: 2 | 4
+    "rtx_denoise": "rtx_denoise",          # rtx-super-res: none | low | medium | high | ultra
+    "rtx_deblur": "rtx_deblur",            # rtx-super-res: none | low | medium | high | ultra
 }
 
 # --------------------------------------------------------------------------- #

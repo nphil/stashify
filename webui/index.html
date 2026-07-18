@@ -89,9 +89,29 @@
         <select id="runnerPin" title="Runner (Auto = load-balanced)">
           <option value="auto">Auto runner</option>
         </select>
-        <label id="rtxWrap" class="chk" title="Jasna secondary restoration — extra detail via RTX Super Res (3080 only)" hidden>
-          <input type="checkbox" id="rtxToggle"> RTX detail
-        </label>
+        <span id="rtxWrap" class="rtxgroup" title="Jasna secondary restoration — extra detail via RTX Super Res (3080 only)" hidden>
+          <select id="rtxMode" title="RTX Super Res detail pass (jasna, 3080 only)">
+            <option value="off">RTX: off</option>
+            <option value="high2">RTX: High · 2×</option>
+            <option value="ultra4">RTX: Ultra · 4×</option>
+          </select>
+          <select id="rtxDenoise" title="RTX denoise level — Auto = engine default (medium)" hidden>
+            <option value="auto">denoise: auto</option>
+            <option value="none">denoise: none</option>
+            <option value="low">denoise: low</option>
+            <option value="medium">denoise: medium</option>
+            <option value="high">denoise: high</option>
+            <option value="ultra">denoise: ultra</option>
+          </select>
+          <select id="rtxDeblur" title="RTX deblur level — Auto = engine default (none)" hidden>
+            <option value="auto">deblur: auto</option>
+            <option value="none">deblur: none</option>
+            <option value="low">deblur: low</option>
+            <option value="medium">deblur: medium</option>
+            <option value="high">deblur: high</option>
+            <option value="ultra">deblur: ultra</option>
+          </select>
+        </span>
         <select id="txq" title="Transcode target" hidden>
           <option value="">keep resolution</option>
           <option value="1080">1080p</option>

@@ -175,6 +175,11 @@
     var pin = epin ? epin.value : "auto";
     var pinOk = pin === "auto" || pin === "jasna";
     wrap.hidden = !(isDecensor && jasnaAvail && pinOk);
+    // denoise/deblur pickers only matter once a mode is chosen
+    var mode = $("rtxMode") ? $("rtxMode").value : "off";
+    var on = !wrap.hidden && mode !== "off";
+    if ($("rtxDenoise")) $("rtxDenoise").hidden = !on;
+    if ($("rtxDeblur")) $("rtxDeblur").hidden = !on;
   }
   var _previewTimer;
   function updatePreview() { clearTimeout(_previewTimer); _previewTimer = setTimeout(doPreview, 150); }
@@ -302,11 +307,16 @@
     var epin = $("enginePin"), rpin = $("runnerPin");
     if (epin && epin.value !== "auto" && !epin.hidden) extra.engine = epin.value;
     if (rpin && rpin.value !== "auto") extra.runner = rpin.value;
-    // RTX Super Res: jasna-only secondary detail pass. Force the jasna engine so
-    // it can't route to a runner that ignores it.
-    var rtx = $("rtxToggle");
-    if (rtx && rtx.checked && !$("rtxWrap").hidden && (backend === "decensor")) {
+    // RTX Super Res: jasna-only secondary detail pass. Preset maps to quality+scale;
+    // denoise/deblur are sent only when overridden ("auto" = engine default). Force
+    // the jasna engine so it can't route to a runner that ignores it.
+    var rtxMode = $("rtxMode");
+    if (rtxMode && !$("rtxWrap").hidden && rtxMode.value !== "off" && backend === "decensor") {
       extra.secondary = "rtx-super-res";
+      if (rtxMode.value === "high2") { extra.rtx_quality = "high"; extra.rtx_scale = "2"; }
+      else { extra.rtx_quality = "ultra"; extra.rtx_scale = "4"; }
+      var dn = $("rtxDenoise"); if (dn && dn.value !== "auto") extra.rtx_denoise = dn.value;
+      var db = $("rtxDeblur"); if (db && db.value !== "auto") extra.rtx_deblur = db.value;
       if (!extra.engine) extra.engine = "jasna";
     }
     var ok = 0;
@@ -800,7 +810,9 @@
       if (sq) $("ladaq").value = sq;
       _pinRestore.engine = localStorage.getItem("dc_enginePin");   // applied once options exist
       _pinRestore.runner = localStorage.getItem("dc_runnerPin");
-      if ($("rtxToggle")) $("rtxToggle").checked = localStorage.getItem("dc_rtx") === "1";
+      if ($("rtxMode")) $("rtxMode").value = localStorage.getItem("dc_rtx_mode") || "off";
+      if ($("rtxDenoise")) $("rtxDenoise").value = localStorage.getItem("dc_rtx_denoise") || "auto";
+      if ($("rtxDeblur")) $("rtxDeblur").value = localStorage.getItem("dc_rtx_deblur") || "auto";
     } catch (e) {}
     var syncEngine = function () {
       var e = $("engine").value;
@@ -829,8 +841,15 @@
     $("ladaq").onchange = function () {
       try { localStorage.setItem("dc_ladaq", $("ladaq").value); } catch (e) {}
     };
-    if ($("rtxToggle")) $("rtxToggle").onchange = function () {
-      try { localStorage.setItem("dc_rtx", $("rtxToggle").checked ? "1" : "0"); } catch (e) {}
+    if ($("rtxMode")) $("rtxMode").onchange = function () {
+      updateRtx();       // toggle denoise/deblur visibility with the chosen mode
+      try { localStorage.setItem("dc_rtx_mode", $("rtxMode").value); } catch (e) {}
+    };
+    if ($("rtxDenoise")) $("rtxDenoise").onchange = function () {
+      try { localStorage.setItem("dc_rtx_denoise", $("rtxDenoise").value); } catch (e) {}
+    };
+    if ($("rtxDeblur")) $("rtxDeblur").onchange = function () {
+      try { localStorage.setItem("dc_rtx_deblur", $("rtxDeblur").value); } catch (e) {}
     };
     $("prev").onclick = function () { if (state.page > 1) { state.page--; loadScenes(); } };
     $("next").onclick = function () { state.page++; loadScenes(); };

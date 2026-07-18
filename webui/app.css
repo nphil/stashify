@@ -86,6 +86,8 @@ select {
   border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font-size: 13px;
 }
 .chk { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 5px; user-select: none; }
+/* RTX Super Res picker: preset + optional denoise/deblur, grouped as one unit */
+.rtxgroup { display: inline-flex; align-items: center; gap: 6px; }
 
 /* ---- buttons ---- */
 .btn {

@@ -636,16 +636,30 @@ def run_job(lane, job):
                 argv += ["--encoder-settings", str(CFG["jasna_encoder_settings"])]
             if CFG["jasna_no_compile"]:
                 argv.append("--no-compile")
-            # secondary restoration (RTX Super Res etc.): per-job override, else config default
+            # secondary restoration (RTX Super Res etc.): per-job override, else config
+            # default. All rtx params are validated against jasna's accepted choices so
+            # a bad override (e.g. a hand-crafted API call) can't fail the whole job.
             secondary = str(o.get("secondary") or CFG.get("jasna_secondary") or "").strip()
             if secondary and secondary != "none":
-                argv += ["--secondary-restoration", secondary,
-                         "--rtx-scale", str(CFG.get("jasna_rtx_scale", 4)),
-                         "--rtx-quality", str(CFG.get("jasna_rtx_quality", "ultra"))]
-                if CFG.get("jasna_rtx_denoise"):
-                    argv += ["--rtx-denoise", str(CFG["jasna_rtx_denoise"])]
-                if CFG.get("jasna_rtx_deblur"):
-                    argv += ["--rtx-deblur", str(CFG["jasna_rtx_deblur"])]
+                argv += ["--secondary-restoration", secondary]
+                if secondary == "rtx-super-res":
+                    _levels = {"low", "medium", "high", "ultra"}
+                    quality = str(o.get("rtx_quality") or CFG.get("jasna_rtx_quality") or "ultra").lower()
+                    if quality not in _levels:
+                        quality = "ultra"
+                    try:
+                        scale = int(o.get("rtx_scale") or CFG.get("jasna_rtx_scale") or 4)
+                    except (TypeError, ValueError):
+                        scale = 4
+                    if scale not in (2, 4):
+                        scale = 4
+                    argv += ["--rtx-scale", str(scale), "--rtx-quality", quality]
+                    denoise = str(o.get("rtx_denoise") or CFG.get("jasna_rtx_denoise") or "").lower()
+                    deblur = str(o.get("rtx_deblur") or CFG.get("jasna_rtx_deblur") or "").lower()
+                    if denoise in (_levels | {"none"}):
+                        argv += ["--rtx-denoise", denoise]
+                    if deblur in (_levels | {"none"}):
+                        argv += ["--rtx-deblur", deblur]
             rc, cancelled = _stream_subprocess(lane, jid, argv, scale=(0, n_phases))
             if chain and rc == 0 and not cancelled:
                 mid = _newest_video(mid_dir)
