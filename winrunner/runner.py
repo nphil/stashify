@@ -579,6 +579,31 @@ def _purge(path, tries=8, delay=0.5):
         pass
 
 
+def _copy_with_progress(jid, src, dst, label="Copying source local"):
+    """Chunked copy that drives the job's progress bar + status, so a multi-GB
+    copy over a slow link isn't a frozen-looking wait. stage='copy'."""
+    total = os.path.getsize(src) if os.path.isfile(src) else 0
+    gb = total / (1 << 30)
+    copied = 0
+    last = 0.0
+    set_job(jid, stage="copy", progress=0.0, message="%s (%.1f GB)" % (label, gb))
+    with open(src, "rb") as fi, open(dst, "wb") as fo:
+        while True:
+            chunk = fi.read(8 << 20)              # 8 MB
+            if not chunk:
+                break
+            fo.write(chunk)
+            copied += len(chunk)
+            now = time.time()
+            if now - last >= 1.0 and total:
+                last = now
+                pct = copied / total
+                set_job(jid, stage="copy", progress=round(pct, 3),
+                        message="%s - %d%% (%.1f / %.1f GB)" % (label, int(pct * 100),
+                                                               copied / (1 << 30), gb))
+    set_job(jid, progress=1.0, message="%s - done" % label)
+
+
 def run_job(lane, job):
     jid = job["id"]
     o = job["_opts"]
@@ -607,9 +632,8 @@ def run_job(lane, job):
         os.makedirs(CFG["local_temp"], exist_ok=True)
         tmp_copy = os.path.join(CFG["local_temp"], "in_" + jid + os.path.splitext(src)[1])
         _gb = (os.path.getsize(src) / (1 << 30)) if os.path.isfile(src) else 0.0
-        set_job(jid, stage="copy", message="Copying source local (%.1f GB)" % _gb)
         push_log(jid, "copying source local (%.1f GB, one-time bulk read)..." % _gb, "event")
-        shutil.copyfile(src, tmp_copy)
+        _copy_with_progress(jid, src, tmp_copy)
         push_log(jid, "source copied local; scan + decensor now read local disk", "event")
         src = tmp_copy
 
@@ -724,6 +748,8 @@ def run_job(lane, job):
                 _seg_thread = threading.Thread(target=_seg.run, args=(seg_stop,),
                                                kwargs={"poll": 1.0}, daemon=True)
                 _seg_thread.start()
+            # reset the bar for the decensor phase (copy/scan drove it to 100%)
+            set_job(jid, stage=op, progress=0.0, message="Starting " + op)
             rc, cancelled = _stream_subprocess(lane, jid, argv, scale=(0, n_phases))
             seg_stop.set()
             if _seg is not None and rc == 0 and not cancelled:
@@ -896,7 +922,7 @@ def _scan_mosaics(jid, src):
             "--provider", str(CFG.get("jasna_scan_provider", "trt")),
             "--stride-seconds", str(CFG.get("jasna_preview_stride", 0.75))]
     push_log(jid, "preview: scanning for mosaic segments...", "event")
-    set_job(jid, stage="scan", message="Scanning for mosaic segments")
+    set_job(jid, stage="scan", progress=0.0, message="Scanning for mosaic segments")
     data = None
     # stream live so the (multi-minute) scan shows progress instead of a silent wait
     try:
@@ -915,7 +941,8 @@ def _scan_mosaics(jid, src):
                     pass
             m = re.match(r"scan-progress:\s*(\d+)%", line)
             if m:
-                set_job(jid, message="Scanning for mosaics %s%%" % m.group(1))
+                set_job(jid, stage="scan", progress=round(int(m.group(1)) / 100.0, 3),
+                        message="Scanning for mosaics %s%%" % m.group(1))
             else:
                 push_log(jid, line, "proc")
         proc.wait()
