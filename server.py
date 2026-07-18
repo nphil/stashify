@@ -405,14 +405,24 @@ def _active_runner_names():
 
 
 def gpu_poller():
+    from concurrent.futures import ThreadPoolExecutor
     while True:
         try:
             active = _active_runner_names()
-            rows = []
-            for t in _gpu_targets():
-                g = _read_runner_gpu(t["url"], t["token"])
-                rows.append({"name": t["name"], "url": t["url"], "online": g is not None,
-                             "active": t["name"] in active, "gpu": g or {}})
+            targets = _gpu_targets()
+            # Poll runners CONCURRENTLY so a powered-off/asleep runner's 3s connect
+            # timeout doesn't serialize onto the others (cycle time = slowest, not sum).
+            gpus = {}
+            if targets:
+                with ThreadPoolExecutor(max_workers=min(8, len(targets))) as ex:
+                    futs = {ex.submit(_read_runner_gpu, t["url"], t["token"]): t for t in targets}
+                    for fut, t in futs.items():
+                        try:
+                            gpus[t["url"]] = fut.result()
+                        except Exception:  # noqa: BLE001
+                            gpus[t["url"]] = None
+            rows = [{"name": t["name"], "url": t["url"], "online": gpus.get(t["url"]) is not None,
+                     "active": t["name"] in active, "gpu": gpus.get(t["url"]) or {}} for t in targets]
             if not rows:                                  # worker-on-GPU-host fallback
                 lg = _local_nvidia()
                 if lg is not None:
