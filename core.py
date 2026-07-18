@@ -921,6 +921,12 @@ def op_suffix(backend):
     return {"upscale": "_upscaled", "transcode": "_transcoded"}.get(backend, "_decensored")
 
 
+def op_name(backend):
+    """User-facing operation name. 'lada' is an internal backend id; the actual
+    engine (Lada vs Jasna) is chosen per job and stamped separately."""
+    return {"upscale": "upscale", "transcode": "transcode"}.get(backend, "decensor")
+
+
 def op_tag_names(cfg):
     """Tags describing what was done to the scene: Decensored, Upscaled,
     Transcoded, or a combination (lada + postUpscale chain). Applied to the
@@ -1007,9 +1013,9 @@ def process_to_review(stash, cfg, scene_id, progress=None, log_cb=None):
 
     try:
         backend = cfg["backend"]
-        p(0.05, f"Running {backend}", {"stage": backend})
+        p(0.05, f"Running {op_name(backend)}", {"stage": op_name(backend)})
         produced = BACKENDS[backend](cfg, input_path, new_dir(),
-                                     on_line=_band(progress, 0.05, 0.85, backend), log_cb=log_cb)
+                                     on_line=_band(progress, 0.05, 0.85, op_name(backend)), log_cb=log_cb)
 
         p(0.88, "Importing preview into Stash", {"stage": "import"})
         os.makedirs(cfg["outputDir"], exist_ok=True)

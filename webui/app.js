@@ -71,10 +71,13 @@
     } catch (e) { /* worker may accept unauthenticated */ }
   }
   var health = null;
-  var ENGINE_LABEL = { "lada": "lada", "lada+up": "lada + upscale", "upscale": "upscale 2x", "transcode": "transcode" };
+  var ENGINE_LABEL = { "lada": "decensor", "lada+up": "decensor + upscale", "upscale": "upscale 2x", "transcode": "transcode" };
   function connLabel() {
-    // reflect the SELECTED engine, not the worker's env default
-    return ENGINE_LABEL[$("engine").value] || (health ? health.backend : "?");
+    // reflect the SELECTED operation + pinned engine, not an internal backend id
+    var lbl = ENGINE_LABEL[$("engine").value] || (health ? health.backend : "?");
+    var ep = $("enginePin");
+    if (ep && !ep.hidden && ep.value && ep.value !== "auto") lbl += " · " + engNice(ep.value);
+    return lbl;
   }
   function renderConn() {
     if (!health) return;

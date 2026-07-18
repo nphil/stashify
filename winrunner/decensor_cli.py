@@ -26,7 +26,7 @@ import subprocess
 
 IS_WIN = os.name == "nt"
 NOWIN = subprocess.CREATE_NO_WINDOW if IS_WIN else 0
-HEARTBEAT_SECS = 60
+HEARTBEAT_SECS = 25   # report liveness this often during silent phases (was 60)
 # stop heartbeating after this much CONTINUOUS silence: long enough for a
 # worst-case first-run TensorRT compile, short enough that a truly hung jasna
 # (dead SMB read) is eventually handed to the runner's stall watchdog to kill
@@ -39,6 +39,40 @@ _RE_FPS_GLUED = re.compile(r"([\d.]+)\s*fps\b", re.IGNORECASE)
 
 def log(m):
     print(m, flush=True)
+
+
+def _gpu_stats():
+    """Best-effort (util%, nvenc%, mem_MB) so a silent phase can still prove it's
+    alive. None if nvidia-smi isn't reachable."""
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,utilization.encoder,memory.used",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=6, creationflags=NOWIN)
+        gu, eu, mem = [x.strip() for x in r.stdout.strip().splitlines()[0].split(",")]
+        return int(gu), int(eu), int(mem)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _bytes_in(paths):
+    """Total bytes across the output file + work dir, to detect encode/mux progress
+    when jasna emits no tqdm (metadata only - never reads file contents)."""
+    total = 0
+    for p in paths:
+        try:
+            if os.path.isfile(p):
+                total += os.path.getsize(p)
+            elif os.path.isdir(p):
+                for root, _dirs, files in os.walk(p):
+                    for f in files:
+                        try:
+                            total += os.path.getsize(os.path.join(root, f))
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+    return total
 
 
 def normalize(seg):
@@ -112,13 +146,15 @@ def main():
                             creationflags=NOWIN)
     last_out = [time.time()]
     done = threading.Event()
+    progress_seen = [False]
 
     def heartbeat():
         # last_out is written ONLY by the reader thread (real jasna output), so
         # `quiet` measures continuous real silence; last_beat throttles our own
         # lines without polluting that measurement.
         last_beat = 0.0
-        while not done.wait(15):
+        prev_bytes = [None]
+        while not done.wait(10):
             now = time.time()
             quiet = now - last_out[0]
             if quiet < HEARTBEAT_SECS or now - last_beat < HEARTBEAT_SECS:
@@ -129,8 +165,30 @@ def main():
                     "letting the stall watchdog end this" % (HEARTBEAT_MAX_QUIET // 3600))
                 return
             last_beat = now
-            log(f"decensor: jasna still running, no output for {int(quiet)}s "
-                f"(engine compile / long encode phases are silent)")
+            # Prove liveness during jasna's silent phases: GPU busy => compiling or
+            # restoring; output growing => encoding/muxing. Both idle => maybe hung.
+            cur = _bytes_in([out_path, work_dir])
+            grew = 0 if prev_bytes[0] is None else max(0, cur - prev_bytes[0])
+            prev_bytes[0] = cur
+            g = _gpu_stats()
+            parts = []
+            if g:
+                parts.append("GPU %d%% · NVENC %d%% · %.1fGB" % (g[0], g[1], g[2] / 1024))
+            if grew:
+                parts.append("output +%dMB/%ds" % (grew // (1 << 20), HEARTBEAT_SECS))
+            busy = (g is not None and (g[0] > 5 or g[1] > 5)) or grew > 0
+            if not progress_seen[0]:
+                phase = "loading / compiling TensorRT engines (one-time, up to ~60 min)"
+            elif g is not None and g[0] > 15:
+                phase = "restoring a segment on the GPU"
+            elif grew:
+                phase = "encoding / assembling output"
+            elif busy:
+                phase = "working"
+            else:
+                phase = "no GPU or disk activity - may be stalled (watchdog will end a true hang)"
+            tail = (" - " + " · ".join(parts)) if parts else ""
+            log("decensor: working [%ds no tqdm]: %s%s" % (int(quiet), phase, tail))
     threading.Thread(target=heartbeat, daemon=True).start()
 
     rc = 1
@@ -155,6 +213,7 @@ def main():
                     continue
                 p = normalize(seg)
                 if p:
+                    progress_seen[0] = True
                     pending = p
                     if time.time() - last_progress >= PROGRESS_THROTTLE:
                         last_progress = time.time()
