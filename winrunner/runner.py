@@ -537,6 +537,36 @@ def _safe_model(o):
     return CFG["upscale_model"]
 
 
+def _purge(path, tries=8, delay=0.5):
+    """Best-effort delete of a temp file or dir tree, resilient to Windows' post-kill
+    handle lag. On cancel/stall we tree-kill jasna.exe but don't wait for it: for a
+    moment the dying process still holds its multi-GB .hevc temp open, so a one-shot
+    rmtree(ignore_errors=True) fails on the locked file and the dir leaks until the
+    next startup sweep. Retry with backoff until the handle is released, then give up
+    quietly. On a clean finish the child has already exited, so the first try wins."""
+    if not path:
+        return
+    for _ in range(tries):
+        if not os.path.exists(path):
+            return
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+            return
+        except OSError:
+            time.sleep(delay)
+    # exhausted retries - one last silent best-effort so we never raise from cleanup
+    try:
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+        elif os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
 def run_job(lane, job):
     jid = job["id"]
     o = job["_opts"]
@@ -638,15 +668,11 @@ def run_job(lane, job):
             raise RuntimeError("unsupported op on this runner: " + op)
     finally:
         stop_preview.set()
-        if tmp_copy and os.path.isfile(tmp_copy):
-            try:
-                os.remove(tmp_copy)
-            except OSError:
-                pass
-        if mid_dir:
-            shutil.rmtree(mid_dir, ignore_errors=True)
-        if jasna_work:
-            shutil.rmtree(jasna_work, ignore_errors=True)
+        # retry-purge: on cancel/stall the tree-killed child can briefly hold these
+        # locked (Windows), so a one-shot delete would silently leak multi-GB temps.
+        _purge(tmp_copy)
+        _purge(mid_dir)
+        _purge(jasna_work)
 
     if cancelled:
         set_job(jid, state="cancelled", message="Cancelled", _ended_at=time.time())
