@@ -49,6 +49,12 @@ if (-not $SkipDeps) {
   $py = "$Root\.venv\Scripts\python.exe"
   Write-Host "installing torch (cu124) + deps (a few GB, one-time)..."
   uv pip install --python $py torch torchvision --index-url https://download.pytorch.org/whl/cu124
+  # Fast mosaic scan for the live preview: direct TensorRT on jasna's pre-built rfdetr
+  # engine (~20x faster inference than DirectML). Pinned to the exact version jasna
+  # compiled the engine with; the DLL-bearing wheel is only on NVIDIA's index. The
+  # scan degrades to DirectML automatically if this is absent, so failure is non-fatal.
+  uv pip install --python $py --extra-index-url https://pypi.nvidia.com "tensorrt-cu12==10.16.1.11" 2>$null
+  if ($LASTEXITCODE -ne 0) { Write-Warning "tensorrt install failed - live-preview scan will use DirectML (slower)" }
   uv pip install --python $py -r "$Src\requirements.txt"
   if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -and
       -not (Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Gyan.FFmpeg*" -ErrorAction SilentlyContinue)) {

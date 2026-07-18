@@ -89,17 +89,94 @@ def _add_nvidia_dll_dirs():
                 pass
 
 
-def make_session(onnx_path, provider):
-    _add_nvidia_dll_dirs()
-    import onnxruntime as ort
-    prov = {"dml": "DmlExecutionProvider", "cuda": "CUDAExecutionProvider",
-            "cpu": "CPUExecutionProvider"}.get(provider, provider)
-    so = ort.SessionOptions()
-    sess = ort.InferenceSession(onnx_path, sess_options=so,
-                                providers=[prov, "CPUExecutionProvider"])
-    active = sess.get_providers()
-    log("scan: onnxruntime %s providers=%s" % (ort.__version__, active))
-    return sess, active
+class OrtScorer:
+    """onnxruntime scorer (DirectML/CUDA/CPU). ~150 ms/frame on DML for rfdetr."""
+
+    def __init__(self, onnx_path, provider):
+        _add_nvidia_dll_dirs()
+        import onnxruntime as ort
+        prov = {"dml": "DmlExecutionProvider", "cuda": "CUDAExecutionProvider",
+                "cpu": "CPUExecutionProvider"}.get(provider, provider)
+        self.sess = ort.InferenceSession(onnx_path, sess_options=ort.SessionOptions(),
+                                         providers=[prov, "CPUExecutionProvider"])
+        b = self.sess.get_inputs()[0].shape[0]
+        self.batch = b if isinstance(b, int) else 4
+        self._in = self.sess.get_inputs()[0].name
+        self.provider_name = self.sess.get_providers()[0]
+        log("scan: onnxruntime %s provider=%s" % (ort.__version__, self.provider_name))
+
+    def score(self, x):
+        outs = self.sess.run(None, {self._in: x.astype(np.float32)})
+        boxes = next(i for i, o in enumerate(outs) if o.ndim == 3 and o.shape[-1] == 4)
+        masks = next(i for i, o in enumerate(outs) if o.ndim == 4)
+        logits = outs[next(i for i in range(len(outs)) if i not in (boxes, masks))]
+        prob = 1.0 / (1.0 + np.exp(-logits))
+        return prob.max(axis=(1, 2))
+
+
+class TrtScorer:
+    """Direct TensorRT: deserialize jasna's pre-built rfdetr engine and run it with
+    torch CUDA buffers (port of jasna's TrtRunner). ~7 ms/frame on the 3080 - ~20x
+    faster than onnxruntime, whose CPU-fallback of rfdetr's deformable-attention ops
+    is the whole reason DML is slow. Engine is version-locked, so this needs the
+    exact tensorrt build jasna compiled it with (tensorrt-cu12==10.16.1.11)."""
+    batch = 4
+
+    def __init__(self, engine_path):
+        import torch
+        import tensorrt as trt
+        self._torch = torch
+        if not os.path.isfile(engine_path):
+            raise FileNotFoundError("engine not found: " + engine_path)
+        self.dev = torch.device("cuda:0")
+        rt = trt.Runtime(trt.Logger(trt.Logger.ERROR))
+        with open(engine_path, "rb") as fh:
+            self.engine = rt.deserialize_cuda_engine(fh.read())
+        if self.engine is None:
+            raise RuntimeError("deserialize failed (TensorRT version mismatch?)")
+        self.ctx = self.engine.create_execution_context()
+        td = {trt.DataType.FLOAT: torch.float32, trt.DataType.HALF: torch.float16,
+              trt.DataType.INT32: torch.int32, trt.DataType.BOOL: torch.bool}
+        ins, outs = [], []
+        for i in range(self.engine.num_io_tensors):
+            n = self.engine.get_tensor_name(i)
+            (ins if self.engine.get_tensor_mode(n) == trt.TensorIOMode.INPUT else outs).append(n)
+        self._in = ins[0]
+        self.ctx.set_input_shape(self._in, (self.batch, 3, RES, RES))
+        self._in_dtype = td[self.engine.get_tensor_dtype(self._in)]
+        self._out_t, shapes = {}, {}
+        for n in outs:
+            shape = tuple(int(d) for d in self.ctx.get_tensor_shape(n))
+            t = torch.empty(shape, dtype=td[self.engine.get_tensor_dtype(n)], device=self.dev)
+            self._out_t[n] = t
+            shapes[n] = shape
+            self.ctx.set_tensor_address(n, int(t.data_ptr()))
+        self._logits = next(n for n, s in shapes.items() if len(s) == 3 and s[-1] != 4)
+        self._stream = torch.cuda.current_stream(self.dev).cuda_stream
+        self.provider_name = "TensorRT(%s)" % trt.__version__
+        log("scan: TensorRT engine %s" % os.path.basename(engine_path))
+
+    def score(self, x):
+        torch = self._torch
+        # .contiguous() is REQUIRED: without it the .to() buffer's data_ptr feeds
+        # garbage to the engine (scores collapse to the no-input baseline).
+        xt = torch.from_numpy(x).to(self.dev, dtype=self._in_dtype).contiguous()
+        self.ctx.set_tensor_address(self._in, int(xt.data_ptr()))
+        self.ctx.execute_async_v3(self._stream)
+        torch.cuda.synchronize()
+        return torch.sigmoid(self._out_t[self._logits].float()).amax(dim=(1, 2)).cpu().numpy()
+
+
+def make_scorer(args):
+    """TensorRT (fast) if requested + available, else onnxruntime; TRT failure
+    (missing engine, no tensorrt, version mismatch) transparently degrades to DML."""
+    if args.provider == "trt":
+        try:
+            return TrtScorer(args.engine)
+        except Exception as exc:  # noqa: BLE001
+            log("scan: tensorrt unavailable (%s); falling back to DirectML" % str(exc)[:160])
+        return OrtScorer(args.onnx, "dml")
+    return OrtScorer(args.onnx, args.provider)
 
 
 def ffprobe_meta(ffprobe, path):
@@ -154,24 +231,12 @@ def preprocess(frame_rgb):
     return (chw - MEAN) / STD
 
 
-def score_output(outputs, out_names):
-    # logits = the (B,Q,C) output that isn't boxes (last dim 4) or masks (ndim 4)
-    boxes = next(i for i, o in enumerate(outputs) if o.ndim == 3 and o.shape[-1] == 4)
-    masks = next(i for i, o in enumerate(outputs) if o.ndim == 4)
-    logits_i = next(i for i in range(len(outputs)) if i not in (boxes, masks))
-    logits = outputs[logits_i]
-    prob = 1.0 / (1.0 + np.exp(-logits))
-    return prob.max(axis=(1, 2))                      # (B,)
-
-
 def run_scan(args):
     dur, fps = ffprobe_meta(args.ffprobe, args.input)
     rate = 1.0 / max(0.05, args.stride_seconds)
     log("scan: %.1fs @ %.2ffps, sampling %gfps (stride %.2fs)" % (dur, fps, rate, args.stride_seconds))
-    sess, active = make_session(args.onnx, args.provider)
-    inp = sess.get_inputs()[0]
-    batch = inp.shape[0] if isinstance(inp.shape[0], int) else 4
-    in_name = inp.name
+    scorer = make_scorer(args)
+    batch = scorer.batch
 
     times, scores = [], []
     pending, pend_t = [], []
@@ -194,8 +259,7 @@ def run_scan(args):
         while len(xs) < batch:
             xs.append(xs[-1])
         x = np.stack(xs).astype(np.float32)
-        outs = sess.run(None, {in_name: x})
-        sc = score_output(outs, sess.get_outputs())
+        sc = scorer.score(x)
         for j in range(len(pending)):
             times.append(pend_t[j])
             scores.append(float(sc[j]))
@@ -231,7 +295,7 @@ def run_scan(args):
         "duration": round(dur, 3),
         "n_samples": len(scores),
         "n_hits": n_hits,
-        "provider": active[0] if active else "?",
+        "provider": scorer.provider_name,
         "max_score": round(max(scores), 4) if scores else 0.0,
     }
 
@@ -245,7 +309,10 @@ def main():
     ap.add_argument("--stride-seconds", type=float, default=1.0)
     ap.add_argument("--threshold", type=float, default=SCAN_SCORE_FLOOR)
     ap.add_argument("--pad", type=float, default=None, help="seconds each side (default stride/2)")
-    ap.add_argument("--provider", default="dml")
+    ap.add_argument("--provider", default="dml", choices=["trt", "dml", "cuda", "cpu"],
+                    help="trt = direct TensorRT on jasna's engine (fast); dml = onnxruntime DirectML")
+    ap.add_argument("--engine", default="",
+                    help="TensorRT engine for --provider trt (default: <onnx>.bs4.fp16.win.engine)")
     ap.add_argument("--hwaccel", default="cuda", choices=["cuda", "none"])
     args = ap.parse_args()
     args._no_hw = False
@@ -253,6 +320,8 @@ def main():
         log("scan: input not found: " + args.input); return 2
     if not os.path.isfile(args.onnx):
         log("scan: onnx not found: " + args.onnx); return 2
+    if not args.engine:   # jasna's naming: rfdetr-v5.onnx -> rfdetr-v5.bs4.fp16.win.engine
+        args.engine = os.path.splitext(args.onnx)[0] + ".bs4.fp16.win.engine"
     result = run_scan(args)
     print(json.dumps(result), flush=True)   # single machine-readable line on stdout
     return 0

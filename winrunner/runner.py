@@ -144,7 +144,8 @@ def load_config():
     # live SEGMENT preview (jasna >=0.8.0 smart mode): scan mosaics -> --segments ->
     # tap the per-span fragments jasna writes -> before/after clips. Per-job opt-in.
     cfg.setdefault("jasna_preview", False)         # global default (jobs opt in per request)
-    cfg.setdefault("jasna_preview_stride", 1.5)    # mosaic-scan sampling sec/sample (DML ~150ms/frame; lower = better recall, slower scan)
+    cfg.setdefault("jasna_scan_provider", "trt")   # trt = direct TensorRT (~7ms/frame); dml = onnxruntime DirectML (~150ms) fallback
+    cfg.setdefault("jasna_preview_stride", 0.75)   # mosaic-scan sampling sec/sample (lower = better recall; cheap on TRT)
     cfg.setdefault("jasna_preview_height", 720)    # preview clip height (downscaled)
     cfg.setdefault("jasna_preview_encoder", "libx264")  # OFF the 3080 (cpu/igpu) - no job contention
     cfg["rfdetr_onnx"] = _expand(cfg.get("rfdetr_onnx") or (
@@ -865,7 +866,8 @@ def _scan_mosaics(jid, src):
         return "", None
     argv = [CFG["venv_python"], os.path.join(HERE, "scan_cli.py"),
             "--input", src, "--onnx", onnx, "--ffmpeg", FFMPEG, "--ffprobe", FFPROBE,
-            "--stride-seconds", str(CFG.get("jasna_preview_stride", 1.5))]
+            "--provider", str(CFG.get("jasna_scan_provider", "trt")),
+            "--stride-seconds", str(CFG.get("jasna_preview_stride", 0.75))]
     push_log(jid, "preview: scanning for mosaic segments...", "event")
     set_job(jid, stage="scan", message="Scanning for mosaic segments")
     data = None
