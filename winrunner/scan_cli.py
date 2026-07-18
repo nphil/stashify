@@ -177,6 +177,15 @@ def run_scan(args):
     pending, pend_t = [], []
     idx = 0
     t0 = time.time()
+    est_total = max(1, int(dur * rate))
+    last_prog = [0.0]
+
+    def _progress():
+        now = time.time()
+        if now - last_prog[0] >= 2.0:
+            last_prog[0] = now
+            pct = min(99, int(100 * len(scores) / est_total))
+            log("scan-progress: %d%% (%d/%d samples)" % (pct, len(scores), est_total))
 
     def flush():
         if not pending:
@@ -201,6 +210,7 @@ def run_scan(args):
             idx += 1
             if len(pending) == batch:
                 flush()
+                _progress()
         flush()
     except RuntimeError as exc:
         if args.hwaccel == "cuda" and not args._no_hw:

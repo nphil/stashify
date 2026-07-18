@@ -105,6 +105,7 @@ OVERRIDES = {
     "rtx_scale": "rtx_scale",              # rtx-super-res: 2 | 4
     "rtx_denoise": "rtx_denoise",          # rtx-super-res: none | low | medium | high | ultra
     "rtx_deblur": "rtx_deblur",            # rtx-super-res: none | low | medium | high | ultra
+    "preview": "preview",                  # live segment preview (jasna >=0.8.0 smart mode)
 }
 
 # --------------------------------------------------------------------------- #
@@ -418,6 +419,54 @@ def _preview_runner(info, dest_dir):
         os.replace(tmp, os.path.join(dest_dir, which + ".jpg"))
 
 
+_seg_lock = threading.Lock()
+_segments = {}   # job_id -> [ {n,start,end,dur} ] mirrored from the runner
+
+
+def _mirror_segments(info, jid, dest):
+    """Mirror the runner's live segment preview (jasna 0.8.0 smart mode): pull the
+    segment list, then fetch each new seg<N>_before/after.mp4 into PREVIEW_DIR so the
+    dashboard (served from here, cross-origin to the runner) can play them."""
+    import requests
+
+    tok = info.get("token", "")
+    headers = {"X-Runner-Token": tok, "X-Lada-Token": tok}
+    try:
+        r = requests.get("%s/jobs/%s/segments" % (info["base"], info["rid"]),
+                         headers=headers, timeout=10)
+        if r.status_code != 200:
+            return
+        segs = (r.json() or {}).get("segments") or []
+    except Exception:  # noqa: BLE001
+        return
+    with _seg_lock:
+        have = {s["n"] for s in _segments.get(jid, [])}
+    for s in segs:
+        n = s.get("n")
+        if n is None or n in have:
+            continue
+        ok = True
+        for which in ("before", "after"):
+            try:
+                rr = requests.get("%s/jobs/%s/seg/%d/%s.mp4" % (info["base"], info["rid"], n, which),
+                                  headers=headers, timeout=30)
+            except Exception:  # noqa: BLE001
+                ok = False
+                break
+            if rr.status_code != 200 or not rr.content:
+                ok = False
+                break
+            tmp = os.path.join(dest, "seg%d_%s.tmp" % (n, which))
+            with open(tmp, "wb") as fh:
+                fh.write(rr.content)
+            os.replace(tmp, os.path.join(dest, "seg%d_%s.mp4" % (n, which)))
+        if ok:
+            with _seg_lock:
+                lst = _segments.setdefault(jid, [])
+                if not any(x["n"] == n for x in lst):
+                    lst.append(s)
+
+
 def preview_poller():
     extractors = {"runner": _preview_runner, "lada": _preview_runner}   # accept legacy tag too
     while True:
@@ -434,6 +483,7 @@ def preview_poller():
         try:
             os.makedirs(dest, exist_ok=True)
             fn(info, dest)
+            _mirror_segments(info, jid, dest)
         except Exception:  # noqa: BLE001 - preview is best-effort, never fatal
             pass
 
@@ -441,6 +491,16 @@ def preview_poller():
 def preview_file(job_id, which):
     p = os.path.join(PREVIEW_DIR, job_id, which + ".jpg")
     return p if os.path.isfile(p) else None
+
+
+def seg_file(job_id, n, which):
+    p = os.path.join(PREVIEW_DIR, job_id, "seg%d_%s.mp4" % (int(n), which))
+    return p if os.path.isfile(p) else None
+
+
+def job_segments(job_id):
+    with _seg_lock:
+        return list(_segments.get(job_id, []))
 
 
 def live_source(job_id):
@@ -504,6 +564,7 @@ def public(job):
         out["gpu_stats"] = dict(_gpu)
     out["log_cursor"] = job_log_cursor(job.get("id"))
     out["preview"] = preview_file(job.get("id"), "after") is not None
+    out["segments"] = job_segments(job.get("id"))   # live mosaic-segment before/after clips
     return out
 
 
@@ -806,6 +867,24 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, {"error": "no preview yet"})
             self.send_response(200)
             self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Cache-Control", "no-store")
+            self._cors()
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return self.wfile.write(body)
+        # Live segment preview clips (loaded by <video>, so unauth'd like the jpgs).
+        m = re.match(r"^/api/jobs/([0-9a-f]+)/seg/(\d+)/(before|after)\.mp4$", path)
+        if m:
+            p = seg_file(m.group(1), m.group(2), m.group(3))
+            if not p:
+                return self._send(404, {"error": "no segment"})
+            try:
+                with open(p, "rb") as fh:
+                    body = fh.read()
+            except OSError:
+                return self._send(404, {"error": "no segment"})
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
             self.send_header("Cache-Control", "no-store")
             self._cors()
             self.send_header("Content-Length", str(len(body)))

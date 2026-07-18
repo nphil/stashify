@@ -235,6 +235,19 @@ select {
 .duo figcaption:hover { color: var(--text); }
 .duo .lbl-live { color: var(--ok); }
 
+/* ---- live mosaic-segment preview (jasna 0.8.0 smart mode) ---- */
+.segprev { margin-top: 10px; }
+.seglbl { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.segsel { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.segchip {
+  appearance: none; cursor: pointer; font-size: 12px; padding: 3px 10px;
+  border-radius: 999px; border: 1px solid var(--line);
+  background: var(--panel-2); color: var(--muted);
+}
+.segchip:hover { color: var(--text); }
+.segchip.on { background: #7e9cd8; color: #10131a; border-color: transparent; }
+.segduo video { cursor: default; }
+
 /* ---- live before/after preview ---- */
 .pv { display: flex; gap: 6px; margin-top: 8px; }
 .pv figure { flex: 1; margin: 0; min-width: 0; }

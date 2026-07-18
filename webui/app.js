@@ -180,6 +180,8 @@
     var on = !wrap.hidden && mode !== "off";
     if ($("rtxDenoise")) $("rtxDenoise").hidden = !on;
     if ($("rtxDeblur")) $("rtxDeblur").hidden = !on;
+    // live segment preview shares the same gate (jasna decensor on the 3080)
+    if ($("previewWrap")) $("previewWrap").hidden = !(isDecensor && jasnaAvail && pinOk);
   }
   var _previewTimer;
   function updatePreview() { clearTimeout(_previewTimer); _previewTimer = setTimeout(doPreview, 150); }
@@ -317,6 +319,12 @@
       else { extra.rtx_quality = "ultra"; extra.rtx_scale = "4"; }
       var dn = $("rtxDenoise"); if (dn && dn.value !== "auto") extra.rtx_denoise = dn.value;
       var db = $("rtxDeblur"); if (db && db.value !== "auto") extra.rtx_deblur = db.value;
+      if (!extra.engine) extra.engine = "jasna";
+    }
+    // Live segment preview: jasna-only smart mode; force jasna so it can't route away.
+    var pv = $("previewToggle");
+    if (pv && pv.checked && !$("previewWrap").hidden && backend === "decensor") {
+      extra.preview = true;
       if (!extra.engine) extra.engine = "jasna";
     }
     var ok = 0;
@@ -606,6 +614,39 @@
       c.appendChild(pv);
       c.appendChild(logBox(j, true));
     }
+    // Live segment preview (jasna 0.8.0 smart mode): per mosaic segment, the
+    // decensored clip next to the original, seek-locked, with a segment picker.
+    // Built for every card so it also shows on done/review jobs.
+    var segw = el("div", "segprev");
+    segw.hidden = true;
+    var segLbl = el("div", "seglbl", "Mosaic segments — original vs decensored");
+    segw.appendChild(segLbl);
+    var segSel = el("div", "segsel");
+    segw.appendChild(segSel);
+    var sduo = el("div", "duo segduo");
+    var mkSeg = function (label) {
+      var f = el("figure");
+      var v = el("video");
+      v.muted = true; v.playsInline = true; v.loop = true; v.controls = true; v.preload = "auto";
+      f.appendChild(v);
+      f.appendChild(el("figcaption", null, label));
+      sduo.appendChild(f);
+      return v;
+    };
+    var segB = mkSeg("Censored (original)");
+    var segA = mkSeg("Decensored");
+    segw.appendChild(sduo);
+    var segsnap = function () { if (segB.readyState >= 1) segB.currentTime = segA.currentTime; };
+    segA.addEventListener("play", function () { segB.play().catch(function () {}); });
+    segA.addEventListener("pause", function () { segB.pause(); });
+    segA.addEventListener("seeked", segsnap);
+    segA.addEventListener("loadeddata", segsnap);
+    segA.addEventListener("timeupdate", function () {
+      if (segB.readyState >= 1 && Math.abs(segB.currentTime - segA.currentTime) > 0.2) segsnap();
+    });
+    c._refs.segw = segw; c._refs.segSel = segSel; c._refs.segA = segA; c._refs.segB = segB;
+    c._refs.segCount = 0; c._refs.segN = -1;
+    c.appendChild(segw);
     var ctl = el("div", "row");
     if (j.state === "running") {
       var pr = el("button", "btn", "Pause");
@@ -621,8 +662,37 @@
     return c;
   }
 
+  function selectSeg(c, j, i) {
+    var r = c._refs || {};
+    if (!r.segA) return;
+    r.segN = i;
+    var base = workerUrl("jobs/" + j.id + "/seg/" + i + "/");
+    r.segA.src = base + "after.mp4";
+    r.segB.src = base + "before.mp4";
+    r.segA.load(); r.segB.load();
+    r.segA.play && r.segA.play().catch(function () {});
+    [].forEach.call(r.segSel.children, function (ch, k) {
+      ch.className = "segchip" + (k === i ? " on" : "");
+    });
+  }
+
   function updateJobCard(c, j) {
     var r = c._refs || {};
+    if (r.segw && j.segments && j.segments.length && j.segments.length !== r.segCount) {
+      r.segCount = j.segments.length;
+      r.segSel.innerHTML = "";
+      j.segments.forEach(function (s, i) {
+        var chip = el("button", "segchip", "seg " + (i + 1));
+        chip.title = (s.start != null ? s.start + "–" + s.end + "s" : "");
+        chip.onclick = function () { selectSeg(c, j, i); };
+        r.segSel.appendChild(chip);
+      });
+      r.segw.hidden = false;
+      if (r.segN < 0) selectSeg(c, j, 0);            // auto-show the first as it arrives
+      else [].forEach.call(r.segSel.children, function (ch, k) {
+        ch.className = "segchip" + (k === r.segN ? " on" : "");
+      });
+    }
     if (r.titleText) r.titleText.nodeValue = jobName(j);
     if (j.state === "error") { if (r.err) r.err.textContent = j.error || j.message || "Failed"; return; }
     if (!r.bar) return;                              // review_ready / done: nothing live
@@ -813,6 +883,7 @@
       if ($("rtxMode")) $("rtxMode").value = localStorage.getItem("dc_rtx_mode") || "off";
       if ($("rtxDenoise")) $("rtxDenoise").value = localStorage.getItem("dc_rtx_denoise") || "auto";
       if ($("rtxDeblur")) $("rtxDeblur").value = localStorage.getItem("dc_rtx_deblur") || "auto";
+      if ($("previewToggle")) $("previewToggle").checked = localStorage.getItem("dc_preview") === "1";
     } catch (e) {}
     var syncEngine = function () {
       var e = $("engine").value;
@@ -850,6 +921,9 @@
     };
     if ($("rtxDeblur")) $("rtxDeblur").onchange = function () {
       try { localStorage.setItem("dc_rtx_deblur", $("rtxDeblur").value); } catch (e) {}
+    };
+    if ($("previewToggle")) $("previewToggle").onchange = function () {
+      try { localStorage.setItem("dc_preview", $("previewToggle").checked ? "1" : "0"); } catch (e) {}
     };
     $("prev").onclick = function () { if (state.page > 1) { state.page--; loadScenes(); } };
     $("next").onclick = function () { state.page++; loadScenes(); };

@@ -865,28 +865,36 @@ def _scan_mosaics(jid, src):
         return "", None
     argv = [CFG["venv_python"], os.path.join(HERE, "scan_cli.py"),
             "--input", src, "--onnx", onnx, "--ffmpeg", FFMPEG, "--ffprobe", FFPROBE,
-            "--stride-seconds", str(CFG.get("jasna_preview_stride", 0.5))]
+            "--stride-seconds", str(CFG.get("jasna_preview_stride", 1.5))]
     push_log(jid, "preview: scanning for mosaic segments...", "event")
+    set_job(jid, stage="scan", message="Scanning for mosaic segments")
+    data = None
+    # stream live so the (multi-minute) scan shows progress instead of a silent wait
     try:
-        r = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=3600, creationflags=NOWIN)
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, encoding="utf-8", errors="replace",
+                                creationflags=NOWIN)
+        for line in proc.stdout:
+            line = line.rstrip("\n").strip()
+            if not line:
+                continue
+            if line.startswith("{"):
+                try:
+                    data = json.loads(line)
+                    continue
+                except ValueError:
+                    pass
+            m = re.match(r"scan-progress:\s*(\d+)%", line)
+            if m:
+                set_job(jid, message="Scanning for mosaics %s%%" % m.group(1))
+            else:
+                push_log(jid, line, "proc")
+        proc.wait()
     except Exception as exc:  # noqa: BLE001
         push_log(jid, "preview: scan failed: %r" % exc, "warn")
         return "", None
-    for line in (r.stderr or "").splitlines():
-        if line.strip():
-            push_log(jid, line.strip(), "proc")
-    data = None
-    for line in reversed((r.stdout or "").strip().splitlines()):
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                data = json.loads(line)
-                break
-            except ValueError:
-                pass
     if not data:
-        push_log(jid, "preview: scan produced no output (rc=%s)" % r.returncode, "warn")
+        push_log(jid, "preview: scan produced no ranges", "warn")
         return "", None
     ranges = data.get("ranges") or []
     push_log(jid, "preview: %d mosaic range(s) via %s (%d/%d samples, max %.2f)" % (

@@ -491,6 +491,7 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None)
         "rtx_scale": cfg.get("rtx_scale") or "",       # rtx-super-res: 2|4
         "rtx_denoise": cfg.get("rtx_denoise") or "",   # rtx-super-res: none|low|medium|high|ultra
         "rtx_deblur": cfg.get("rtx_deblur") or "",     # rtx-super-res: none|low|medium|high|ultra
+        "preview": bool(cfg.get("preview")),           # live segment preview (0.8.0 smart mode)
     }
 
     def _post(action):
