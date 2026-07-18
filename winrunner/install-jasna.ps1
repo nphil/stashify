@@ -10,7 +10,7 @@
 #   ... -InstallDir "F:\Jasna"      # default: %LOCALAPPDATA%\StashifyRunner\jasna
 #   ... -SkipDownload               # parts already in $InstallDir\parts
 param(
-    [string]$Version = "0.7.2",
+    [string]$Version = "0.8.0",
     [string]$Root = "$env:LOCALAPPDATA\StashifyRunner",
     [string]$InstallDir = "",
     [switch]$SkipDownload
@@ -18,7 +18,14 @@ param(
 $ErrorActionPreference = "Stop"
 if (-not $InstallDir) { $InstallDir = Join-Path $Root "jasna" }
 $rel = "https://github.com/Kruk2/jasna/releases/download/v$Version"
-$parts = @("jasna-windows-v$Version.7z.001", "jasna-windows-v$Version.7z.002", "jasna-windows-v$Version.7z.003")
+# asset naming changed at v0.8.0: jasna-<ver>-win.7z.00N (was jasna-windows-v<ver>.7z.00N)
+$verNum = ($Version -replace '^v', '' -replace '-.*$', '')
+$isNewNaming = try { [version]$verNum -ge [version]"0.8.0" } catch { $true }
+$parts = if ($isNewNaming) {
+    @("jasna-$Version-win.7z.001", "jasna-$Version-win.7z.002", "jasna-$Version-win.7z.003")
+} else {
+    @("jasna-windows-v$Version.7z.001", "jasna-windows-v$Version.7z.002", "jasna-windows-v$Version.7z.003")
+}
 $partsDir = Join-Path $InstallDir "parts"
 $cfgPath = Join-Path $Root "config.json"
 
@@ -64,9 +71,13 @@ Write-Host "jasna executable: $($exe.FullName)" -ForegroundColor Green
 if (-not (Test-Path $cfgPath)) { throw "runner config not found at $cfgPath - run install.ps1 first" }
 $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
 $cfg | Add-Member -NotePropertyName jasna_exe -NotePropertyValue $exe.FullName -Force
+# jasna >=0.8.0 dropped --working-directory (writes output in place); the runner
+# must not pass it. (v0.8.0 also needs Nvidia driver >=610 on Windows.)
+$inPlace = try { [version]$verNum -ge [version]"0.8.0" } catch { $true }
+$cfg | Add-Member -NotePropertyName jasna_in_place -NotePropertyValue $inPlace -Force
 $json = $cfg | ConvertTo-Json -Depth 8
 [System.IO.File]::WriteAllText($cfgPath, $json, (New-Object System.Text.UTF8Encoding($false)))
-Write-Host "config.json: jasna_exe set" -ForegroundColor Green
+Write-Host "config.json: jasna_exe set (jasna_in_place=$inPlace)" -ForegroundColor Green
 
 # --- restart the runner so /health advertises decensor ---
 # (cmd /c swallows stderr: under EAP=Stop, PS 5.1 turns native stderr into a

@@ -148,7 +148,10 @@ def main():
                     help="dir for jasna temp files, created if missing (default: a "
                          "throwaway under the output dir). Pass a job-scoped dir the "
                          "CALLER also cleans up: if we are tree-killed (cancel/stall) "
-                         "our own cleanup never runs.")
+                         "our own cleanup never runs. Ignored with --in-place.")
+    ap.add_argument("--in-place", action="store_true",
+                    help="jasna >=0.8.0 dropped --working-directory and writes the "
+                         "output in place; skip the temp working dir entirely.")
     ap.add_argument("--extra", default="", help="extra raw args appended to jasna")
     ap.add_argument("--secondary-restoration", default="none",
                     help="jasna secondary restoration: none | rtx-super-res | unet-4x | tvai")
@@ -169,7 +172,11 @@ def main():
     stem = os.path.splitext(os.path.basename(args.input))[0]
     out_path = os.path.join(args.output_dir, stem + "_decensored.mp4")
 
-    if args.working_dir:
+    # jasna >=0.8.0 has no --working-directory (writes output in place); older
+    # builds need one so the temp .hevc doesn't double-write over SMB.
+    if args.in_place:
+        work_dir = None
+    elif args.working_dir:
         work_dir = args.working_dir
         os.makedirs(work_dir, exist_ok=True)
     else:
@@ -182,8 +189,9 @@ def main():
             "--device", args.device,
             "--detection-model", args.detection_model,
             "--max-clip-size", str(args.max_clip_size),
-            "--working-directory", work_dir,
             "--log-level", "debug"]   # parsed into clean narration below (spam suppressed)
+    if work_dir:
+        argv += ["--working-directory", work_dir]
     if args.encoder_settings:
         argv += ["--encoder-settings", args.encoder_settings]
     if args.no_compile:
@@ -231,7 +239,7 @@ def main():
             last_beat = now
             # Prove liveness during jasna's silent phases: GPU busy => compiling or
             # restoring; output growing => encoding/muxing. Both idle => maybe hung.
-            cur = _bytes_in([out_path, work_dir])
+            cur = _bytes_in([out_path] + ([work_dir] if work_dir else []))
             grew = 0 if prev_bytes[0] is None else max(0, cur - prev_bytes[0])
             prev_bytes[0] = cur
             g = _gpu_stats()
@@ -300,7 +308,8 @@ def main():
                 proc.kill()
             except OSError:
                 pass
-        shutil.rmtree(work_dir, ignore_errors=True)
+        if work_dir:
+            shutil.rmtree(work_dir, ignore_errors=True)
 
     if rc == 0 and not os.path.isfile(out_path):
         log("error: jasna exited 0 but produced no output")

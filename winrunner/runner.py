@@ -133,6 +133,7 @@ def load_config():
     cfg.setdefault("jasna_max_clip_size", 90)    # 90 fits 10GB VRAM; 180 needs 12GB+
     cfg.setdefault("jasna_encoder_settings", "")  # e.g. "cq=23,lookahead=32"
     cfg.setdefault("jasna_no_compile", False)     # skip TRT compile of BasicVSR++
+    cfg.setdefault("jasna_in_place", False)        # jasna >=0.8.0: no --working-directory
     # secondary restoration (RTX Super Res etc.) - 3080-only extra-detail pass after
     # the mosaic restore. "" = off default; a job can opt in per-request.
     cfg.setdefault("jasna_secondary", "")
@@ -215,7 +216,7 @@ _RE_FRAME = re.compile(r"\((\d+)f\)")
 _RE_ETA = re.compile(r"Remaining:\s*(\d+):(\d+)(?::(\d+))?")
 _RE_FPS = re.compile(r"([\d.]+)\s*f/s", re.IGNORECASE)
 _RE_SPEED = re.compile(r"(\d+\.?\d*)x(?!\d)")
-_RE_PCT = re.compile(r"(\d{1,3})\s*%")
+_RE_PCT = re.compile(r"(\d{1,3})\s*%\s*\|")   # tqdm-bar percent only, not an incidental "GPU 27%"
 _PROGRESS_PREFIX = re.compile(r"^\s*(upscaling|transcode|decensor|processing)", re.IGNORECASE)
 
 
@@ -621,17 +622,22 @@ def run_job(lane, job):
             if chain:
                 mid_dir = os.path.join(CFG["local_temp"], "mid_" + jid)
                 os.makedirs(mid_dir, exist_ok=True)
-            # job-scoped so OUR finally can clean it: a cancel/stall tree-kill
-            # never lets decensor_cli run its own cleanup, and jasna's temp
-            # .hevc intermediate in there is multi-GB
-            jasna_work = os.path.join(CFG["local_temp"], "jasna_" + jid)
             argv = [CFG["venv_python"], os.path.join(HERE, "decensor_cli.py"),
                     "--input", src, "--output-dir", mid_dir or out_dir,
                     "--jasna", CFG["jasna_exe"],
                     "--device", "cuda:%d" % CFG["ai_gpu_index"],
                     "--detection-model", CFG["jasna_detection_model"],
-                    "--max-clip-size", str(CFG["jasna_max_clip_size"]),
-                    "--working-dir", jasna_work]
+                    "--max-clip-size", str(CFG["jasna_max_clip_size"])]
+            if CFG.get("jasna_in_place"):
+                # jasna >=0.8.0 writes output in place; no --working-directory, so
+                # there's no multi-GB temp dir for us to own/clean.
+                argv.append("--in-place")
+            else:
+                # job-scoped so OUR finally can clean it: a cancel/stall tree-kill
+                # never lets decensor_cli run its own cleanup, and jasna's temp
+                # .hevc intermediate in there is multi-GB (older jasna only)
+                jasna_work = os.path.join(CFG["local_temp"], "jasna_" + jid)
+                argv += ["--working-dir", jasna_work]
             if CFG["jasna_encoder_settings"]:
                 argv += ["--encoder-settings", str(CFG["jasna_encoder_settings"])]
             if CFG["jasna_no_compile"]:
