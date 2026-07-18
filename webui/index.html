@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0e1013">
   <title>Stashify</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="apple-touch-icon-180.png">
@@ -10,23 +12,29 @@
 </head>
 <body>
   <header class="topbar">
-    <img class="brand-icon" src="icon.svg" alt="Stashify">
-    <div class="brand-text">
-      <span class="brand-title">Stashify</span>
-      <span class="brand-sub">upscale &amp; decensor for Stash</span>
+    <div class="brand">
+      <img class="brand-icon" src="icon.svg" alt="">
+      <div class="brand-text">
+        <span class="brand-title">Stashify</span>
+        <span class="brand-sub">upscale &amp; decensor for Stash</span>
+      </div>
     </div>
-    <div class="gpumeter" id="gpumeter" title="GPU (live)" hidden>
-      <span class="gpudot"></span><span id="gpumeter-text"></span>
+    <div class="topbar-right">
+      <div class="gpumeter" id="gpumeter" title="GPU (live)" hidden>
+        <span class="gpudot"></span><span id="gpumeter-text"></span>
+      </div>
+      <div class="conn" id="conn" title="worker status">connecting…</div>
+      <button id="runnersBtn" class="btn btn-ghost" title="Manage compute runners" aria-label="Manage compute runners">
+        <span class="btn-ico" aria-hidden="true">⚙</span><span class="btn-lbl">Runners</span>
+      </button>
     </div>
-    <button id="runnersBtn" class="btn" title="Manage compute runners">⚙ Runners</button>
-    <div class="conn" id="conn" title="worker status">connecting…</div>
   </header>
 
   <div id="runnersModal" class="modal" hidden>
     <div class="modal-card">
       <div class="modal-head">
         <h2>Compute runners</h2>
-        <button id="runnersClose" class="linkbtn">✕</button>
+        <button id="runnersClose" class="iconbtn" aria-label="Close">✕</button>
       </div>
       <div class="modal-actions">
         <button id="discoverBtn" class="btn">🔎 Discover on network</button>
@@ -38,15 +46,17 @@
         <div class="rf-row"><label>URL</label><input id="rfUrl" placeholder="http://192.168.1.63:8712"></div>
         <div class="rf-row"><label>Token</label><input id="rfToken" placeholder="(blank = use worker token)"></div>
         <div class="rf-row"><label>Prefer for</label>
-          <label class="chk"><input type="checkbox" id="rfPrefUp"> upscale</label>
-          <label class="chk"><input type="checkbox" id="rfPrefTx"> transcode</label>
-          <label class="chk"><input type="checkbox" id="rfPrefDe"> decensor</label>
+          <div class="rf-chips">
+            <label class="chk"><input type="checkbox" id="rfPrefUp"> upscale</label>
+            <label class="chk"><input type="checkbox" id="rfPrefTx"> transcode</label>
+            <label class="chk"><input type="checkbox" id="rfPrefDe"> decensor</label>
+          </div>
         </div>
         <div class="rf-row rf-btns">
-          <button type="button" id="rfTest" class="btn">Test</button>
-          <button type="submit" class="btn btn-primary">Save runner</button>
-          <button type="button" id="rfCancel" class="btn">Cancel</button>
           <span id="rfMsg" class="rf-msg"></span>
+          <button type="button" id="rfTest" class="btn">Test</button>
+          <button type="button" id="rfCancel" class="btn">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save runner</button>
         </div>
       </form>
     </div>
@@ -54,79 +64,91 @@
 
   <main>
     <section class="browser">
-      <div class="toolbar">
-        <input id="search" type="search" placeholder="Search scenes by title or path…" autocomplete="off">
-        <select id="sort" title="Sort">
-          <option value="date">Newest</option>
-          <option value="created_at">Recently added</option>
-          <option value="title">Title</option>
-          <option value="file_mod_time">File modified</option>
-          <option value="random">Random</option>
-        </select>
-        <select id="minres" title="Minimum resolution">
-          <option value="0">Any resolution</option>
-          <option value="720">≥ 720p</option>
-          <option value="1080">≥ 1080p</option>
-          <option value="2160">≥ 4K</option>
-        </select>
-        <div id="tagPick" class="tagpick">
-          <input id="tagSearch" type="search" placeholder="All tags" autocomplete="off"
-                 title="Filter by Stash tag — type to search, click for popular tags">
-          <input type="hidden" id="tagf">
-          <div id="tagMenu" class="tagmenu" role="listbox" hidden></div>
+      <div class="controls">
+        <div class="ctl-row filters">
+          <input id="search" type="search" class="search" placeholder="Search scenes…"
+                 autocomplete="off" aria-label="Search scenes by title or path">
+          <select id="sort" title="Sort" aria-label="Sort scenes">
+            <option value="date">Newest</option>
+            <option value="created_at">Recently added</option>
+            <option value="title">Title</option>
+            <option value="file_mod_time">File modified</option>
+            <option value="random">Random</option>
+          </select>
+          <select id="minres" title="Minimum resolution" aria-label="Minimum resolution">
+            <option value="0">Any resolution</option>
+            <option value="720">≥ 720p</option>
+            <option value="1080">≥ 1080p</option>
+            <option value="2160">≥ 4K</option>
+          </select>
+          <div id="tagPick" class="tagpick">
+            <input id="tagSearch" type="search" placeholder="All tags" autocomplete="off"
+                   aria-label="Filter by Stash tag"
+                   title="Filter by Stash tag — type to search, click for popular tags">
+            <input type="hidden" id="tagf">
+            <div id="tagMenu" class="tagmenu" role="listbox" hidden></div>
+          </div>
         </div>
-        <span class="spacer"></span>
-        <select id="engine" title="Operation">
-          <option value="lada">Decensor</option>
-          <option value="lada+up">Decensor + upscale</option>
-          <option value="upscale">Upscale only (2x)</option>
-          <option value="transcode">Transcode (HEVC)</option>
-        </select>
-        <select id="enginePin" title="Engine (Auto = coordinator picks)">
-          <option value="auto">Auto engine</option>
-        </select>
-        <select id="ladaq" title="Lada detection model">
-          <option value="v4-fast">fast detect</option>
-          <option value="v4-accurate">accurate detect</option>
-        </select>
-        <select id="runnerPin" title="Runner (Auto = load-balanced)">
-          <option value="auto">Auto runner</option>
-        </select>
-        <span id="rtxWrap" class="rtxgroup" title="Jasna secondary restoration — extra detail via RTX Super Res (3080 only)" hidden>
-          <select id="rtxMode" title="RTX Super Res detail pass (jasna, 3080 only)">
-            <option value="off">RTX: off</option>
-            <option value="high2">RTX: High · 2×</option>
-            <option value="ultra4">RTX: Ultra · 4×</option>
-          </select>
-          <select id="rtxDenoise" title="RTX denoise level — Auto = engine default (medium)" hidden>
-            <option value="auto">denoise: auto</option>
-            <option value="none">denoise: none</option>
-            <option value="low">denoise: low</option>
-            <option value="medium">denoise: medium</option>
-            <option value="high">denoise: high</option>
-            <option value="ultra">denoise: ultra</option>
-          </select>
-          <select id="rtxDeblur" title="RTX deblur level — Auto = engine default (none)" hidden>
-            <option value="auto">deblur: auto</option>
-            <option value="none">deblur: none</option>
-            <option value="low">deblur: low</option>
-            <option value="medium">deblur: medium</option>
-            <option value="high">deblur: high</option>
-            <option value="ultra">deblur: ultra</option>
-          </select>
-        </span>
-        <label id="previewWrap" class="chk" title="Live side-by-side preview of the mosaic segments as they're cleaned (jasna 0.8.0 smart mode, 3080)" hidden>
-          <input type="checkbox" id="previewToggle"> Live preview
-        </label>
-        <select id="txq" title="Transcode target" hidden>
-          <option value="">keep resolution</option>
-          <option value="1080">1080p</option>
-          <option value="720">720p</option>
-        </select>
-        <span id="routeWill" class="routewill" title="Where this job will run"></span>
-        <button id="decensorSel" class="btn btn-primary" disabled>Decensor selected (0)</button>
+
+        <div class="ctl-row actions">
+          <div class="op-fields">
+            <select id="engine" title="Operation" aria-label="Operation">
+              <option value="lada">Decensor</option>
+              <option value="lada+up">Decensor + upscale</option>
+              <option value="upscale">Upscale only (2x)</option>
+              <option value="transcode">Transcode (HEVC)</option>
+            </select>
+            <select id="enginePin" title="Engine (Auto = coordinator picks)" aria-label="Engine">
+              <option value="auto">Auto engine</option>
+            </select>
+            <select id="ladaq" title="Lada detection model" aria-label="Detection model">
+              <option value="v4-fast">fast detect</option>
+              <option value="v4-accurate">accurate detect</option>
+            </select>
+            <select id="runnerPin" title="Runner (Auto = load-balanced)" aria-label="Runner">
+              <option value="auto">Auto runner</option>
+            </select>
+            <span id="rtxWrap" class="rtxgroup" title="Jasna secondary restoration — extra detail via RTX Super Res (3080 only)" hidden>
+              <select id="rtxMode" title="RTX Super Res detail pass (jasna, 3080 only)" aria-label="RTX Super Res">
+                <option value="off">RTX: off</option>
+                <option value="high2">RTX: High · 2×</option>
+                <option value="ultra4">RTX: Ultra · 4×</option>
+              </select>
+              <select id="rtxDenoise" title="RTX denoise level — Auto = engine default (medium)" aria-label="RTX denoise" hidden>
+                <option value="auto">denoise: auto</option>
+                <option value="none">denoise: none</option>
+                <option value="low">denoise: low</option>
+                <option value="medium">denoise: medium</option>
+                <option value="high">denoise: high</option>
+                <option value="ultra">denoise: ultra</option>
+              </select>
+              <select id="rtxDeblur" title="RTX deblur level — Auto = engine default (none)" aria-label="RTX deblur" hidden>
+                <option value="auto">deblur: auto</option>
+                <option value="none">deblur: none</option>
+                <option value="low">deblur: low</option>
+                <option value="medium">deblur: medium</option>
+                <option value="high">deblur: high</option>
+                <option value="ultra">deblur: ultra</option>
+              </select>
+            </span>
+            <label id="previewWrap" class="chk" title="Live side-by-side preview of the mosaic segments as they're cleaned (jasna 0.8.0 smart mode, 3080)" hidden>
+              <input type="checkbox" id="previewToggle"> Live preview
+            </label>
+            <select id="txq" title="Transcode target" aria-label="Transcode target" hidden>
+              <option value="">keep resolution</option>
+              <option value="1080">1080p</option>
+              <option value="720">720p</option>
+            </select>
+          </div>
+          <div class="op-go">
+            <span id="routeWill" class="routewill" title="Where this job will run"></span>
+            <button id="decensorSel" class="btn btn-primary" disabled>Decensor selected (0)</button>
+          </div>
+        </div>
       </div>
+
       <div id="grid" class="grid" aria-live="polite"></div>
+
       <div class="pager">
         <button id="prev" class="btn">‹ Prev</button>
         <span id="pageinfo" class="pageinfo"></span>
@@ -144,7 +166,7 @@
     </aside>
   </main>
 
-  <div id="toast" class="toast"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script>window.__WT = "__WORKER_TOKEN__";</script>
   <script src="app.js"></script>
 </body>
