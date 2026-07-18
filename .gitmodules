@@ -1,0 +1,4 @@
+[submodule "decensor-engine"]
+	path = decensor-engine
+	url = https://github.com/nphil/decensor-engine.git
+	branch = main
