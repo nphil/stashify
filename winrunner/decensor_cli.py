@@ -153,6 +153,9 @@ def main():
                     help="jasna >=0.8.0 dropped --working-directory and writes the "
                          "output in place; skip the temp working dir entirely.")
     ap.add_argument("--extra", default="", help="extra raw args appended to jasna")
+    ap.add_argument("--denoise", default="",
+                    help="jasna primary spatial denoise on restored crops: low | medium | high "
+                         "(empty/none = jasna default, no denoise)")
     ap.add_argument("--secondary-restoration", default="none",
                     help="jasna secondary restoration: none | rtx-super-res | unet-4x | tvai")
     ap.add_argument("--rtx-scale", default="4")
@@ -208,6 +211,10 @@ def main():
     if args.segments:
         argv += ["--segments", args.segments]
         log("decensor: smart mode - restoring %d segment(s) only" % (args.segments.count(",") + 1))
+    den = (args.denoise or "").strip().lower()
+    if den in ("low", "medium", "high"):
+        argv += ["--denoise", den]
+        log("decensor: primary denoise = " + den)
     sec = (args.secondary_restoration or "none").strip()
     if sec and sec != "none":
         argv += ["--secondary-restoration", sec]

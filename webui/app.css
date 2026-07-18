@@ -415,15 +415,9 @@ main {
 
 /* live mosaic-segment preview (jasna 0.8.0 smart mode) */
 .segprev { margin-top: 12px; }
-.seglbl { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-.segsel { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 9px; }
-.segchip {
-  appearance: none; cursor: pointer; font-size: 12px; padding: 4px 12px;
-  border-radius: var(--r-pill); border: 1px solid var(--line);
-  background: var(--surface-3); color: var(--muted); transition: color .12s, background .12s;
-}
-.segchip:hover { color: var(--text); }
-.segchip.on { background: var(--info); color: var(--ink); border-color: transparent; font-weight: 600; }
+.seghead { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.seglbl { font-size: 12px; color: var(--muted); }
+.segmeta { font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .segduo video { cursor: default; }
 .sampleprev { margin-top: 12px; }
 .sampleprev video { width: 100%; border-radius: var(--r-sm); background: #000; display: block; }

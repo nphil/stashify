@@ -134,6 +134,9 @@ def load_config():
     cfg.setdefault("jasna_encoder_settings", "")  # e.g. "cq=23,lookahead=32"
     cfg.setdefault("jasna_no_compile", False)     # skip TRT compile of BasicVSR++
     cfg.setdefault("jasna_in_place", False)        # jasna >=0.8.0: no --working-directory
+    # primary spatial denoise on the restored mosaic crops (jasna --denoise: low|medium|
+    # high). Independent of the RTX secondary pass; "" = jasna default (no denoise).
+    cfg.setdefault("jasna_denoise", "")
     # secondary restoration (RTX Super Res etc.) - 3080-only extra-detail pass after
     # the mosaic restore. "" = off default; a job can opt in per-request.
     cfg.setdefault("jasna_secondary", "")
@@ -704,6 +707,11 @@ def run_job(lane, job):
                 argv += ["--encoder-settings", str(CFG["jasna_encoder_settings"])]
             if CFG["jasna_no_compile"]:
                 argv.append("--no-compile")
+            # primary spatial denoise on restored crops (jasna --denoise), independent
+            # of the RTX secondary pass. Validated to jasna's accepted levels.
+            denoise_primary = str(o.get("denoise") or CFG.get("jasna_denoise") or "").lower()
+            if denoise_primary in ("low", "medium", "high"):
+                argv += ["--denoise", denoise_primary]
             if preview_on:
                 argv += ["--segments", seg_string, "--codec", seg_codec]
             # secondary restoration (RTX Super Res etc.): per-job override, else config

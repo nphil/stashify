@@ -108,27 +108,33 @@
             <select id="runnerPin" title="Runner (Auto = load-balanced)" aria-label="Runner">
               <option value="auto">Auto runner</option>
             </select>
+            <select id="jDenoise" title="Jasna spatial denoise on the restored mosaic crops — reduces noise artifacts (applies to every jasna decensor, independent of RTX)" aria-label="Denoise" hidden>
+              <option value="off">Denoise: off</option>
+              <option value="low">Denoise: low</option>
+              <option value="medium">Denoise: med</option>
+              <option value="high">Denoise: high</option>
+            </select>
             <span id="rtxWrap" class="rtxgroup" title="Jasna secondary restoration — extra detail via RTX Super Res (3080 only)" hidden>
               <select id="rtxMode" title="RTX Super Res detail pass (jasna, 3080 only)" aria-label="RTX Super Res">
                 <option value="off">RTX: off</option>
                 <option value="high2">RTX: High · 2×</option>
                 <option value="ultra4">RTX: Ultra · 4×</option>
               </select>
-              <select id="rtxDenoise" title="RTX denoise level — Auto = engine default (medium)" aria-label="RTX denoise" hidden>
-                <option value="auto">denoise: auto</option>
-                <option value="none">denoise: none</option>
-                <option value="low">denoise: low</option>
-                <option value="medium">denoise: medium</option>
-                <option value="high">denoise: high</option>
-                <option value="ultra">denoise: ultra</option>
+              <select id="rtxDenoise" title="RTX Super Res denoise level — Auto = jasna default (medium)" aria-label="RTX denoise" hidden>
+                <option value="auto">RTX denoise: auto</option>
+                <option value="none">RTX denoise: off</option>
+                <option value="low">RTX denoise: low</option>
+                <option value="medium">RTX denoise: med</option>
+                <option value="high">RTX denoise: high</option>
+                <option value="ultra">RTX denoise: ultra</option>
               </select>
-              <select id="rtxDeblur" title="RTX deblur level — Auto = engine default (none)" aria-label="RTX deblur" hidden>
-                <option value="auto">deblur: auto</option>
-                <option value="none">deblur: none</option>
-                <option value="low">deblur: low</option>
-                <option value="medium">deblur: medium</option>
-                <option value="high">deblur: high</option>
-                <option value="ultra">deblur: ultra</option>
+              <select id="rtxDeblur" title="RTX Super Res deblur level — Auto = jasna default (off)" aria-label="RTX deblur" hidden>
+                <option value="auto">RTX deblur: auto</option>
+                <option value="none">RTX deblur: off</option>
+                <option value="low">RTX deblur: low</option>
+                <option value="medium">RTX deblur: med</option>
+                <option value="high">RTX deblur: high</option>
+                <option value="ultra">RTX deblur: ultra</option>
               </select>
             </span>
             <label id="previewWrap" class="chk" title="Live side-by-side preview of the mosaic segments as they're cleaned (jasna 0.8.0 smart mode, 3080)" hidden>

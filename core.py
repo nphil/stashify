@@ -486,6 +486,7 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None)
         "codec": cfg.get("transcodeCodec") or "",
         "height": cfg.get("transcodeHeight") or "",
         "quality": cfg.get("transcodeQuality") or "24",
+        "denoise": cfg.get("denoise") or "",        # jasna primary spatial denoise (low|medium|high)
         "secondary": cfg.get("secondary") or "",   # decensor secondary restoration (rtx-super-res)
         "rtx_quality": cfg.get("rtx_quality") or "",   # rtx-super-res: low|medium|high|ultra
         "rtx_scale": cfg.get("rtx_scale") or "",       # rtx-super-res: 2|4

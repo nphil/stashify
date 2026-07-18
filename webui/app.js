@@ -174,14 +174,17 @@
     var epin = $("enginePin");
     var pin = epin ? epin.value : "auto";
     var pinOk = pin === "auto" || pin === "jasna";
-    wrap.hidden = !(isDecensor && jasnaAvail && pinOk);
-    // denoise/deblur pickers only matter once a mode is chosen
+    var jasnaDecensor = isDecensor && jasnaAvail && pinOk;
+    wrap.hidden = !jasnaDecensor;
+    // primary spatial denoise applies to any jasna decensor (independent of RTX)
+    if ($("jDenoise")) $("jDenoise").hidden = !jasnaDecensor;
+    // RTX denoise/deblur pickers only matter once an RTX mode is chosen
     var mode = $("rtxMode") ? $("rtxMode").value : "off";
     var on = !wrap.hidden && mode !== "off";
     if ($("rtxDenoise")) $("rtxDenoise").hidden = !on;
     if ($("rtxDeblur")) $("rtxDeblur").hidden = !on;
     // live segment preview shares the same gate (jasna decensor on the 3080)
-    if ($("previewWrap")) $("previewWrap").hidden = !(isDecensor && jasnaAvail && pinOk);
+    if ($("previewWrap")) $("previewWrap").hidden = !jasnaDecensor;
   }
   var _previewTimer;
   function updatePreview() { clearTimeout(_previewTimer); _previewTimer = setTimeout(doPreview, 150); }
@@ -343,6 +346,13 @@
     var epin = $("enginePin"), rpin = $("runnerPin");
     if (epin && epin.value !== "auto" && !epin.hidden) extra.engine = epin.value;
     if (rpin && rpin.value !== "auto") extra.runner = rpin.value;
+    // Primary spatial denoise (jasna --denoise): jasna-only, applies to any decensor.
+    // Force jasna so it can't route to a runner/engine that ignores it.
+    var jd = $("jDenoise");
+    if (jd && !$("jDenoise").hidden && jd.value !== "off" && backend === "decensor") {
+      extra.denoise = jd.value;
+      if (!extra.engine) extra.engine = "jasna";
+    }
     // RTX Super Res: jasna-only secondary detail pass. Preset maps to quality+scale;
     // denoise/deblur are sent only when overridden ("auto" = engine default). Force
     // the jasna engine so it can't route to a runner that ignores it.
@@ -648,15 +658,17 @@
       c.appendChild(pv);
       c.appendChild(logBox(j, true));
     }
-    // Live segment preview (jasna 0.8.0 smart mode): per mosaic segment, the
-    // decensored clip next to the original, seek-locked, with a segment picker.
-    // Built for every card so it also shows on done/review jobs.
+    // Live segment preview (jasna 0.8.0 smart mode): the mosaic segment currently
+    // being cleaned — decensored next to the censored original, seek-locked. It
+    // auto-advances to the newest completed segment (no picker): as each mosaic
+    // span finishes, the pair is replaced with it.
     var segw = el("div", "segprev");
     segw.hidden = true;
-    var segLbl = el("div", "seglbl", "Mosaic segments — original vs decensored");
-    segw.appendChild(segLbl);
-    var segSel = el("div", "segsel");
-    segw.appendChild(segSel);
+    var segHead = el("div", "seghead");
+    segHead.appendChild(el("span", "seglbl", "Mosaic segment — original vs decensored"));
+    var segMeta = el("span", "segmeta");
+    segHead.appendChild(segMeta);
+    segw.appendChild(segHead);
     var sduo = el("div", "duo segduo");
     var mkSeg = function (label) {
       var f = el("figure");
@@ -678,8 +690,8 @@
     segA.addEventListener("timeupdate", function () {
       if (segB.readyState >= 1 && Math.abs(segB.currentTime - segA.currentTime) > 0.2) segsnap();
     });
-    c._refs.segw = segw; c._refs.segSel = segSel; c._refs.segA = segA; c._refs.segB = segB;
-    c._refs.segCount = 0; c._refs.segN = -1;
+    c._refs.segw = segw; c._refs.segA = segA; c._refs.segB = segB; c._refs.segMeta = segMeta;
+    c._refs.segShownN = -1;
     c.appendChild(segw);
     // Decensored-only sample reel (built at job end): every restored segment back to
     // back, so you can judge overall quality smoothly without seeking the full video.
@@ -706,36 +718,37 @@
     return c;
   }
 
-  function selectSeg(c, j, i) {
+  function showSegment(c, j, seg) {
+    // Swap the before/after pair to a specific mosaic segment + refresh the caption.
     var r = c._refs || {};
-    if (!r.segA) return;
-    r.segN = i;
-    var base = workerUrl("jobs/" + j.id + "/seg/" + i + "/");
+    if (!r.segA || !seg) return;
+    r.segShownN = seg.n;
+    var base = workerUrl("jobs/" + j.id + "/seg/" + seg.n + "/");
     r.segA.src = base + "after.mp4";
     r.segB.src = base + "before.mp4";
     r.segA.load(); r.segB.load();
     r.segA.play && r.segA.play().catch(function () {});
-    [].forEach.call(r.segSel.children, function (ch, k) {
-      ch.className = "segchip" + (k === i ? " on" : "");
-    });
+    if (r.segMeta) {
+      var rng = (seg.start != null && seg.end != null) ? fmtDur(seg.start) + "–" + fmtDur(seg.end) : "";
+      var total = (j.segments || []).length;
+      r.segMeta.textContent = "segment " + (seg.n + 1) + (total > 1 ? " of " + total : "") + (rng ? " · " + rng : "");
+    }
   }
 
   function updateJobCard(c, j) {
     var r = c._refs || {};
-    if (r.segw && j.segments && j.segments.length && j.segments.length !== r.segCount) {
-      r.segCount = j.segments.length;
-      r.segSel.innerHTML = "";
-      j.segments.forEach(function (s, i) {
-        var chip = el("button", "segchip", "seg " + (i + 1));
-        chip.title = (s.start != null ? s.start + "–" + s.end + "s" : "");
-        chip.onclick = function () { selectSeg(c, j, i); };
-        r.segSel.appendChild(chip);
-      });
-      r.segw.hidden = false;
-      if (r.segN < 0) selectSeg(c, j, 0);            // auto-show the first as it arrives
-      else [].forEach.call(r.segSel.children, function (ch, k) {
-        ch.className = "segchip" + (k === r.segN ? " on" : "");
-      });
+    if (r.segw && j.segments && j.segments.length) {
+      // Auto-advance to the newest completed mosaic segment (highest n). Pick by
+      // max n rather than array position: the coordinator mirror appends only
+      // successfully-fetched clips, so a transiently-skipped-then-backfilled
+      // segment can land out of order — trusting the last slot could jump the
+      // preview backwards. Swap only when the target changes so steady-state
+      // polls don't reload/interrupt the pair mid-playback.
+      var newest = j.segments.reduce(function (a, b) { return (b.n > a.n) ? b : a; });
+      if (newest && newest.n !== r.segShownN) {
+        r.segw.hidden = false;
+        showSegment(c, j, newest);
+      }
     }
     if (r.sampw && j.sample && !r.sampSet) {         // the concatenated sample reel is ready
       r.sampSet = true;
@@ -950,6 +963,7 @@
       if (sq) $("ladaq").value = sq;
       _pinRestore.engine = localStorage.getItem("dc_enginePin");   // applied once options exist
       _pinRestore.runner = localStorage.getItem("dc_runnerPin");
+      if ($("jDenoise")) $("jDenoise").value = localStorage.getItem("dc_denoise") || "off";
       if ($("rtxMode")) $("rtxMode").value = localStorage.getItem("dc_rtx_mode") || "off";
       if ($("rtxDenoise")) $("rtxDenoise").value = localStorage.getItem("dc_rtx_denoise") || "auto";
       if ($("rtxDeblur")) $("rtxDeblur").value = localStorage.getItem("dc_rtx_deblur") || "auto";
@@ -981,6 +995,9 @@
     };
     $("ladaq").onchange = function () {
       try { localStorage.setItem("dc_ladaq", $("ladaq").value); } catch (e) {}
+    };
+    if ($("jDenoise")) $("jDenoise").onchange = function () {
+      try { localStorage.setItem("dc_denoise", $("jDenoise").value); } catch (e) {}
     };
     if ($("rtxMode")) $("rtxMode").onchange = function () {
       updateRtx();       // toggle denoise/deblur visibility with the chosen mode
