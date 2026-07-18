@@ -495,11 +495,16 @@
 
     var store = state.logs[j.id];
     if (!store) store = state.logs[j.id] = {
-      cursor: 0, open: (j.state === "running" || j.state === "error"), follow: true, lines: [],
+      cursor: 0, open: (j.state === "running" || j.state === "error"), follow: true, lines: [], lastNorm: null,
     };
     store.body = body; store.count = count;
-    if (store.lines.length) store.lines.forEach(function (ln) { body.appendChild(logLine(ln)); });
-    else body.appendChild(el("div", "empty-log", "waiting for output…"));
+    if (store.lines.length) {
+      store.lines.forEach(function (ln) { body.appendChild(logLine(ln)); });
+      store.lastNorm = logNorm(store.lines[store.lines.length - 1].text);   // keep coalescing across rebuilds
+    } else {
+      body.appendChild(el("div", "empty-log", "waiting for output…"));
+      store.lastNorm = null;
+    }
     count.textContent = store.lines.length ? store.lines.length + " lines" : "";
     applyOpen(wrap, caret, store.open);
     if (store.follow) body.scrollTop = body.scrollHeight;
@@ -514,6 +519,13 @@
     });
     return wrap;
   }
+  // Coalesce key: mask number-runs (and tqdm bar glyphs) so a line that changes only
+  // by numbers collapses onto the previous one instead of spawning a new row. Mirrors
+  // the Windows tray's log coalescing.
+  var RE_LOGNUM = /[\d][\d.,:]*/g;
+  var RE_LOGBAR = /\|[#\s.▁-▉]*\|/g;
+  function logNorm(s) { return String(s == null ? "" : s).replace(RE_LOGBAR, "|").replace(RE_LOGNUM, "#"); }
+
   async function fetchLog(j) {
     var store = state.logs[j.id];
     if (!store || !store.body) return;
@@ -526,8 +538,19 @@
     var body = store.body, empty = body.querySelector(".empty-log");
     if (empty) body.removeChild(empty);
     res.lines.forEach(function (ln) {
-      store.lines.push(ln);
-      body.appendChild(logLine(ln));
+      var norm = logNorm(ln.text);
+      var last = body.lastChild;
+      if (store.lines.length && store.lastNorm === norm &&
+          last && last.className && last.className.indexOf("ln") === 0) {
+        // same line, only numbers changed -> update it in place
+        store.lines[store.lines.length - 1] = ln;
+        last.textContent = ln.text;
+        last.className = "ln lv-" + (ln.level || "proc");
+      } else {
+        store.lines.push(ln);
+        store.lastNorm = norm;
+        body.appendChild(logLine(ln));
+      }
     });
     while (store.lines.length > 500) { store.lines.shift(); if (body.firstChild) body.removeChild(body.firstChild); }
     if (store.count) store.count.textContent = store.lines.length + " lines";
@@ -764,8 +787,15 @@
       r.msg.textContent = j.paused ? "Paused" : (j.message || j.state);
       r.msg.className = "jmsg" + (j.paused ? " paused" : "");
     }
-    r.bar.className = "bar" + (j.paused ? " is-paused" : "");
-    r.fill.style.width = pct + "%";
+    // Indeterminate: the runner/coordinator says so (compile / load / scan / mux), or
+    // an active phase with no numeric progress yet. Show an animated sweep instead of a
+    // frozen 0% (or a stuck near-100% during mux) so the bar is never "stuck".
+    var active = !!RUNNING[j.state];
+    var hasNum = (j.progress || 0) > 0 || (j.frame != null && j.total_frames);
+    var indet = active && !j.paused &&
+      (j.indeterminate === true || (j.indeterminate == null && !hasNum));
+    r.bar.className = "bar" + (j.paused ? " is-paused" : "") + (indet ? " indeterminate" : "");
+    r.fill.style.width = indet ? "" : (pct + "%");
     if (r.stats) fillStats(r.stats, j, pct);
     if (r.pv && j.preview && j.backend !== "decensor" && j.backend !== "lada" && j.backend !== "upscale") {
       // still-frame pair (legacy/command backends): runner ops use the video duo

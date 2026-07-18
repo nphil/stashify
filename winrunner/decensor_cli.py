@@ -102,10 +102,14 @@ def _make_forwarder():
     st = {"clip": -1, "eng": False, "last_clip": 0.0}
 
     def forward(seg):
-        if "Loading TensorRT export" in seg or "using TRT sub-engines" in seg:
+        if "Compiling sub-engine" in seg:      # a REAL first-run compile (rare, one-time)
+            log("jasna: compiling TensorRT engines (first run only, one-time - this won't repeat)")
+            return
+        if "Loading TensorRT export" in seg or "using TRT sub-engines" in seg \
+                or "Sub-engine already exists" in seg:
             if not st["eng"]:
                 st["eng"] = True
-                log("jasna: loading models / TensorRT engines")
+                log("jasna: loading cached TensorRT engines & models")
             return
         if "[remux]" in seg:                       # the final (otherwise silent) mux phase
             log("decensor: muxing final output (audio + metadata)")
@@ -229,8 +233,8 @@ def main():
     if args.extra:
         argv += args.extra.split()
 
-    log("decensor: starting jasna (first run compiles TensorRT engines, "
-        "which can take 15-60 min with no output)")
+    log("decensor: starting jasna (loads cached TensorRT engines; only the FIRST run "
+        "per model/setting compiles them once, ~15-60 min - after that it just loads)")
     log("$ " + subprocess.list2cmdline(argv))
 
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -269,7 +273,7 @@ def main():
                 parts.append("output +%dMB/%ds" % (grew // (1 << 20), HEARTBEAT_SECS))
             busy = (g is not None and (g[0] > 5 or g[1] > 5)) or grew > 0
             if not progress_seen[0]:
-                phase = "loading / compiling TensorRT engines (one-time, up to ~60 min)"
+                phase = "loading models & TensorRT engines"
             elif g is not None and g[0] > 15:
                 phase = "restoring a segment on the GPU"
             elif grew:

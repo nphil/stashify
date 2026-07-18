@@ -161,7 +161,15 @@ class JobRow(QFrame):
         top.addWidget(_lbl(name, size=11)); top.addStretch(1)
         top.addWidget(_lbl(job.get("state", ""), muted=True, size=10))
         v.addLayout(top)
-        bar = gauge(); bar.setValue(int((job.get("progress") or 0) * 100)); v.addWidget(bar)
+        bar = gauge()
+        if job.get("indeterminate"):
+            bar.setRange(0, 0)                 # Qt busy/marquee = indeterminate (no % yet)
+        else:
+            bar.setRange(0, 100); bar.setValue(int((job.get("progress") or 0) * 100))
+        v.addWidget(bar)
+        msg = job.get("message") or ""
+        if msg and msg.lower() != (job.get("state") or "").lower():
+            v.addWidget(_lbl(msg, muted=True, size=10))   # the live phase (compile/scan/mux/…)
         bits = []
         if job.get("frame") and job.get("total_frames"):
             bits.append("%s/%s" % (job["frame"], job["total_frames"]))

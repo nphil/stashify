@@ -615,7 +615,7 @@ def progress_cb(job_id):
                 last["msg"] = msg
                 push_log(job_id, msg, "event")
         if stats:
-            for k in ("stage", "frame", "total_frames", "fps", "eta"):
+            for k in ("stage", "frame", "total_frames", "fps", "eta", "indeterminate"):
                 if stats.get(k) is not None:
                     fields[k] = stats[k]
         set_job(job_id, **fields)
@@ -641,12 +641,13 @@ def do_process(job):
     cfg = job_config(job)
     set_job(job_id, state="running", message="Starting", started_at=time.time(),
             paused=False, stage=None, frame=None, total_frames=None, fps=None, eta=None,
-            backend=cfg.get("backend"))
+            indeterminate=True, backend=cfg.get("backend"))
     stash = get_stash()
     info = core.process_to_review(stash, cfg, job["scene_id"],
                                   progress=progress_cb(job_id), log_cb=raw_log_sink(job_id))
     set_job(
         job_id, state="review_ready", progress=1.0, message="Preview ready to review",
+        indeterminate=False,
         review_scene_id=info.get("review_scene_id"), output_path=info.get("output_path"),
         _info=info, _ended_at=time.time(),
     )
@@ -657,7 +658,7 @@ def do_replace(job):
     info = job.get("_info")
     if not info:
         raise RuntimeError("Nothing to replace (no preview).")
-    set_job(job_id, state="replacing", progress=0.0, message="Replacing original")
+    set_job(job_id, state="replacing", progress=0.0, message="Replacing original", indeterminate=False)
     cfg = job_config(job)
     core.replace_original(get_stash(), cfg, info, progress=progress_cb(job_id))
     set_job(job_id, state="replaced", progress=1.0, message="Original replaced")
@@ -667,7 +668,7 @@ def do_replace(job):
 def do_discard(job):
     job_id = job["id"]
     info = job.get("_info")
-    set_job(job_id, state="discarding", message="Discarding preview")
+    set_job(job_id, state="discarding", message="Discarding preview", indeterminate=False)
     if info:
         core.discard_review(get_stash(), job_config(job), info)
     set_job(job_id, state="discarded", message="Preview discarded")

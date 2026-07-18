@@ -351,8 +351,9 @@ def newest_video(result_dir):
 # backends: (cfg, input_path, result_dir) -> produced_video_path
 # --------------------------------------------------------------------------- #
 
-def backend_command(cfg, input_path, result_dir, on_line=None, log_cb=None):
-    """Generic backend. Template placeholders (each must be its own token):
+def backend_command(cfg, input_path, result_dir, on_line=None, log_cb=None, status_cb=None):
+    """Generic backend (local command; status_cb unused — no runner to mirror).
+    Template placeholders (each must be its own token):
        {input}      absolute path to the source video
        {output_dir} directory to write the result into
        {gpu}        configured GPU id
@@ -443,14 +444,56 @@ def preview_route(cfg, op):
         return {"error": str(exc)}
 
 
-def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None):
+# Coordinator progress bands. The runner reports per-phase progress (each phase runs
+# 0->1), so we map its phases into monotonic sub-slices of the whole bar — the bar only
+# ever moves forward, never resets between copy -> scan -> the main GPU op.
+_STAGE_BANDS = {"copy": (0.0, 0.06), "scan": (0.06, 0.12)}
+_MAIN_BAND = (0.12, 1.0)   # decensor / upscale / transcode / chain fill the rest
+
+
+def _map_runner_status(jb, lo, hi):
+    """Map the runner job dict (jb) into a coordinator (frac, message, stats) so the
+    dashboard faithfully mirrors the runner's live phase/progress/message instead of
+    re-guessing from log lines. frac is placed in a monotonic sub-band of [lo,hi]."""
+    span = hi - lo
+    stage = jb.get("stage") or ""
+    a, b = _STAGE_BANDS.get(stage, _MAIN_BAND)
+    prog = jb.get("progress")
+    if not isinstance(prog, (int, float)):
+        # a runner that reports frame/total but not a 0-1 progress (e.g. lada)
+        fr, tot = jb.get("frame"), jb.get("total_frames")
+        prog = (fr / tot) if (fr and tot) else 0.0
+    prog = min(1.0, max(0.0, prog))
+    frac = lo + span * (a + (b - a) * prog)
+    stats = {
+        "stage": stage or None,
+        "frame": jb.get("frame"),
+        "total_frames": jb.get("total_frames"),
+        "fps": jb.get("fps"),
+        "eta": jb.get("eta"),
+    }
+    # Indeterminate handling. A runner that sends the flag (Windows/jasna) is authoritative.
+    # A runner that DOESN'T (lada) would otherwise leave the coordinator's seeded True stuck
+    # on forever, so once it reports real numeric progress we assert determinate; before any
+    # progress we leave it unset so the dashboard's "active + no number" heuristic animates
+    # its silent load.
+    has_num = prog > 0 or bool(jb.get("frame") and jb.get("total_frames"))
+    if jb.get("indeterminate") is not None:
+        stats["indeterminate"] = bool(jb.get("indeterminate"))
+    elif has_num:
+        stats["indeterminate"] = False
+    return frac, jb.get("message"), stats
+
+
+def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None, status_cb=None):
     """Dispatch a GPU job (decensor / upscale / transcode / chain) to a compute
     runner (lada_runner.py or the Windows runner) over HTTP.
 
     The runner writes its output into a shared scratch dir (both containers
     mount it at the same path); we tail its log — relaying each line through
-    on_line (so the existing frame/fps/progress parser drives the job's stats)
-    and log_cb (live-log) — then move the produced file into result_dir.
+    log_cb (live-log). When status_cb is given we mirror the runner's structured
+    job (progress/message/stage/indeterminate) directly onto the coordinator job
+    each poll; otherwise we fall back to on_line's frame/fps/progress parsing.
     Cancel/pause/resume forward to the runner via the remote-control hooks."""
     import requests
 
@@ -533,7 +576,9 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None)
                 lg = requests.get(f"{base}/jobs/{rid}/log?after={cursor}", headers=headers, timeout=20).json()
                 for ln in lg.get("lines", []):
                     text = ln.get("text", "")
-                    if on_line:
+                    # When we mirror the runner's structured status directly (status_cb),
+                    # on_line's log re-parsing is redundant and would fight the mirror.
+                    if on_line and not status_cb:
                         try:
                             on_line(text)      # feeds the frame/fps/progress parser
                         except Exception:      # noqa: BLE001
@@ -546,10 +591,19 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None)
                 cursor = lg.get("cursor", cursor)
             except Exception:  # noqa: BLE001
                 pass
-            # The runner parses lada-cli's progress into structured fields; relay
-            # them as a synthetic tqdm-style line so _band's parser (frame "N/M [",
-            # fps "it/s") is guaranteed to fire regardless of lada's raw format.
-            if on_line and jb.get("frame") and jb.get("total_frames"):
+            if status_cb:
+                # Faithfully mirror the runner's live phase: progress/message/stage/
+                # indeterminate — covers copy, scan, engine-compile, decensor and mux,
+                # none of which the log re-parser could see.
+                try:
+                    status_cb(jb)
+                except Cancelled:
+                    raise                    # p()'s check_cancel must NOT be swallowed
+                except Exception:  # noqa: BLE001
+                    pass
+            elif on_line and jb.get("frame") and jb.get("total_frames"):
+                # Legacy path (no status_cb): relay a synthetic tqdm-style line so
+                # _band's parser (frame "N/M [", fps "it/s") fires for raw-log runners.
                 synth = f"{jb['frame']}/{jb['total_frames']} ["
                 if jb.get("fps"):
                     synth += f" {jb['fps']} it/s"
@@ -577,17 +631,17 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None)
         shutil.rmtree(sub, ignore_errors=True)
 
 
-def backend_decensor(cfg, input_path, result_dir, on_line=None, log_cb=None):
+def backend_decensor(cfg, input_path, result_dir, on_line=None, log_cb=None, status_cb=None):
     op = "decensor+upscale" if cfg.get("postUpscale") else "decensor"
-    return _runner_dispatch(cfg, input_path, result_dir, op, on_line=on_line, log_cb=log_cb)
+    return _runner_dispatch(cfg, input_path, result_dir, op, on_line=on_line, log_cb=log_cb, status_cb=status_cb)
 
 
-def backend_upscale(cfg, input_path, result_dir, on_line=None, log_cb=None):
-    return _runner_dispatch(cfg, input_path, result_dir, "upscale", on_line=on_line, log_cb=log_cb)
+def backend_upscale(cfg, input_path, result_dir, on_line=None, log_cb=None, status_cb=None):
+    return _runner_dispatch(cfg, input_path, result_dir, "upscale", on_line=on_line, log_cb=log_cb, status_cb=status_cb)
 
 
-def backend_transcode(cfg, input_path, result_dir, on_line=None, log_cb=None):
-    return _runner_dispatch(cfg, input_path, result_dir, "transcode", on_line=on_line, log_cb=log_cb)
+def backend_transcode(cfg, input_path, result_dir, on_line=None, log_cb=None, status_cb=None):
+    return _runner_dispatch(cfg, input_path, result_dir, "transcode", on_line=on_line, log_cb=log_cb, status_cb=status_cb)
 
 
 BACKENDS = {
@@ -1030,15 +1084,22 @@ def process_to_review(stash, cfg, scene_id, progress=None, log_cb=None):
 
     try:
         backend = cfg["backend"]
-        p(0.0, f"Running {op_name(backend)}", {"stage": op_name(backend)})
-        # The runner op is ~all the wall-clock, so map its raw 0-100% onto (near)
-        # the whole bar - this makes the coordinator's % match what the runner
-        # dashboard + Windows tray show (both display the runner's raw progress).
-        # The last 2% is reserved for the Stash import/scan finalize below.
-        produced = BACKENDS[backend](cfg, input_path, new_dir(),
-                                     on_line=_band(progress, 0.0, 0.98, op_name(backend)), log_cb=log_cb)
+        p(0.0, f"Running {op_name(backend)}", {"stage": op_name(backend), "indeterminate": True})
 
-        p(0.98, "Importing preview into Stash", {"stage": "import"})
+        # Mirror the runner's live phase (copy/scan/compile/decensor/mux) directly onto
+        # the coordinator job, mapped into the 0.0-0.97 band, so the dashboard never sits
+        # frozen at "Running <op>" 0% during the long pre-frame phases. The last 3% is
+        # reserved for the Stash import/scan finalize below.
+        def status_cb(jb):
+            frac, msg, stats = _map_runner_status(jb, 0.0, 0.97)
+            p(frac, msg, stats)
+
+        # on_line=_band(...) stays as the fallback for raw-log runners without status.
+        produced = BACKENDS[backend](cfg, input_path, new_dir(),
+                                     on_line=_band(progress, 0.0, 0.97, op_name(backend)),
+                                     log_cb=log_cb, status_cb=status_cb)
+
+        p(0.98, "Importing preview into Stash", {"stage": "import", "indeterminate": True})
         os.makedirs(cfg["outputDir"], exist_ok=True)
         stem = re.sub(r"\s+", "_", os.path.splitext(os.path.basename(input_path))[0])
         ext = os.path.splitext(produced)[1] or ".mp4"

@@ -371,6 +371,13 @@ main {
   border-radius: var(--r-pill); transition: width .35s ease;
 }
 .bar.is-paused .fill { background: #7a8087; }
+/* indeterminate: a sweeping highlight for phases with no % (compile / load / scan / mux) */
+.bar.indeterminate .fill {
+  width: 40%; transition: none;
+  background: linear-gradient(90deg, transparent, var(--accent), var(--accent-2), transparent);
+  animation: barslide 1.15s ease-in-out infinite;
+}
+@keyframes barslide { 0% { margin-left: -45%; } 100% { margin-left: 100%; } }
 
 .job video { width: 100%; border-radius: var(--r-sm); background: #000; margin: 9px 0 6px; max-height: 200px; }
 .job .row { display: flex; gap: 8px; margin-top: 9px; }
