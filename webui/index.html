@@ -69,9 +69,12 @@
           <option value="1080">≥ 1080p</option>
           <option value="2160">≥ 4K</option>
         </select>
-        <select id="tagf" title="Filter by Stash tag">
-          <option value="">All tags</option>
-        </select>
+        <div id="tagPick" class="tagpick">
+          <input id="tagSearch" type="search" placeholder="All tags" autocomplete="off"
+                 title="Filter by Stash tag — type to search, click for popular tags">
+          <input type="hidden" id="tagf">
+          <div id="tagMenu" class="tagmenu" role="listbox" hidden></div>
+        </div>
         <span class="spacer"></span>
         <select id="engine" title="Operation">
           <option value="lada">Decensor</option>

@@ -212,22 +212,56 @@
     return (scene.tags || []).some(function (t) { return /^(Decensored|Upscaled)/i.test(t.name); });
   }
 
+  var TAG_POPULAR = 18;   // "most used" tags shown when the picker opens without a query
+
   async function loadTags() {
-    // live tag list from Stash for the filter dropdown (busiest tags first)
-    var sel = $("tagf");
-    try {
-      var tags = await workerFetch("tags");
-      var saved = "";
-      try { saved = localStorage.getItem("dc_tag") || ""; } catch (e) {}
-      sel.innerHTML = "<option value=''>All tags</option>";
-      tags.forEach(function (t) {
-        var o = document.createElement("option");
-        o.value = t.id;
-        o.textContent = t.name + " (" + t.scene_count + ")";
-        sel.appendChild(o);
-      });
-      if (saved && sel.querySelector('option[value="' + saved + '"]')) sel.value = saved;
-    } catch (e) { /* dropdown stays with just "All tags" */ }
+    // live tag list from Stash (busiest first) backing the searchable tag picker
+    try { state.tags = (await workerFetch("tags")) || []; }
+    catch (e) { state.tags = []; }
+    var saved = "";
+    try { saved = localStorage.getItem("dc_tag") || ""; } catch (e) {}
+    var cur = (state.tags || []).filter(function (t) { return String(t.id) === String(saved); })[0];
+    $("tagf").value = cur ? cur.id : "";
+    $("tagSearch").value = cur ? cur.name : "";
+  }
+
+  function tagPick(t) {
+    // t = tag object, or null to clear to "All tags"
+    $("tagf").value = t ? t.id : "";
+    $("tagSearch").value = t ? t.name : "";
+    try { localStorage.setItem("dc_tag", $("tagf").value); } catch (e) {}
+    if ($("tagMenu")) $("tagMenu").hidden = true;
+    state.page = 1;
+    loadScenes();
+  }
+
+  function tagMenuRender(q) {
+    var menu = $("tagMenu");
+    if (!menu) return;
+    var tags = state.tags || [];
+    q = (q || "").trim().toLowerCase();
+    var list = q
+      ? tags.filter(function (t) { return t.name.toLowerCase().indexOf(q) >= 0; }).slice(0, 40)
+      : tags.slice(0, TAG_POPULAR);   // already busiest-first from the API
+    var sel = String($("tagf").value || "");
+    menu.innerHTML = "";
+    var all = el("div", "tagmenu-item all" + (sel ? "" : " on"));
+    all.appendChild(el("span", "tagmenu-name", "All tags"));
+    all.onmousedown = function (e) { e.preventDefault(); tagPick(null); };
+    menu.appendChild(all);
+    if (!q) menu.appendChild(el("div", "tagmenu-hdr", "Most used"));
+    else if (!list.length) menu.appendChild(el("div", "tagmenu-empty", "No matching tags"));
+    list.forEach(function (t) {
+      var row = el("div", "tagmenu-item" + (sel === String(t.id) ? " on" : ""));
+      var nm = el("span", "tagmenu-name");
+      nm.textContent = t.name;                 // textContent (not el's innerHTML arg): XSS-safe
+      row.appendChild(nm);
+      row.appendChild(el("span", "tagmenu-count", String(t.scene_count)));
+      // mousedown (not click) so it fires before the input's blur closes the menu
+      row.onmousedown = function (e) { e.preventDefault(); tagPick(t); };
+      menu.appendChild(row);
+    });
+    menu.hidden = false;
   }
 
   async function loadScenes() {
@@ -885,10 +919,30 @@
     var deb;
     $("search").addEventListener("input", function () { clearTimeout(deb); deb = setTimeout(function () { state.page = 1; loadScenes(); }, 300); });
     $("sort").onchange = $("minres").onchange = function () { state.page = 1; loadScenes(); };
-    $("tagf").onchange = function () {
-      try { localStorage.setItem("dc_tag", $("tagf").value); } catch (e) {}
-      state.page = 1; loadScenes();
-    };
+    var tagS = $("tagSearch");
+    if (tagS) {
+      // click/focus -> most-used popover; type -> live filter; Enter -> first match
+      tagS.addEventListener("focus", function () { this.select(); tagMenuRender(""); });
+      tagS.addEventListener("input", function () { tagMenuRender(this.value); });
+      tagS.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") { this.blur(); return; }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          var q = this.value.trim().toLowerCase();
+          if (!q) { tagPick(null); return; }
+          var first = (state.tags || []).filter(function (t) { return t.name.toLowerCase().indexOf(q) >= 0; })[0];
+          if (first) tagPick(first);
+        }
+      });
+      tagS.addEventListener("blur", function () {
+        // let a menu mousedown-select resolve first, then close + restore the label
+        setTimeout(function () {
+          if ($("tagMenu")) $("tagMenu").hidden = true;
+          var cur = (state.tags || []).filter(function (t) { return String(t.id) === String($("tagf").value); })[0];
+          $("tagSearch").value = cur ? cur.name : "";
+        }, 130);
+      });
+    }
     // engine choice persists across visits ("" was the old DeepMosaics default)
     try {
       var se = localStorage.getItem("dc_engine"), sq = localStorage.getItem("dc_ladaq");

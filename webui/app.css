@@ -89,6 +89,33 @@ select {
 /* RTX Super Res picker: preset + optional denoise/deblur, grouped as one unit */
 .rtxgroup { display: inline-flex; align-items: center; gap: 6px; }
 
+/* searchable tag picker: type-to-filter + a "most used" popover on click */
+.tagpick { position: relative; display: inline-flex; }
+#tagSearch {
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font-size: 13px;
+  min-width: 150px;
+}
+#tagSearch:focus { outline: none; border-color: #7e9cd8; }
+.tagmenu {
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: 60;
+  min-width: 240px; max-width: 340px; max-height: 340px; overflow-y: auto;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5); padding: 4px;
+}
+.tagmenu-hdr { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); padding: 6px 8px 3px; }
+.tagmenu-empty { padding: 8px; color: var(--muted); font-size: 12px; }
+.tagmenu-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 6px 9px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--text);
+}
+.tagmenu-item:hover { background: rgba(255, 255, 255, 0.06); }
+.tagmenu-item.on { background: #7e9cd8; color: #10131a; }
+.tagmenu-item.on .tagmenu-count { color: #10131a; }
+.tagmenu-item.all { color: var(--muted); }
+.tagmenu-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tagmenu-count { color: var(--muted); font-size: 11px; flex: none; font-variant-numeric: tabular-nums; }
+
 /* ---- buttons ---- */
 .btn {
   appearance: none; cursor: pointer;
