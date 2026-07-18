@@ -43,9 +43,19 @@ services:
 
       # --- pipeline: dispatched to the compute runner ---
       BACKEND: "lada"                    # lada | upscale | command
+      # LADA_URL below uses this compose's internal DNS name for the runner.
+      # NOTE: the actual BeastNAS production deploy is created from the unRAID
+      # templates (unraid/stashify*.xml) with the HOST IP (http://<host>:8711)
+      # plus a RUNNERS registry - those templates are the source of truth. Do
+      # NOT `docker compose up -d` over the running prod containers, or you'll
+      # drop RUNNERS and rewrite LADA_URL.
       LADA_URL: "http://runner:8711"
       LADA_TOKEN: "${WORKER_TOKEN:-}"
       LADA_SCRATCH: "/scratch"
+      # Optional multi-runner: register extra compute nodes (e.g. a Windows/3080
+      # box running the winrunner) as a JSON array; these merge with runners
+      # added via the dashboard (persisted under /config). Example:
+      # RUNNERS: '[{"name":"desktop-3080","url":"http://192.168.1.63:8712","token":"${WORKER_TOKEN:-}","ops":["upscale","transcode","decensor","decensor+upscale"],"prefer":["upscale","transcode","decensor","decensor+upscale"]}]'
 
       # --- library ---
       OUTPUT_DIR: "/stuff2/stashify"   # inside the /stuff2 library so previews scan in
