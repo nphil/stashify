@@ -48,7 +48,7 @@ TOKEN = CFG.get("token", "")
 
 def api(path, method="GET"):
     req = urllib.request.Request(BASE + path, data=(b"" if method == "POST" else None),
-                                 headers={"X-Lada-Token": TOKEN}, method=method)
+                                 headers={"X-Runner-Token": TOKEN}, method=method)
     return json.loads(urllib.request.urlopen(req, timeout=5).read() or b"{}")
 
 

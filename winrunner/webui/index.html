@@ -72,7 +72,7 @@
 var TOKEN = "__RUNNER_TOKEN__";
 if (TOKEN === "__RUNNER_" + "TOKEN__") { TOKEN = ""; }
 function h(id){return document.getElementById(id)}
-async function j(path,opts){opts=opts||{};opts.headers=Object.assign({"X-Lada-Token":TOKEN},opts.headers||{});
+async function j(path,opts){opts=opts||{};opts.headers=Object.assign({"X-Runner-Token":TOKEN},opts.headers||{});
   var r=await fetch(path,opts);return r.json()}
 function chip(g,l,v){if(v==null||v==="")return;var s=document.createElement("span");s.className="chip";
   s.innerHTML=l+" <b>"+v+"</b>";g.appendChild(s)}
@@ -124,7 +124,7 @@ async function tick(){
     box.appendChild(d);
   });
 }
-function needToken(){if(!TOKEN){TOKEN=prompt("Runner token (X-Lada-Token):")||""}}
+function needToken(){if(!TOKEN){TOKEN=prompt("Runner token (X-Runner-Token):")||""}}
 async function ctl(id,action){needToken();try{await j("/jobs/"+id+"/"+action,{method:"POST"})}catch(e){}tick()}
 h("nodebtn").onclick=async function(){needToken();var he=await j("/health");
   await j("/node/"+(he.paused?"resume":"pause"),{method:"POST"});tick()};

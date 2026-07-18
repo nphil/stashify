@@ -80,16 +80,17 @@ DEFAULTS = {
     "outputDir": "",
     "importResult": True,
     "gpuId": 0,
-    # pipeline: all GPU work happens on a runner (lada_runner.py); the worker
-    # is a thin coordinator.  backend: lada | upscale | command
-    "backend": "lada",
-    "postUpscale": False,            # lada backend: chain decensor -> upscale on the runner
+    # pipeline: all GPU work happens on a runner; the worker is a thin
+    # coordinator.  backend: decensor | upscale | transcode | command
+    "backend": "decensor",           # "lada" still accepted (legacy alias)
+    "postUpscale": False,            # decensor backend: chain decensor -> upscale on the runner
     # generic command backend
     "commandTemplate": "",
-    # Lada/compute runner (separate GPU container; see lada_runner.py)
-    "ladaUrl": "",                   # e.g. http://runner:8711
-    "ladaToken": "",
-    "ladaScratch": "/scratch",       # shared mount both worker + runner see
+    # compute-runner connection (separate GPU container). Engine-agnostic - the
+    # runner may run any decensor engine (Lada, Jasna, ...).
+    "runnerUrl": "",                   # e.g. http://runner:8711
+    "runnerToken": "",
+    "runnerScratch": "/scratch",       # shared mount both worker + runner see
     "ladaRestModel": "basicvsrpp-v1.2",
     "ladaDetModel": "v4-fast",       # v4-fast | v4-accurate | v2
     "ladaFp16": False,               # Pascal P40: keep False (no usable fp16)
@@ -98,7 +99,7 @@ DEFAULTS = {
     "ladaUpscaleModel": "",          # "" = runner default (2xLiveActionV1_SPAN)
     # multi-runner registry (optional): a JSON array in the RUNNERS env var of
     # {name,url,token,ops:[...],prefer:[...]}; jobs route to a capable node,
-    # falling back to the single ladaUrl runner. Lets the always-on P40 keep
+    # falling back to the single runnerUrl runner. Lets the always-on P40 keep
     # decensoring while an intermittent desktop box takes upscale/transcode.
     "runners": [],
     # transcode op params (backend=transcode)
@@ -138,12 +139,12 @@ def validate(cfg):
 
     backend = cfg["backend"]
     if backend not in BACKENDS:
-        problems.append(f"backend '{backend}' (use lada | upscale | transcode | command)")
+        problems.append(f"backend '{backend}' (use decensor | upscale | transcode | command)")
     if backend == "command" and not str(cfg["commandTemplate"]).strip():
         problems.append("Command Template")
-    if backend in ("lada", "upscale", "transcode") and not (
-            str(cfg["ladaUrl"]).strip() or cfg.get("runners")):
-        problems.append("a runner (LADA_URL or RUNNERS)")
+    if backend in ("decensor", "lada", "upscale", "transcode") and not (
+            str(cfg["runnerUrl"]).strip() or cfg.get("runners")):
+        problems.append("a runner (RUNNER_URL or RUNNERS)")
 
     if problems:
         message = "Missing/invalid config: " + ", ".join(problems)
@@ -371,7 +372,7 @@ def backend_command(cfg, input_path, result_dir, on_line=None, log_cb=None):
 def resolve_runner(cfg, op):
     """Pick a runner (url, token, name, engine) that can do `op`. Health-checks
     each candidate, skips offline/unreachable ones, and prefers a runner that
-    tags `op` in its 'prefer' list and is idle. Falls back to the single ladaUrl
+    tags `op` in its 'prefer' list and is idle. Falls back to the single runnerUrl
     runner (which is treated as capable of everything it reports).
 
     Optional per-job pins (from the dashboard, via cfg):
@@ -389,9 +390,9 @@ def resolve_runner(cfg, op):
         target_engine = ""
 
     candidates = list(cfg.get("runners") or [])
-    if str(cfg.get("ladaUrl") or "").strip():
-        candidates.append({"name": "default", "url": cfg["ladaUrl"],
-                           "token": cfg.get("ladaToken", ""), "ops": None,
+    if str(cfg.get("runnerUrl") or "").strip():
+        candidates.append({"name": "default", "url": cfg["runnerUrl"],
+                           "token": cfg.get("runnerToken", ""), "ops": None,
                            "prefer": [], "engines": None})
     scored = []
     for c in candidates:
@@ -405,8 +406,10 @@ def resolve_runner(cfg, op):
         if declared is not None and op not in declared:
             continue
         try:
+            tok = c.get("token", "")
             h = requests.get(url + "/health",
-                             headers={"X-Lada-Token": c.get("token", "")}, timeout=4).json()
+                             headers={"X-Runner-Token": tok, "X-Lada-Token": tok},
+                             timeout=4).json()
         except Exception:  # noqa: BLE001 - offline node: skip, try the next
             continue
         if op not in (h.get("ops") or []) or h.get("paused"):
@@ -456,12 +459,13 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None)
     token = runner["token"]
     headers = {"Content-Type": "application/json"}
     if token:
-        headers["X-Lada-Token"] = token
+        # send both new + legacy auth header so a runner of either vintage authenticates
+        headers["X-Runner-Token"] = headers["X-Lada-Token"] = token
     log.info(f"routing {op} -> runner '{runner['name']}' ({base}) engine={runner.get('engine')}")
     # record which node/engine actually handled this job, for the dashboard
     stamp_job(runner=runner.get("name"), engine=runner.get("engine"))
 
-    scratch = str(cfg.get("ladaScratch") or "/scratch")
+    scratch = str(cfg.get("runnerScratch") or "/scratch")
     sub = os.path.join(scratch, "lada_" + uuid.uuid4().hex[:10])
     os.makedirs(sub, exist_ok=True)
     try:
@@ -506,7 +510,7 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None)
     # The runner writes a fragmented mp4 (--mp4-fast-start): the worker can
     # tail-follow the growing file for the live video feed, and the runner
     # extracts before/after compare frames (rid/base let the worker fetch them).
-    set_live_preview(type="lada", out_dir=sub, input=input_path,
+    set_live_preview(type="runner", out_dir=sub, input=input_path,
                      rid=rid, base=base, token=token)
     cursor = 0
     try:
@@ -566,7 +570,7 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None)
         shutil.rmtree(sub, ignore_errors=True)
 
 
-def backend_lada(cfg, input_path, result_dir, on_line=None, log_cb=None):
+def backend_decensor(cfg, input_path, result_dir, on_line=None, log_cb=None):
     op = "decensor+upscale" if cfg.get("postUpscale") else "decensor"
     return _runner_dispatch(cfg, input_path, result_dir, op, on_line=on_line, log_cb=log_cb)
 
@@ -580,7 +584,8 @@ def backend_transcode(cfg, input_path, result_dir, on_line=None, log_cb=None):
 
 
 BACKENDS = {
-    "lada": backend_lada,
+    "decensor": backend_decensor,
+    "lada": backend_decensor,        # legacy alias for BACKEND=lada / older jobs
     "upscale": backend_upscale,
     "transcode": backend_transcode,
     "command": backend_command,
@@ -812,7 +817,7 @@ def run(stash, cfg, mode="tagged", scene_ids=None):
         return 0
 
     total = len(scenes)
-    chain = " + upscale" if cfg["postUpscale"] and cfg["backend"] == "lada" else ""
+    chain = " + upscale" if cfg["postUpscale"] and cfg["backend"] in ("decensor", "lada") else ""
     log.info(f"Processing {total} scene(s) with backend '{cfg['backend']}'{chain}.")
     succeeded = 0
     for index, scene in enumerate(scenes):
@@ -842,9 +847,9 @@ _ENV_MAP = {
     "gpuId": "GPU_ID",
     "backend": "BACKEND",
     "commandTemplate": "COMMAND_TEMPLATE",
-    "ladaUrl": "LADA_URL",
-    "ladaToken": "LADA_TOKEN",
-    "ladaScratch": "LADA_SCRATCH",
+    "runnerUrl": "RUNNER_URL",
+    "runnerToken": "RUNNER_TOKEN",
+    "runnerScratch": "RUNNER_SCRATCH",
     "ladaRestModel": "LADA_RESTORATION_MODEL",
     "ladaDetModel": "LADA_DETECTION_MODEL",
     "ladaDevice": "LADA_DEVICE",
@@ -870,8 +875,13 @@ def env_bool(name, default):
 
 def config_from_env():
     cfg = dict(DEFAULTS)
+    # backward-compat: pre-rename deployments set LADA_* for the (now engine-
+    # agnostic) runner connection; honor those when the RUNNER_* names aren't set.
+    legacy = {"RUNNER_URL": "LADA_URL", "RUNNER_TOKEN": "LADA_TOKEN", "RUNNER_SCRATCH": "LADA_SCRATCH"}
     for key, env in _ENV_MAP.items():
         val = os.environ.get(env)
+        if (val is None or val == "") and env in legacy:
+            val = os.environ.get(legacy[env])
         if val is not None and val != "":
             cfg[key] = val
     for key, env in _ENV_BOOL.items():

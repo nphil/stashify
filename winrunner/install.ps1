@@ -159,7 +159,7 @@ Write-Host "tray installed to Startup + launched"
 Start-Sleep 5
 try {
   $t = (Get-Content $cfgPath -Raw | ConvertFrom-Json).token
-  $h = Invoke-RestMethod "http://localhost:$Port/health" -Headers @{ "X-Lada-Token" = $t } -TimeoutSec 8
+  $h = Invoke-RestMethod "http://localhost:$Port/health" -Headers @{ "X-Runner-Token" = $t } -TimeoutSec 8
   Write-Host "`nHEALTHY: node=$($h.node) ops=$($h.ops -join '/') encoders(ai=$($h.encoders.ai) transcode=$($h.encoders.transcode))" -ForegroundColor Green
   Write-Host "Dashboard: http://localhost:$Port/  (LAN: http://$($env:COMPUTERNAME):$Port/)"
 } catch { Write-Warning "started but /health not answering yet - check $Root\logs\runner.log" }

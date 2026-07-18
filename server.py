@@ -90,8 +90,8 @@ def stash_gql(query, variables=None):
 
 # Per-request overrides the UI may send -> cfg keys.
 OVERRIDES = {
-    "backend": "backend",                  # lada | upscale | transcode | command
-    "post_upscale": "postUpscale",         # lada: chain decensor -> upscale on the runner
+    "backend": "backend",                  # decensor | upscale | transcode | command
+    "post_upscale": "postUpscale",         # decensor: chain decensor -> upscale on the runner
     "gpu_id": "gpuId",
     "detection_model": "ladaDetModel",     # v4-fast | v4-accurate | v2
     "restoration_model": "ladaRestModel",
@@ -171,7 +171,7 @@ def probe_runner(r):
         return out
     tok = r.get("token") or os.environ.get("WORKER_TOKEN", "")
     try:
-        h = requests.get(url + "/health", headers={"X-Lada-Token": tok}, timeout=4).json()
+        h = requests.get(url + "/health", headers={"X-Runner-Token": tok, "X-Lada-Token": tok}, timeout=4).json()
         out.update(online=True, busy=h.get("busy"), node=h.get("node"),
                    kind=h.get("kind"), ops=h.get("ops") or r.get("ops"),
                    engines=h.get("engines") or r.get("engines"), paused=h.get("paused"))
@@ -339,12 +339,12 @@ def _read_gpu():
     """GPU telemetry. The slim worker has no GPU — the compute runner owns it,
     so ask the runner's /gpu endpoint; fall back to local nvidia-smi for
     deployments that still run the worker on the GPU host."""
-    lada = os.environ.get("LADA_URL", "").rstrip("/")
-    if lada:
+    runner = (os.environ.get("RUNNER_URL") or os.environ.get("LADA_URL") or "").rstrip("/")
+    if runner:
         try:
             import requests
 
-            r = requests.get(lada + "/gpu", timeout=5)
+            r = requests.get(runner + "/gpu", timeout=5)
             if r.ok:
                 data = r.json()
                 if data:
@@ -392,12 +392,13 @@ def gpu_poller():
 PREVIEW_DIR = os.environ.get("PREVIEW_DIR", "/tmp/decensor_preview")
 
 
-def _preview_lada(info, dest_dir):
+def _preview_runner(info, dest_dir):
     """The runner extracts the frames (its ffmpeg understands the growing
     fragmented mp4 and it knows the true encode position); just mirror them."""
     import requests
 
-    headers = {"X-Lada-Token": info.get("token", "")}
+    tok = info.get("token", "")
+    headers = {"X-Runner-Token": tok, "X-Lada-Token": tok}
     for which in ("after", "before"):
         try:
             r = requests.get("%s/jobs/%s/preview/%s.jpg" % (info["base"], info["rid"], which),
@@ -413,7 +414,7 @@ def _preview_lada(info, dest_dir):
 
 
 def preview_poller():
-    extractors = {"lada": _preview_lada}
+    extractors = {"runner": _preview_runner, "lada": _preview_runner}   # accept legacy tag too
     while True:
         time.sleep(2)
         with _jobs_lock:
@@ -438,12 +439,12 @@ def preview_file(job_id, which):
 
 
 def live_source(job_id):
-    """The growing output file for the running lada job, or None."""
+    """The growing output file for the running runner job, or None."""
     with _jobs_lock:
         if _running_job_id != job_id:
             return None
     info = core.get_live_preview()
-    if info.get("type") != "lada":
+    if info.get("type") not in ("runner", "lada"):
         return None
     try:
         vids = [os.path.join(info["out_dir"], f) for f in os.listdir(info["out_dir"])
@@ -742,9 +743,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {
                 "ok": True,
                 "gpu": os.environ.get("GPU_ID", "0"),
-                "backend": os.environ.get("BACKEND", "lada"),
+                "backend": os.environ.get("BACKEND", "decensor"),
                 "postUpscale": core.env_bool("POST_UPSCALE", False),
-                "lada": bool(os.environ.get("LADA_URL", "").strip()),
+                "runner": bool((os.environ.get("RUNNER_URL") or os.environ.get("LADA_URL") or "").strip()),
+                "lada": bool((os.environ.get("RUNNER_URL") or os.environ.get("LADA_URL") or "").strip()),  # legacy alias
                 "gpu_stats": gpu_stats,
             })
         # Live GPU readout for the always-on topbar meter — cheap and unauth'd
@@ -824,13 +826,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/runners":
             from concurrent.futures import ThreadPoolExecutor
             rs = merged_runners()
-            # resolve_runner also treats LADA_URL as a candidate ("default"); surface
+            # resolve_runner also treats RUNNER_URL as a candidate ("default"); surface
             # it here too (deduped by url) so the dashboard's pickers + enable gate see
             # every routable node, not just registered ones.
-            lada = os.environ.get("LADA_URL", "").strip().rstrip("/")
-            if lada and not any(str(r.get("url", "")).rstrip("/") == lada for r in rs):
-                rs = rs + [{"name": "default", "url": lada,
-                            "token": os.environ.get("LADA_TOKEN") or os.environ.get("WORKER_TOKEN", ""),
+            runner_url = (os.environ.get("RUNNER_URL") or os.environ.get("LADA_URL") or "").strip().rstrip("/")
+            if runner_url and not any(str(r.get("url", "")).rstrip("/") == runner_url for r in rs):
+                rs = rs + [{"name": "default", "url": runner_url,
+                            "token": (os.environ.get("RUNNER_TOKEN") or os.environ.get("LADA_TOKEN")
+                                      or os.environ.get("WORKER_TOKEN", "")),
                             "_source": "env"}]
             with ThreadPoolExecutor(max_workers=8) as ex:
                 return self._send(200, list(ex.map(probe_runner, rs)))

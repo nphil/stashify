@@ -278,9 +278,9 @@
     var ids = Array.from(state.sel);
     if (!ids.length) return;
     var eng = $("engine").value;
-    var backend = eng === "upscale" ? "upscale" : (eng === "transcode" ? "transcode" : "lada");
+    var backend = eng === "upscale" ? "upscale" : (eng === "transcode" ? "transcode" : "decensor");
     var extra = { backend: backend };
-    if (backend === "lada") extra.detection_model = $("ladaq").value;
+    if (backend === "decensor") extra.detection_model = $("ladaq").value;
     if (eng === "lada+up") extra.post_upscale = true;
     if (eng === "transcode" && $("txq").value) extra.transcode_height = $("txq").value;
     // per-job overrides: pin a specific engine and/or runner (Auto = coordinator decides)
@@ -602,7 +602,7 @@
     r.bar.className = "bar" + (j.paused ? " is-paused" : "");
     r.fill.style.width = pct + "%";
     if (r.stats) fillStats(r.stats, j, pct);
-    if (r.pv && j.preview && j.backend !== "lada" && j.backend !== "upscale") {
+    if (r.pv && j.preview && j.backend !== "decensor" && j.backend !== "lada" && j.backend !== "upscale") {
       // still-frame pair (legacy/command backends): runner ops use the video duo
       var now = Date.now();
       if (now - r.pv._last > 2000) {          // refresh pace ~ the extractor's
@@ -621,7 +621,7 @@
       r.capCens.textContent = up ? "Original" : "Censored (original)";
       r.capLive.textContent = up ? "Upscaled · live" : "Decensored · live";
     }
-    if (r.live && (j.backend === "lada" || j.backend === "upscale") && j.preview && !r.live.src) {
+    if (r.live && (j.backend === "decensor" || j.backend === "lada" || j.backend === "upscale") && j.preview && !r.live.src) {
       // attach once, after the first fragments exist (preview implies output);
       // 'loadeddata' on the live feed unhides the whole duo
       r.live.src = workerUrl("jobs/" + j.id + "/live.mp4");

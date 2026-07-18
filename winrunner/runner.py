@@ -116,7 +116,7 @@ def load_config():
         cfg = {}
     cfg.setdefault("node_name", os.environ.get("COMPUTERNAME", "windows-runner"))
     cfg.setdefault("port", 8712)
-    cfg.setdefault("token", os.environ.get("LADA_TOKEN", ""))
+    cfg.setdefault("token", os.environ.get("RUNNER_TOKEN") or os.environ.get("LADA_TOKEN", ""))
     cfg.setdefault("path_map", [])
     cfg.setdefault("lanes", {"ai": True, "transcode": True})
     cfg.setdefault("ai_encoder", "auto")
@@ -847,7 +847,8 @@ class Handler(BaseHTTPRequestHandler):
     def _authed(self):
         if not TOKEN:
             return False   # no token configured -> deny (server also binds localhost)
-        return hmac.compare_digest(self.headers.get("X-Lada-Token", ""), TOKEN)
+        got = self.headers.get("X-Runner-Token") or self.headers.get("X-Lada-Token", "")
+        return hmac.compare_digest(got, TOKEN)
 
     def _body(self):
         n = int(self.headers.get("Content-Length", "0") or 0)

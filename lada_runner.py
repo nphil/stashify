@@ -6,7 +6,7 @@ system: the Stashify worker (coordinator) POSTs a job here, tails the log, and
 reads the produced file back off a shared scratch mount. Nothing Stash-aware
 lives here — it only turns an input video path into a restored output file.
 
-Endpoints (JSON; send X-Lada-Token if LADA_TOKEN is set):
+Endpoints (JSON; send X-Runner-Token if RUNNER_TOKEN is set; X-Lada-Token/LADA_TOKEN still accepted):
   GET  /health                         -> {ok, device, models, busy}
   POST /run   {input, output_dir, ...} -> {id}
   GET  /jobs/<id>                      -> job
@@ -34,7 +34,7 @@ LADA_DIR = os.environ.get("LADA_DIR", "/opt/lada")
 VENV_PY = os.environ.get("LADA_VENV_PY", "/opt/lada/.venv/bin/python")
 UPSCALE_SCRIPT = os.environ.get("UPSCALE_SCRIPT", "/opt/lada/upscale_cli.py")
 MODELS_DIR = os.environ.get("LADA_MODEL_WEIGHTS_DIR", "/models")
-TOKEN = os.environ.get("LADA_TOKEN", "")
+TOKEN = os.environ.get("RUNNER_TOKEN") or os.environ.get("LADA_TOKEN", "")   # RUNNER_TOKEN preferred; LADA_TOKEN legacy
 PORT = int(os.environ.get("PORT", "8711"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
@@ -470,7 +470,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _authed(self):
-        return not TOKEN or self.headers.get("X-Lada-Token", "") == TOKEN
+        if not TOKEN:
+            return True
+        got = self.headers.get("X-Runner-Token") or self.headers.get("X-Lada-Token", "")
+        return got == TOKEN
 
     def _body(self):
         n = int(self.headers.get("Content-Length", "0") or 0)
@@ -493,7 +496,7 @@ class Handler(BaseHTTPRequestHandler):
             models = sorted(os.listdir(MODELS_DIR)) if os.path.isdir(MODELS_DIR) else []
             with _jobs_lock:
                 busy = _running_id is not None
-            return self._send(200, {"ok": True, "device": os.environ.get("LADA_DEVICE", "cuda"),
+            return self._send(200, {"ok": True, "device": os.environ.get("RUNNER_DEVICE") or os.environ.get("LADA_DEVICE", "cuda"),
                                     "models": models, "busy": busy,
                                     "ops": ["decensor", "upscale", "decensor+upscale"],
                                     "engines": {"decensor": "lada", "decensor+upscale": "lada", "upscale": "span"}})
