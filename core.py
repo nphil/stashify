@@ -1013,11 +1013,15 @@ def process_to_review(stash, cfg, scene_id, progress=None, log_cb=None):
 
     try:
         backend = cfg["backend"]
-        p(0.05, f"Running {op_name(backend)}", {"stage": op_name(backend)})
+        p(0.0, f"Running {op_name(backend)}", {"stage": op_name(backend)})
+        # The runner op is ~all the wall-clock, so map its raw 0-100% onto (near)
+        # the whole bar - this makes the coordinator's % match what the runner
+        # dashboard + Windows tray show (both display the runner's raw progress).
+        # The last 2% is reserved for the Stash import/scan finalize below.
         produced = BACKENDS[backend](cfg, input_path, new_dir(),
-                                     on_line=_band(progress, 0.05, 0.85, op_name(backend)), log_cb=log_cb)
+                                     on_line=_band(progress, 0.0, 0.98, op_name(backend)), log_cb=log_cb)
 
-        p(0.88, "Importing preview into Stash", {"stage": "import"})
+        p(0.98, "Importing preview into Stash", {"stage": "import"})
         os.makedirs(cfg["outputDir"], exist_ok=True)
         stem = re.sub(r"\s+", "_", os.path.splitext(os.path.basename(input_path))[0])
         ext = os.path.splitext(produced)[1] or ".mp4"
