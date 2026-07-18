@@ -141,6 +141,15 @@ def load_config():
     cfg.setdefault("jasna_rtx_quality", "ultra")
     cfg.setdefault("jasna_rtx_denoise", "")       # "" = jasna default
     cfg.setdefault("jasna_rtx_deblur", "")
+    # live SEGMENT preview (jasna >=0.8.0 smart mode): scan mosaics -> --segments ->
+    # tap the per-span fragments jasna writes -> before/after clips. Per-job opt-in.
+    cfg.setdefault("jasna_preview", False)         # global default (jobs opt in per request)
+    cfg.setdefault("jasna_preview_stride", 1.5)    # mosaic-scan sampling sec/sample (DML ~150ms/frame; lower = better recall, slower scan)
+    cfg.setdefault("jasna_preview_height", 720)    # preview clip height (downscaled)
+    cfg.setdefault("jasna_preview_encoder", "libx264")  # OFF the 3080 (cpu/igpu) - no job contention
+    cfg["rfdetr_onnx"] = _expand(cfg.get("rfdetr_onnx") or (
+        os.path.join(os.path.dirname(cfg["jasna_exe"]), "model_weights", "rfdetr-v5.onnx")
+        if cfg["jasna_exe"] else ""))
     cfg["local_temp"] = _expand(cfg.get("local_temp") or os.path.join(HERE, "tmp"))
     cfg["ffmpeg"] = resolve_ffmpeg(cfg.get("ffmpeg", "auto"))
     cfg["path_map"] = sorted(
@@ -584,6 +593,7 @@ def run_job(lane, job):
     tmp_copy = None
     mid_dir = None
     jasna_work = None
+    seg_stop = None                     # segment-preview watcher stop event
     if CFG["copy_local"] and op in ("upscale", "decensor", "decensor+upscale"):
         os.makedirs(CFG["local_temp"], exist_ok=True)
         tmp_copy = os.path.join(CFG["local_temp"], "in_" + jid + os.path.splitext(src)[1])
@@ -622,6 +632,22 @@ def run_job(lane, job):
             if chain:
                 mid_dir = os.path.join(CFG["local_temp"], "mid_" + jid)
                 os.makedirs(mid_dir, exist_ok=True)
+            # ---- live segment preview (opt-in): scan mosaics -> smart mode -> tap fragments
+            preview_on = bool(o.get("preview") or CFG.get("jasna_preview"))
+            seg_string, seg_ranges, seg_codec = "", None, ""
+            if preview_on and not CFG.get("jasna_in_place"):
+                push_log(jid, "preview: needs jasna >=0.8.0 (in-place mode); disabled", "warn")
+                preview_on = False
+            if preview_on:
+                seg_codec = _input_codec(src)
+                if seg_codec not in ("h264", "hevc", "av1"):
+                    push_log(jid, "preview: input codec '%s' can't smart-render; disabled"
+                             % (seg_codec or "?"), "warn")
+                    preview_on = False
+            if preview_on:
+                seg_string, seg_ranges = _scan_mosaics(jid, src)
+                if not seg_ranges:            # no mosaics (or scan failed) -> normal full decensor
+                    preview_on = False
             argv = [CFG["venv_python"], os.path.join(HERE, "decensor_cli.py"),
                     "--input", src, "--output-dir", mid_dir or out_dir,
                     "--jasna", CFG["jasna_exe"],
@@ -642,6 +668,8 @@ def run_job(lane, job):
                 argv += ["--encoder-settings", str(CFG["jasna_encoder_settings"])]
             if CFG["jasna_no_compile"]:
                 argv.append("--no-compile")
+            if preview_on:
+                argv += ["--segments", seg_string, "--codec", seg_codec]
             # secondary restoration (RTX Super Res etc.): per-job override, else config
             # default. All rtx params are validated against jasna's accepted choices so
             # a bad override (e.g. a hand-crafted API call) can't fail the whole job.
@@ -666,7 +694,24 @@ def run_job(lane, job):
                         argv += ["--rtx-denoise", denoise]
                     if deblur in (_levels | {"none"}):
                         argv += ["--rtx-deblur", deblur]
+            seg_stop = threading.Event()
+            if preview_on:
+                from preview import SegmentPreview
+                _seg = SegmentPreview(
+                    jid=jid, watch_dir=(mid_dir or out_dir),
+                    out_stem=os.path.splitext(os.path.basename(src))[0] + "_decensored",
+                    src=src, ranges=seg_ranges,
+                    prev_dir=os.path.join(CFG["local_temp"], "preview_" + jid),
+                    ffmpeg=FFMPEG, ffprobe=FFPROBE,
+                    encoder=CFG.get("jasna_preview_encoder", "libx264"),
+                    height=CFG.get("jasna_preview_height", 720),
+                    on_update=lambda segs: set_job(jid, segments=segs),
+                    log=lambda m: push_log(jid, m, "event"))
+                set_job(jid, segments=[], preview_segments=True)
+                threading.Thread(target=_seg.run, args=(seg_stop,),
+                                 kwargs={"poll": 1.0}, daemon=True).start()
             rc, cancelled = _stream_subprocess(lane, jid, argv, scale=(0, n_phases))
+            seg_stop.set()
             if chain and rc == 0 and not cancelled:
                 mid = _newest_video(mid_dir)
                 if not mid:
@@ -688,6 +733,8 @@ def run_job(lane, job):
             raise RuntimeError("unsupported op on this runner: " + op)
     finally:
         stop_preview.set()
+        if seg_stop:
+            seg_stop.set()
         # retry-purge: on cancel/stall the tree-killed child can briefly hold these
         # locked (Windows), so a one-shot delete would silently leak multi-GB temps.
         _purge(tmp_copy)
@@ -785,6 +832,67 @@ def preview_path(jid, which):
         return None
     p = os.path.join(od, ".preview", which + ".jpg")
     return p if os.path.isfile(p) else None
+
+
+def seg_preview_path(jid, n, which):
+    """Local path to a segment-preview clip (seg<N>_before/after.mp4), or None."""
+    p = os.path.join(CFG["local_temp"], "preview_" + jid, "seg%d_%s.mp4" % (int(n), which))
+    return p if os.path.isfile(p) else None
+
+
+def _input_codec(path):
+    """ffprobe the input's video codec (h264|hevc|av1|...) - smart mode --segments
+    requires the output codec to match the input, so we gate + pass it."""
+    try:
+        r = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "v:0",
+                            "-show_entries", "stream=codec_name", "-of",
+                            "default=nw=1:nk=1", path],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=25, creationflags=NOWIN)
+        return r.stdout.strip().lower()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _scan_mosaics(jid, src):
+    """Headless mosaic scan (scan_cli.py, onnxruntime DirectML) -> the --segments
+    ranges for smart mode. Returns (segments_string, ranges_list); ("", None) on
+    failure or no mosaics. Runs on the 3080 via DirectX BEFORE the decensor pass,
+    so it never contends with the job's restoration."""
+    onnx = CFG.get("rfdetr_onnx") or ""
+    if not onnx or not os.path.isfile(onnx):
+        push_log(jid, "preview: rfdetr onnx not found (%s); no preview" % onnx, "warn")
+        return "", None
+    argv = [CFG["venv_python"], os.path.join(HERE, "scan_cli.py"),
+            "--input", src, "--onnx", onnx, "--ffmpeg", FFMPEG, "--ffprobe", FFPROBE,
+            "--stride-seconds", str(CFG.get("jasna_preview_stride", 0.5))]
+    push_log(jid, "preview: scanning for mosaic segments...", "event")
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=3600, creationflags=NOWIN)
+    except Exception as exc:  # noqa: BLE001
+        push_log(jid, "preview: scan failed: %r" % exc, "warn")
+        return "", None
+    for line in (r.stderr or "").splitlines():
+        if line.strip():
+            push_log(jid, line.strip(), "proc")
+    data = None
+    for line in reversed((r.stdout or "").strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                data = json.loads(line)
+                break
+            except ValueError:
+                pass
+    if not data:
+        push_log(jid, "preview: scan produced no output (rc=%s)" % r.returncode, "warn")
+        return "", None
+    ranges = data.get("ranges") or []
+    push_log(jid, "preview: %d mosaic range(s) via %s (%d/%d samples, max %.2f)" % (
+        len(ranges), data.get("provider", "?"), data.get("n_hits", 0),
+        data.get("n_samples", 0), data.get("max_score", 0.0)), "event")
+    return data.get("segments", ""), ranges
 
 
 # --------------------------------------------------------------------------- #
@@ -969,6 +1077,15 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             p = preview_path(m.group(1), m.group(2))
             return self._send_file(p, "image/jpeg") if p else self._send(404, {"error": "no preview"})
+        m = re.match(r"^/jobs/([0-9a-f]+)/seg/(\d+)/(before|after)\.mp4$", raw)
+        if m:
+            p = seg_preview_path(m.group(1), m.group(2), m.group(3))
+            return self._send_file(p, "video/mp4") if p else self._send(404, {"error": "no segment"})
+        m = re.match(r"^/jobs/([0-9a-f]+)/segments$", raw)
+        if m:
+            with _jobs_lock:
+                j = _jobs.get(m.group(1))
+            return self._send(200, {"segments": (j.get("segments") if j else None) or []})
         if raw == "/jobs":
             with _jobs_lock:
                 return self._send(200, [public(j) for j in _jobs.values()])
@@ -1051,7 +1168,7 @@ def _sweep_temp():
     crash/power-loss - a killed runner can't run its per-job cleanup."""
     try:
         for name in os.listdir(CFG["local_temp"]):
-            if name.startswith(("jasna_", "mid_", "in_")):
+            if name.startswith(("jasna_", "mid_", "in_", "preview_")):
                 p = os.path.join(CFG["local_temp"], name)
                 shutil.rmtree(p, ignore_errors=True) if os.path.isdir(p) else os.remove(p)
     except OSError:

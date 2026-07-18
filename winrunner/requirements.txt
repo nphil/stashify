@@ -4,4 +4,5 @@ requests
 psutil
 av
 spandrel
-PySide6-Essentials   # tray flyout GUI
+PySide6-Essentials     # tray flyout GUI
+onnxruntime-directml   # live-preview mosaic scan (rfdetr onnx via DirectX; no CUDA/cuDNN)

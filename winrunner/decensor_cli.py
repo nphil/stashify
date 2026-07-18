@@ -159,6 +159,13 @@ def main():
     ap.add_argument("--rtx-quality", default="ultra")
     ap.add_argument("--rtx-denoise", default="")
     ap.add_argument("--rtx-deblur", default="")
+    ap.add_argument("--segments", default="",
+                    help="jasna >=0.8.0 smart mode: restore only these time ranges "
+                         "(START-END,...) and stream-copy the rest. Requires --codec "
+                         "to match the input codec.")
+    ap.add_argument("--codec", default="",
+                    help="jasna output codec (h264|hevc|av1). Required with --segments "
+                         "(must match input); otherwise jasna's default is used.")
     args = ap.parse_args()
 
     if not os.path.isfile(args.jasna):
@@ -196,6 +203,11 @@ def main():
         argv += ["--encoder-settings", args.encoder_settings]
     if args.no_compile:
         argv.append("--no-compile-basicvsrpp")
+    if args.codec:
+        argv += ["--codec", args.codec]
+    if args.segments:
+        argv += ["--segments", args.segments]
+        log("decensor: smart mode - restoring %d segment(s) only" % (args.segments.count(",") + 1))
     sec = (args.secondary_restoration or "none").strip()
     if sec and sec != "none":
         argv += ["--secondary-restoration", sec]
