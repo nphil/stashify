@@ -123,6 +123,7 @@ def load_config():
     cfg.setdefault("transcode_encoder", "auto")
     cfg.setdefault("ai_fp16", True)
     cfg.setdefault("ai_gpu_index", 0)
+    cfg.setdefault("upscale_trt", True)      # compile SPAN to a TensorRT engine (faster + less VRAM)
     cfg.setdefault("copy_local", False)
     cfg["venv_python"] = _expand(cfg.get("venv_python") or sys.executable)
     cfg["upscale_model"] = _expand(cfg.get("upscale_model") or "")
@@ -718,6 +719,8 @@ def run_job(lane, job):
                     "--device", "cuda:%d" % CFG["ai_gpu_index"]]
             if CFG["ai_fp16"] and not o.get("no_fp16"):
                 argv.append("--fp16")
+            if o.get("no_trt") or not CFG.get("upscale_trt", True):
+                argv.append("--no-trt")
             # a preceding copy-local left stage=copy/progress=1.0; reset for the upscale
             # phase so its silent SPAN-model load animates instead of freezing at the copy band
             set_job(jid, stage=op, progress=0.0, indeterminate=True, message="Loading upscale model")
@@ -847,6 +850,8 @@ def run_job(lane, job):
                             "--device", "cuda:%d" % CFG["ai_gpu_index"]]
                     if CFG["ai_fp16"] and not o.get("no_fp16"):
                         argv.append("--fp16")
+                    if o.get("no_trt") or not CFG.get("upscale_trt", True):
+                        argv.append("--no-trt")
                     rc, cancelled = _stream_subprocess(lane, jid, argv, scale=(1, n_phases))
         else:
             raise RuntimeError("unsupported op on this runner: " + op)

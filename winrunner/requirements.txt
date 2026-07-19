@@ -6,3 +6,4 @@ av
 spandrel
 PySide6-Essentials     # tray flyout GUI
 onnxruntime-directml   # live-preview mosaic scan (rfdetr onnx via DirectX; no CUDA/cuDNN)
+onnx                   # torch.onnx.export -> TensorRT engine build for the SPAN upscaler
