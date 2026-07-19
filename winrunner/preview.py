@@ -23,10 +23,24 @@ import threading
 IS_WIN = os.name == "nt"
 NOWIN = subprocess.CREATE_NO_WINDOW if IS_WIN else 0
 
+MAX_PREVIEW_SECONDS = 45.0   # cap a segment preview clip. A long fragment must NEVER
+                             # trigger a multi-minute before/after encode: a video with a
+                             # big mosaic-free gap produces one giant copy fragment, and
+                             # encoding its full length over SMB froze the whole preview.
+
 
 def _run(argv, timeout=120):
     return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
                           errors="replace", timeout=timeout, creationflags=NOWIN)
+
+
+def _safe_run(argv, timeout=120):
+    """Run ffmpeg, returning True on success. Never raises - a watcher-thread encode
+    must not crash the loop (or block a fragment) on a timeout/OS error."""
+    try:
+        return _run(argv, timeout=timeout).returncode == 0
+    except Exception:  # noqa: BLE001  (incl. subprocess.TimeoutExpired)
+        return False
 
 
 def _probe_duration(ffprobe, path):
@@ -38,16 +52,27 @@ def _probe_duration(ffprobe, path):
         return None
 
 
-def _overlaps(start, end, ranges):
-    """True only if [start,end) shares a MEANINGFUL span with a mosaic range - not
-    a mere boundary touch (a copy fragment starts exactly where a render one ends,
-    so a slack-based test would falsely match it). Render fragments keyframe-pad and
-    fully contain their range; copy fragments sit strictly between ranges."""
+def _mosaic_window(start, end, ranges):
+    """Return (wstart, wend): the portion of fragment [start,end) that holds restored
+    mosaic content (its intersection with the scanned ranges), or None if this fragment
+    is not a restored span.
+
+    A render fragment keyframe-pads and largely contains its range, so the intersection
+    dominates it. A COPY fragment sits between ranges and at most edge-touches one; a LONG
+    copy fragment (a multi-minute mosaic-free gap) must return None - otherwise the watcher
+    builds a full-length before/after pair for it, which froze the preview at that segment."""
+    lo = hi = None
     for s, e in ranges:
-        overlap = min(end, e) - max(start, s)
-        if overlap >= min(0.3, 0.5 * (e - s)):
-            return True
-    return False
+        os_, oe = max(start, s), min(end, e)
+        if oe - os_ >= min(0.3, 0.5 * (e - s)):
+            lo = os_ if lo is None else min(lo, os_)
+            hi = oe if hi is None else max(hi, oe)
+    if lo is None:
+        return None
+    # a long fragment that's mostly outside any range is a copy span, not a segment
+    if (hi - lo) < 0.5 * (end - start) and (end - start) > MAX_PREVIEW_SECONDS:
+        return None
+    return lo, hi
 
 
 class SegmentPreview:
@@ -103,13 +128,15 @@ class SegmentPreview:
     def _vf(self):
         return "scale=-2:%d:flags=bilinear" % self.height
 
-    def _encode_after(self, frag, dst):
-        # downscale the restored fragment off the 3080 (no -c copy: we want a light,
-        # browser-friendly, faststart clip and to normalize odd fragment sizes)
-        argv = [self.ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-i", frag,
+    def _encode_after(self, frag, ss, t, dst):
+        # downscale only the mosaic window [ss, ss+t) of the restored fragment off the
+        # 3080 (no -c copy: light, browser-friendly, faststart, normalized size). ss/t
+        # keep this bounded so a long fragment can't trigger a multi-minute encode.
+        argv = [self.ffmpeg, "-nostdin", "-loglevel", "error", "-y",
+                "-ss", "%.3f" % ss, "-i", frag, "-t", "%.3f" % t,
                 "-an", "-vf", self._vf(), "-c:v", self.encoder, "-pix_fmt", "yuv420p",
                 "-movflags", "+faststart", dst]
-        return _run(argv, timeout=180).returncode == 0
+        return _safe_run(argv, timeout=120)
 
     def _encode_before(self, start, dur, dst):
         # cut the matching original window (accurate seek + re-encode for exact
@@ -118,20 +145,23 @@ class SegmentPreview:
                 "-ss", "%.3f" % start, "-i", self.src, "-t", "%.3f" % dur,
                 "-an", "-vf", self._vf(), "-c:v", self.encoder, "-pix_fmt", "yuv420p",
                 "-movflags", "+faststart", dst]
-        return _run(argv, timeout=180).returncode == 0
+        return _safe_run(argv, timeout=120)
 
-    def _emit(self, idx, start, dur, frag):
+    def _emit(self, idx, frag_start, win, frag):
+        wstart, wend = win
+        pdur = min(wend - wstart, MAX_PREVIEW_SECONDS)
+        ss = max(0.0, wstart - frag_start)     # mosaic window offset inside the fragment
         n = self._seg_no
         after = os.path.join(self.prev_dir, "seg%d_after.mp4" % n)
         before = os.path.join(self.prev_dir, "seg%d_before.mp4" % n)
-        ok_a = self._encode_after(frag, after)
-        ok_b = self._encode_before(start, dur, before)
+        ok_a = self._encode_after(frag, ss, pdur, after)
+        ok_b = self._encode_before(wstart, pdur, before)
         if ok_a and ok_b:
             self._seg_no += 1
-            seg = {"n": n, "start": round(start, 3), "end": round(start + dur, 3),
-                   "dur": round(dur, 3)}
+            seg = {"n": n, "start": round(wstart, 3), "end": round(wstart + pdur, 3),
+                   "dur": round(pdur, 3)}
             self.segments.append(seg)
-            self._log("preview: segment %d ready [%.1f-%.1fs]" % (n, start, start + dur))
+            self._log("preview: segment %d ready [%.1f-%.1fs]" % (n, wstart, wstart + pdur))
             if self.on_update:
                 try:
                     self.on_update(list(self.segments))
@@ -198,8 +228,9 @@ class SegmentPreview:
                     dur = 0.0
                 start = self._cum
                 self._cum += dur
-                if dur > 0 and _overlaps(start, start + dur, self.ranges):
-                    self._emit(self._next_idx, start, dur, frag)
+                win = _mosaic_window(start, start + dur, self.ranges) if dur > 0 else None
+                if win:
+                    self._emit(self._next_idx, start, win, frag)
                 self._next_idx += 1
             if stopped:
                 if drained or not os.path.isdir(temp_dir):

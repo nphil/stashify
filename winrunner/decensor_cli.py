@@ -75,6 +75,47 @@ def _bytes_in(paths):
     return total
 
 
+def _final_stage_progress(output_dir, input_path):
+    """Live % for jasna's otherwise-silent smart-render finish, from file sizes only
+    (metadata, never contents). Two sequential sub-stages, each growing to ~the SOURCE
+    size (a stable target that survives jasna deleting its intermediates):
+      1. concat  -> 'assembled.ts' inside the hidden '.<stem>.segments-*' temp dir
+      2. mux     -> the hidden '.<stem>...smart-render.<ext>' (assembled.ts now deleted)
+    Returns (label, pct) or None when not in this stage - so the heartbeat shows
+    'Muxing audio into final video 63%' instead of a frozen, mislabeled 'restoring a
+    segment' during the multi-GB, over-SMB assembly."""
+    try:
+        src = os.path.getsize(input_path)
+    except OSError:
+        return None
+    if src <= 0:
+        return None
+    try:
+        names = os.listdir(output_dir)
+    except OSError:
+        return None
+    mux = 0                                            # stage 2: the muxed output (…smart-render…)
+    for n in names:
+        if n.startswith(".") and "smart-render" in n:
+            try:
+                mux = max(mux, os.path.getsize(os.path.join(output_dir, n)))
+            except OSError:
+                pass
+    if mux > 0:
+        return "muxing audio into final video", min(99, int(100 * mux / src))
+    for n in names:                                    # stage 1: assembled.ts in the segments dir
+        d = os.path.join(output_dir, n)
+        if ".segments-" in n and os.path.isdir(d):
+            try:
+                asm = next((os.path.getsize(os.path.join(d, f)) for f in os.listdir(d)
+                            if f.startswith("assembled.")), 0)
+            except OSError:
+                asm = 0
+            if asm > 0:
+                return "assembling final video", min(99, int(100 * asm / src))
+    return None
+
+
 def normalize(seg):
     """Jasna tqdm segment -> lada-style progress line, or None if not progress."""
     seg = seg.replace(",", "")            # tqdm thousands separators in frame counts
@@ -272,8 +313,12 @@ def main():
             if grew:
                 parts.append("output +%dMB/%ds" % (grew // (1 << 20), HEARTBEAT_SECS))
             busy = (g is not None and (g[0] > 5 or g[1] > 5)) or grew > 0
+            fin = _final_stage_progress(args.output_dir, out_path) if progress_seen[0] else None
             if not progress_seen[0]:
                 phase = "loading models & TensorRT engines"
+            elif fin:                                  # smart-render assembly/mux: real % from file size
+                label, pct = fin
+                phase = label if pct is None else "%s %d%%" % (label, pct)
             elif g is not None and g[0] > 15:
                 phase = "restoring a segment on the GPU"
             elif grew:

@@ -289,14 +289,20 @@ _NARRATION = [
 
 def _heartbeat_msg(phase):
     p = (phase or "").lower()
+    m = re.search(r"(\d{1,3})\s*%", p)           # preserve a live % from the silent final stage
+    pct = (" — %s%%" % m.group(1)) if m else ""
     if "compil" in p:
         return "Compiling TensorRT engines (first run only — this won't repeat)"
     if "load" in p:
         return "Loading models & engines"
+    if "mux" in p:
+        return "Muxing audio into final video" + pct
+    if "assembl" in p:
+        return "Assembling final video" + pct
     if "restor" in p:
         return "Restoring mosaics"
-    if "encod" in p or "assembl" in p:
-        return "Encoding / assembling output"
+    if "encod" in p:
+        return "Encoding / assembling output" + pct
     return "Working"
 
 
