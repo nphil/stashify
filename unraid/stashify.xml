@@ -11,8 +11,8 @@
   <Project>https://github.com/nphil/stashify</Project>
   <Overview>Stashify — upscale &amp; decensor for Stash. This is the thin coordinator: it serves the HTTP API + dashboard and handles all Stash integration (tags, scene updates, plugin calls). It does NO GPU work itself — the heavy lifting (mosaic removal, upscaling, encoding) happens in the separate Stashify-Runner container, which this container talks to over HTTP (RUNNER_URL). Dashboard is also reachable directly at http://[IP]:[PORT:8710]. IMPORTANT: mount your media at the SAME container paths Stash uses so stored paths resolve, and put OUTPUT_DIR inside a Stash library path.</Overview>
   <Category>MediaApp:Video Tools: MediaServer:Video:</Category>
-  <WebUI>https://stashify.nateshome.net/</WebUI>
-  <TemplateURL/>
+  <WebUI>http://[IP]:[PORT:8710]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/nphil/stashify/main/unraid/stashify.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/nphil/stashify/main/assets/icon-256.png</Icon>
   <ExtraParams/>
   <PostArgs/>

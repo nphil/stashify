@@ -12,7 +12,7 @@
   <Overview>GPU compute runner for Stashify. Bundles Lada (mosaic removal / decensoring), SPAN 2x live-action upscaling, and NVENC encoding behind an app-agnostic HTTP API on port 8711 — the Stashify coordinator submits jobs to it, and other apps can use the same API. Media mounts are read-only; all writing happens in /scratch, which must be the SAME host dir the Stashify container mounts at /scratch.</Overview>
   <Category>MediaApp:Video Tools: MediaServer:Video:</Category>
   <WebUI/>
-  <TemplateURL/>
+  <TemplateURL>https://raw.githubusercontent.com/nphil/stashify/main/unraid/stashify-runner.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/nphil/stashify/main/assets/icon-256.png</Icon>
   <ExtraParams>--runtime=nvidia</ExtraParams>
   <PostArgs/>

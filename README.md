@@ -80,6 +80,13 @@ To `docker pull` them, either make the ghcr packages **public** (GitHub →
 Packages → package settings → Change visibility) or log in once:
 `docker login ghcr.io -u <your-user>`.
 
+> **unRAID version checks need public packages.** The Docker tab's
+> Version/"apply update" check queries the registry **anonymously** — it does
+> not use `docker login` credentials. While a ghcr package is private, unRAID
+> shows **"not available"** under Version and can never detect updates. Flip
+> both packages to public and the next **Check for Updates** shows
+> "up-to-date"/"update ready" normally.
+
 ---
 
 ## 1) Worker + runner on unRAID
@@ -98,6 +105,9 @@ and **`unraid/stashify-runner.xml`** (runner). Drop them into
 `/boot/config/plugins/dockerMan/templates-user/` on your flash drive, then add
 both containers from the Docker tab (**Add Container** → pick the template) and
 fill in the paths/secrets.
+
+For the Docker tab's **Version** column to work (not show "not available"),
+the ghcr packages must be **public** — see [Images (GHCR)](#images-ghcr).
 
 ### Option B: docker compose
 

@@ -7,8 +7,11 @@ name: Build & publish images
 #   - manual run (Actions tab / gh)
 #
 # Deploy on unRAID by pulling instead of building:
-#   docker login ghcr.io -u nphil        # one-time (private package)
 #   docker compose pull && docker compose up -d
+# The ghcr packages must be PUBLIC (package settings -> Change visibility):
+# unRAID's Docker-tab version check queries the registry anonymously, so a
+# private package shows Version "not available" and updates are undetectable.
+# (If kept private: docker login ghcr.io -u nphil to pull, no update checks.)
 
 on:
   push:
