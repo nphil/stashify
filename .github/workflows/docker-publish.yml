@@ -8,10 +8,11 @@ name: Build & publish images
 #
 # Deploy on unRAID by pulling instead of building:
 #   docker compose pull && docker compose up -d
-# The ghcr packages must be PUBLIC (package settings -> Change visibility):
-# unRAID's Docker-tab version check queries the registry anonymously, so a
-# private package shows Version "not available" and updates are undetectable.
-# (If kept private: docker login ghcr.io -u nphil to pull, no update checks.)
+# The images are pushed with Docker media types (oci-mediatypes=false below)
+# because unRAID's Docker-tab update checker doesn't accept bare OCI image
+# manifests — with OCI media types every version check 404s and the tab
+# shows "not available". Public packages check anonymously; private ones
+# also work if the server has done `docker login ghcr.io` once.
 
 on:
   push:
@@ -86,7 +87,13 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
-          push: true
+          # oci-mediatypes=false pushes Docker (schema2) manifests instead of
+          # OCI ones. unRAID's update checker never sends
+          # application/vnd.oci.image.manifest.v1+json in its Accept header,
+          # and ghcr answers 404 for a media type the client didn't accept —
+          # so a bare OCI manifest makes the Docker tab show Version
+          # "not available" forever. provenance must stay off for this.
+          outputs: type=image,oci-mediatypes=false,push=true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: false

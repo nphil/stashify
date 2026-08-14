@@ -80,12 +80,14 @@ To `docker pull` them, either make the ghcr packages **public** (GitHub →
 Packages → package settings → Change visibility) or log in once:
 `docker login ghcr.io -u <your-user>`.
 
-> **unRAID version checks need public packages.** The Docker tab's
-> Version/"apply update" check queries the registry **anonymously** — it does
-> not use `docker login` credentials. While a ghcr package is private, unRAID
-> shows **"not available"** under Version and can never detect updates. Flip
-> both packages to public and the next **Check for Updates** shows
-> "up-to-date"/"update ready" normally.
+> **unRAID version checks need Docker-media-type manifests.** unRAID's
+> Docker-tab update checker sends an `Accept` header without
+> `application/vnd.oci.image.manifest.v1+json`, and ghcr returns 404 for a
+> media type the client didn't accept — so images pushed as bare OCI
+> manifests show **"not available"** under Version forever. The publish
+> workflow therefore pushes with `oci-mediatypes=false`. Public packages are
+> checked anonymously; a private package also works once the server has done
+> `docker login ghcr.io`.
 
 ---
 
@@ -106,8 +108,9 @@ and **`unraid/stashify-runner.xml`** (runner). Drop them into
 both containers from the Docker tab (**Add Container** → pick the template) and
 fill in the paths/secrets.
 
-For the Docker tab's **Version** column to work (not show "not available"),
-the ghcr packages must be **public** — see [Images (GHCR)](#images-ghcr).
+If the Docker tab's **Version** column shows "not available", the pulled
+image was published with OCI media types — see [Images (GHCR)](#images-ghcr);
+images built by the current workflow check fine.
 
 ### Option B: docker compose
 
