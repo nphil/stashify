@@ -1,0 +1,49 @@
+name: Deploy Pages
+
+# Publishes docs/ (the Stash plugin source: index.yml + stashify.zip) to
+# GitHub Pages. This replaces the automatic "deploy from branch" Jekyll
+# build, which always runs `git submodule update --init --recursive` and
+# dies cloning the private decensor-engine submodule — every branch-based
+# Pages build has failed since that submodule was added. This workflow
+# checks out WITHOUT submodules and uploads docs/ as a static artifact.
+#
+# Requires Settings -> Pages -> Source set to "GitHub Actions" (one-time).
+
+on:
+  push:
+    branches: ['main']
+    paths:
+      - 'docs/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout (no submodules)
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload docs/ artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
