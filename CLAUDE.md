@@ -14,14 +14,17 @@ the container image's `org.opencontainers.image.source` label, fetches this
 repo's **GitHub Releases**, and shows the release notes as the changelog in
 the Docker tab. Every image release must therefore ship with release notes:
 
-1. Ship user-visible changes by **tagging, not just merging**: after the work
-   is merged to `main`, create an **annotated tag** `vX.Y.Z` whose tag message
-   is the human-readable changelog (short bullet list, user-facing wording),
-   then push the tag.
-2. CI (`docker-publish.yml`) does the rest: the v* tag builds+pushes the
-   images (`X.Y.Z`, `X.Y`, **and `latest`** — `:latest` only moves on tags,
-   never on plain main pushes) with the OCI version label set, and the
-   `release` job publishes a GitHub Release from the tag message.
+1. Ship user-visible changes by **releasing, not just merging**: after the
+   work is merged to `main`, dispatch `docker-publish.yml` on `main` with
+   inputs `version: X.Y.Z` (no leading v) and `notes:` a human-readable
+   changelog (short bullet list, user-facing wording). The Claude git proxy
+   CANNOT push tags (403), so the dispatch path is the primary one; a
+   human pushing an annotated `vX.Y.Z` tag works identically (tag message
+   becomes the notes).
+2. CI does the rest: builds+pushes the images (`X.Y.Z` **and `latest`** —
+   `:latest` only moves on releases, never on plain main pushes) with the
+   OCI version label set, creates the `vX.Y.Z` tag, and publishes a GitHub
+   Release with the notes.
 3. `make_latest: false` on app releases is deliberate — `/releases/latest`
    must keep resolving to the `winrunner-v*` release because
    `setup-stashify-runner.ps1` downloads

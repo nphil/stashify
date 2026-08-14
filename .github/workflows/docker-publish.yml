@@ -23,7 +23,21 @@ on:
       - 'unraid/**'
       - '**.md'
     tags: ['v*']
+  # Dispatching with a version cuts a RELEASE: images tagged X.Y.Z + latest,
+  # a v-tag created on the dispatched ref, and a GitHub Release whose body is
+  # `notes` (the changelog ShipLog shows on unRAID). Dispatch without a
+  # version = plain rebuild, no release. This is the primary release path —
+  # the git proxy used by Claude sessions cannot push tags directly.
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (X.Y.Z, no leading v). Empty = rebuild only.'
+        required: false
+        type: string
+      notes:
+        description: 'Release notes / changelog (markdown), shown by ShipLog'
+        required: false
+        type: string
 
 # One run per ref. Do NOT cancel in-progress builds: the runner image takes
 # ~25 min cold, and killing it for a small follow-up commit leaves ghcr without
@@ -86,6 +100,8 @@ jobs:
             type=sha,format=short
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.version != '' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' && inputs.version != '' }}
 
       - name: Build & push
         uses: docker/build-push-action@v6
@@ -114,7 +130,7 @@ jobs:
   # releases (winrunner/setup-stashify-runner.ps1 downloads
   # /releases/latest/download/stashify-winrunner.zip).
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
     needs: build-push
     runs-on: ubuntu-latest
     permissions:
@@ -124,19 +140,34 @@ jobs:
         with:
           fetch-tags: true
 
-      - name: Extract annotated tag message
-        id: notes
+      # Tag-push path: the annotated tag's message is the changelog.
+      # Dispatch path: the `notes` input is.
+      - name: Resolve tag + notes
+        id: rel
+        env:
+          NOTES_INPUT: ${{ inputs.notes }}
         run: |
-          {
-            echo 'body<<SHIPLOG_EOF'
-            git tag -l --format='%(contents)' "$GITHUB_REF_NAME"
-            echo SHIPLOG_EOF
-          } >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "tag=v${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            {
+              echo 'body<<SHIPLOG_EOF'
+              printf '%s\n' "$NOTES_INPUT"
+              echo SHIPLOG_EOF
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            {
+              echo 'body<<SHIPLOG_EOF'
+              git tag -l --format='%(contents)' "$GITHUB_REF_NAME"
+              echo SHIPLOG_EOF
+            } >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          name: Stashify ${{ github.ref_name }}
-          body: ${{ steps.notes.outputs.body }}
+          tag_name: ${{ steps.rel.outputs.tag }}
+          name: Stashify ${{ steps.rel.outputs.tag }}
+          body: ${{ steps.rel.outputs.body }}
           generate_release_notes: true
           make_latest: false
