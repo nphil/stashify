@@ -75,8 +75,14 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ matrix.image }}
+          # :latest moves ONLY on a v* tag push (flavor latest=auto adds it to
+          # semver builds), never on plain main pushes. That keeps :latest ==
+          # the newest release, so the image always carries a real
+          # org.opencontainers.image.version label — ShipLog (and anything else
+          # reading OCI labels) can show "2.1.0 -> 2.2.0" version spans and pull
+          # the matching GitHub Release notes as the changelog. Main pushes
+          # still build+push the sha tag for validation and cache warmth.
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=short
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -99,3 +105,38 @@ jobs:
           provenance: false
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  # On a v* tag: publish a GitHub Release whose body is the annotated tag's
+  # message. This is the app's changelog — ShipLog on unRAID resolves the
+  # container's OCI source label to this repo and renders these release notes
+  # in the Docker tab, so EVERY image release must have one. make_latest stays
+  # false because /releases/latest must keep pointing at the winrunner-v*
+  # releases (winrunner/setup-stashify-runner.ps1 downloads
+  # /releases/latest/download/stashify-winrunner.zip).
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+
+      - name: Extract annotated tag message
+        id: notes
+        run: |
+          {
+            echo 'body<<SHIPLOG_EOF'
+            git tag -l --format='%(contents)' "$GITHUB_REF_NAME"
+            echo SHIPLOG_EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Stashify ${{ github.ref_name }}
+          body: ${{ steps.notes.outputs.body }}
+          generate_release_notes: true
+          make_latest: false

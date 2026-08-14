@@ -24,6 +24,10 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          # Must stay the repo's "latest" release: setup-stashify-runner.ps1
+          # downloads /releases/latest/download/stashify-winrunner.zip. The
+          # app-image releases (v*) set make_latest: false for the same reason.
+          make_latest: true
           name: Windows Runner ${{ github.ref_name }}
           body: |
             **One-file install on a new machine:** download `setup-stashify-runner.ps1` and run:
