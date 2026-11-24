@@ -210,6 +210,68 @@ Manage the fleet from the dashboard — **⚙ Runners** in the top bar:
 - Runners added here persist in `RUNNERS_STORE` (mount `/config`); runners from
   the `RUNNERS` env show with an *env* badge and win on duplicate URLs.
 
+## Cloud GPU (Vast.ai) — paid, optional, off by default
+
+For a scene that deserves the best quality, Stashify can **rent a GPU on
+[Vast.ai](https://vast.ai) for that one job**, run Jasna on it, hand the result to the
+normal review / replace flow, and **destroy the machine**. Nothing is ever rented unless
+you ask for it, job by job.
+
+> **Privacy trade-off — read first.** The video is uploaded to a machine owned by a
+> stranger (a Vast host), not to anything you control. The copy is deleted when the
+> machine is destroyed, but you cannot audit the host. Don't send scenes you wouldn't
+> hand to a third party. Local runners never leave your network.
+
+**Set up once (dashboard → top bar → ☁ Cloud):**
+
+1. Paste your **Vast API key** and your **Jasna licence code**. They are separate,
+   write-only fields: stored in `/config/cloud.json` (mode 0600), never shown again
+   (the dashboard only says *set · …abcd*). Add prepaid credit on Vast first.
+2. Set the three limits: **max price per hour** (default $1.00), **cap per job**
+   ($3.00) and **cap per month** ($10.00).
+3. **Test key** calls Vast and shows your credit balance.
+
+**Use it:** select scenes → *Decensor*, then choose **Cloud quality (paid)**. It is
+*off* every time the page loads (never remembered) and is not part of the runner
+picker. Exactly three presets exist:
+
+| Preset | Jasna options |
+|---|---|
+| Sharper close-ups | `--restoration-model-name ltx --ltx-large-canvas` |
+| High detail | `--restoration-model-name ltx-8step` |
+| High detail + sharper close-ups | `--restoration-model-name ltx-8step --ltx-large-canvas` |
+
+Choosing one shows a **quote** (the GPU and its $/hour, estimated minutes, estimated
+total, what is left of this month's cap). The Run button then shows the price and
+needs a **confirm click every time**. The quote is an *estimate* from Jasna's
+published speed table plus setup and model-download time; the real cost is whatever
+the rental accrues.
+
+**Safety rules** — enforced by the server, not just the page:
+
+- Refused when: no key or no licence; the estimate is over the per-job cap;
+  this month's spend so far + queued paid jobs + the estimate is over the monthly cap;
+  or the price moved well above what you confirmed.
+- While running, the cost is tracked continuously. At the per-job cap the job is
+  stopped, nothing partial is kept, the machine is destroyed, and the job says so.
+- A machine is destroyed on **every** path: success, failure, cancel, crash. A bad
+  machine (unreachable, no working video encoder, failed install) is dropped and the
+  next offer is tried, at most 3.
+- Every rental is appended to `/config/cloud-ledger.jsonl` (job, scene, preset, GPU,
+  start/end, $/hour, actual $). The Cloud dialog shows month-to-date and the last 10.
+- **Reaper:** at startup and every few minutes, any `stashify-*` machine on your Vast
+  account that this coordinator doesn't own (after a crash or restart), or that has
+  outlived its time limit (12 h), is destroyed. So **use one Vast account per
+  Stashify coordinator** — a second one on the same account would have its machines
+  destroyed. The Vast key can't be changed while a machine is running.
+
+Needs `openssh-client` + `rsync` (in the image) and a persistent `/config` mount (in
+the unRAID template). Environment variables are optional **overrides** that win over
+the dashboard: `VAST_API_KEY`, `JASNA_LICENSE_CODE`, `VAST_MAX_PRICE`, `VAST_JOB_CAP`,
+`VAST_MONTH_CAP`; advanced: `VAST_GPUS`, `VAST_MIN_VRAM_GB`, `VAST_MIN_RELIABILITY`,
+`VAST_DATACENTER_ONLY`, `VAST_MAX_JOB_HOURS`, `VAST_DISK_GB`, `VAST_MAX_BW_COST`,
+`JASNA_CLOUD_IMAGE`, `CLOUD_DIR`, `VAST_SSH_DIR`.
+
 ## Windows runner (second machine: RTX + iGPU)
 
 `winrunner/` turns a Windows desktop into an extra compute node — see

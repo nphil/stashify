@@ -11,8 +11,13 @@ ENV PYTHONUNBUFFERED=1
 
 RUN pip install --no-cache-dir stashapp-tools requests
 
+# Cloud GPU rentals (Vast.ai): the coordinator reaches a rented machine with ssh + rsync.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssh-client rsync \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
-COPY core.py worker.py server.py entrypoint.sh /app/
+COPY core.py worker.py server.py cloud_api.py cloud_jasna.py cloud_ssh.py cloud_vast.py entrypoint.sh /app/
 COPY webui/ /app/webui/
 RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
