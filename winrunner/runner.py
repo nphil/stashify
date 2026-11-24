@@ -505,17 +505,62 @@ class Lane:
                     self.paused = False
 
 
+_awake_lock = threading.Lock()
+_awake_jobs = 0
+_SLEEP_SAVED = os.path.join(os.environ.get("LOCALAPPDATA", HERE), "StashifyRunner", "sleep-timeout.saved")
+
+
+def _sleep_timeout(set_secs=None):
+    """Read (or set) Windows' plugged-in idle-sleep timeout, in seconds; 0 = never."""
+    base = ["powercfg", "/query", "SCHEME_CURRENT", "SUB_SLEEP", "STANDBYIDLE"]
+    if set_secs is None:
+        out = subprocess.run(base, capture_output=True, text=True, timeout=15,
+                             creationflags=NOWIN).stdout
+        vals = re.findall(r"0x([0-9a-fA-F]{8})\s*$", out, re.MULTILINE)
+        return int(vals[-2], 16)      # the last two lines are the AC then the DC value
+    for argv in (["powercfg", "/setacvalueindex", "SCHEME_CURRENT", "SUB_SLEEP", "STANDBYIDLE", str(set_secs)],
+                 ["powercfg", "/setactive", "SCHEME_CURRENT"]):
+        subprocess.run(argv, capture_output=True, timeout=15, creationflags=NOWIN, check=True)
+
+
+def _restore_sleep():
+    """Put back the idle-sleep timeout a job (or a runner that died mid-job) turned off."""
+    try:
+        with open(_SLEEP_SAVED, encoding="ascii") as fh:
+            secs = int(fh.read().strip())
+    except (OSError, ValueError):
+        return
+    try:
+        _sleep_timeout(secs)
+        os.remove(_SLEEP_SAVED)
+        log.info("idle sleep restored to %ss", secs)
+    except Exception as exc:  # noqa: BLE001 - keep the saved value for the next attempt
+        log.warning("could not restore the idle-sleep timeout (%s)", exc)
+
+
 def _keep_awake(on):
-    """Hold off idle sleep for the calling lane thread while it runs a job: a
-    decensor is hours of GPU work with nobody at the keyboard, and Windows would
-    otherwise suspend the PC mid-job. The request is per thread and ends with it,
-    so a crashed runner can't leave the machine unable to sleep."""
+    """Keep Windows from idle-sleeping while any lane runs a job: a decensor is
+    hours of GPU work with nobody at the keyboard. This turns the idle-sleep
+    timeout itself off and puts the user's value back when the last job ends;
+    a SetThreadExecutionState request was tried first and Windows slept through
+    it (event log: "Sleep Reason: System Idle" with the request listed). The
+    user's value is saved on disk first, so a runner killed mid-job restores it
+    on its next start."""
+    global _awake_jobs
     if not IS_WIN:
         return
-    import ctypes
-    ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
-    ctypes.windll.kernel32.SetThreadExecutionState(
-        ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if on else 0))
+    with _awake_lock:
+        _awake_jobs += 1 if on else -1
+        if on and _awake_jobs == 1:
+            try:
+                if not os.path.isfile(_SLEEP_SAVED):
+                    with open(_SLEEP_SAVED, "w", encoding="ascii") as fh:
+                        fh.write(str(_sleep_timeout()))
+                _sleep_timeout(0)
+            except Exception as exc:  # noqa: BLE001 - never fail a job over this
+                log.warning("could not turn idle sleep off (%s); the PC may sleep mid-job", exc)
+        elif not on and _awake_jobs == 0:
+            _restore_sleep()
 
 
 LANES = {}
@@ -1398,6 +1443,7 @@ def main():
         log.error("psutil not installed - cancel can't kill child trees and pause/resume no-op. "
                   "Install it in the venv.")
     _sweep_temp()
+    _restore_sleep()
     LANES = {}
     if CFG["lanes"].get("ai"):
         LANES["ai"] = Lane("ai", "nvidia")

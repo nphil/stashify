@@ -10,6 +10,11 @@
       in logs\supervisor.log;
     - an alert: after 3 quick failures in a row it posts once to the optional
       "alert_url" in config.json (any ntfy-style URL that accepts a POST body).
+    - no sign-in popup: it waits for the network before the first start.
+      Windows Smart App Control asks Microsoft's cloud about the unsigned
+      python.exe; with no network yet (the first seconds after sign-in) it
+      blocks the launch and shows an error. The tray is started from here
+      for the same reason, not from the Startup folder.
 
   One supervisor per session: a second copy exits at once, which is what lets
   the task also fire every few minutes as a "make sure it is running" check.
@@ -40,6 +45,21 @@ function Send-Alert($msg) {
 }
 
 Note "supervisor started (pid $PID)"
+for ($i = 0; $i -lt 30; $i++) {
+  try { [System.Net.Dns]::GetHostAddresses("www.microsoft.com") | Out-Null; break } catch { Start-Sleep 3 }
+}
+
+function Start-Hidden($script) {
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $py
+  $psi.Arguments = "`"$app\$script`""
+  $psi.WorkingDirectory = $app
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.RedirectStandardError = ($script -eq "runner.py")
+  [System.Diagnostics.Process]::Start($psi)
+}
+
 $fails = 0
 while ($true) {
   # A runner left over from a killed supervisor still holds the port; the new
@@ -47,6 +67,10 @@ while ($true) {
   Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" |
     Where-Object { $_.CommandLine -like "*$app\runner.py*" } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+  if (-not (Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" |
+            Where-Object { $_.CommandLine -like "*$app\tray.py*" })) {
+    try { Start-Hidden "tray.py" | Out-Null } catch { Note "tray not started: $_" }
+  }
 
   $started = Get-Date
   $code = $null; $err = ""
@@ -54,14 +78,7 @@ while ($true) {
     $err = "python not found at $py - re-run install.ps1 to rebuild the venv"
   } else {
     try {
-      $psi = New-Object System.Diagnostics.ProcessStartInfo
-      $psi.FileName = $py
-      $psi.Arguments = "`"$app\runner.py`""
-      $psi.WorkingDirectory = $app
-      $psi.UseShellExecute = $false
-      $psi.CreateNoWindow = $true
-      $psi.RedirectStandardError = $true
-      $p = [System.Diagnostics.Process]::Start($psi)
+      $p = Start-Hidden "runner.py"
       $err = $p.StandardError.ReadToEnd()    # returns when the runner exits
       $p.WaitForExit()
       $code = $p.ExitCode

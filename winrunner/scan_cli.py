@@ -340,8 +340,14 @@ def main():
         log("scan: input not found: " + args.input); return 2
     if not os.path.isfile(args.onnx):
         log("scan: onnx not found: " + args.onnx); return 2
-    if not args.engine:   # jasna's naming: rfdetr-v5.onnx -> rfdetr-v5.bs4.fp16.win.engine
-        args.engine = os.path.splitext(args.onnx)[0] + ".bs4.fp16.win.engine"
+    if not args.engine:
+        # jasna names the engine it compiles after the model plus build details that
+        # change between releases (rfdetr-v5.bs4.fp16.win.engine,
+        # rfdetr-v6.bs1-4.fp16.sm86.win.engine): take the one that is there.
+        import glob
+        stem = os.path.splitext(args.onnx)[0]
+        args.engine = next(iter(sorted(glob.glob(stem + ".bs*.win.engine"))),
+                           stem + ".bs4.fp16.win.engine")
     result = run_scan(args)
     print(json.dumps(result), flush=True)   # single machine-readable line on stdout
     return 0

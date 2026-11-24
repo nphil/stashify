@@ -162,17 +162,8 @@ if (-not (Get-NetFirewallRule -DisplayName "Stashify Runner" -ErrorAction Silent
   Write-Host "firewall: allowed TCP $Port (private networks)"
 }
 
-# --- 6. tray at login (windowless the same way) ---
-$lnk = "$([Environment]::GetFolderPath('Startup'))\Stashify Runner Tray.lnk"
-$sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
-$sc.TargetPath = $conhost
-$sc.Arguments = "--headless `"$py`" `"$Root\app\tray.py`""
-$sc.WorkingDirectory = "$Root\app"; $sc.Save()
-Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" |
-  Where-Object { $_.CommandLine -like "*StashifyRunner*tray.py*" } |
-  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-Start-Process $conhost -ArgumentList "--headless `"$py`" `"$Root\app\tray.py`"" -WorkingDirectory "$Root\app"
-Write-Host "tray installed to Startup + launched"
+# --- 6. tray: the supervisor starts it (see supervise.ps1); drop the old Startup shortcut ---
+Remove-Item "$([Environment]::GetFolderPath('Startup'))\Stashify Runner Tray.lnk" -Force -ErrorAction SilentlyContinue
 
 # --- 7. health ---
 Start-Sleep 5
