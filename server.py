@@ -190,7 +190,8 @@ def probe_runner(r):
                            ops=p.get("ops") or r.get("ops"),
                            engines=p.get("engines") or r.get("engines"), note="token mismatch")
         except Exception:  # noqa: BLE001
-            pass
+            if r.get("mac"):
+                out["note"] = "asleep - wakes when a job needs it"
     return out
 
 
@@ -1100,6 +1101,8 @@ class Handler(BaseHTTPRequestHandler):
             entry = {"name": b.get("name") or url, "url": url,
                      "token": b.get("token") or os.environ.get("WORKER_TOKEN", ""),
                      "ops": b.get("ops") or None, "prefer": b.get("prefer") or []}
+            if b.get("mac"):
+                entry["mac"] = b["mac"]
             with _runners_lock:
                 store = [r for r in load_store() if str(r.get("url", "")).rstrip("/") != url]
                 store.append(entry)

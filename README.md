@@ -168,7 +168,8 @@ into its persisted `/models` volume. The default SPAN upscale checkpoint
 | `LADA_ENCODER` | — | Empty = runner default (NVENC probe result). |
 | `LADA_UPSCALE_MODEL` | — | Empty = runner default (`2xLiveActionV1_SPAN`). |
 | `OUTPUT_DIR` | `/data/stashify` | Inside a Stash library path. |
-| `RUNNERS` | — | Optional JSON array of extra compute runners: `[{"name":"desktop","url":"http://IP:8712","token":"...","ops":["upscale","transcode","decensor","decensor+upscale"],"prefer":["upscale"]}]`. Merged with dashboard-managed runners (env wins on duplicate URLs). |
+| `RUNNERS` | — | Optional JSON array of extra compute runners: `[{"name":"desktop","url":"http://IP:8712","token":"...","ops":["upscale","transcode","decensor","decensor+upscale"],"prefer":["upscale"]}]`. Merged with dashboard-managed runners (env wins on duplicate URLs). Add `"mac":"AA:BB:CC:DD:EE:FF"` to a runner that sleeps: when a job would go to it, the coordinator sends a Wake-on-LAN packet and waits `RUNNER_WAKE_SECS` for it before routing elsewhere. Waking a PC that is asleep works from the default bridge network; one that is powered off needs the coordinator on host networking (the broadcast can't leave a bridge). |
+| `RUNNER_WAKE_SECS` | `120` | How long a woken runner gets to come online. |
 | `RUNNERS_STORE` | `/config/runners.json` | Where dashboard-added runners persist — mount `/config` to keep them across recreations. |
 | `TRIGGER_TAG` | `Decensor` | Tag that marks scenes for batch mode. |
 | `DONE_TAG` | `Decensored` | Applied after processing. |

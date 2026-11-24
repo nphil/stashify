@@ -370,7 +370,36 @@ def backend_command(cfg, input_path, result_dir, on_line=None, log_cb=None, stat
     return newest_video(result_dir)
 
 
-def resolve_runner(cfg, op):
+def wake_runner(c):
+    """Send a Wake-on-LAN magic packet for a runner entry that declares "mac".
+    Goes out as a LAN broadcast AND straight to the runner's own address: from
+    a bridge-networked container only the direct one leaves the host, and a
+    sleeping PC still answers for its address; a powered-off one needs the
+    broadcast, i.e. the coordinator on host networking."""
+    import socket
+
+    mac = re.sub(r"[^0-9a-fA-F]", "", str(c.get("mac") or ""))
+    if len(mac) != 12:
+        return False
+    packet = b"\xff" * 6 + bytes.fromhex(mac) * 16
+    targets = {"255.255.255.255"}
+    host = urlparse(str(c.get("url") or "")).hostname or ""
+    if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", host):
+        targets |= {host, host.rsplit(".", 1)[0] + ".255"}
+    sent = False
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        for addr in targets:
+            for port in (9, 7):
+                try:
+                    s.sendto(packet, (addr, port))
+                    sent = True
+                except OSError:
+                    pass
+    return sent
+
+
+def resolve_runner(cfg, op, wake=False):
     """Pick a runner (url, token, name, engine) that can do `op`. Health-checks
     each candidate, skips offline/unreachable ones, and prefers a runner that
     tags `op` in its 'prefer' list and is idle. Falls back to the single runnerUrl
@@ -380,7 +409,14 @@ def resolve_runner(cfg, op):
       - targetRunner: only this runner (matched on name OR url) is eligible.
       - targetEngine: only runners whose engine for `op` equals this are eligible.
     A pin that matches no online/capable runner raises (fail loud) rather than
-    silently rerouting - the user's intent is honored."""
+    silently rerouting - the user's intent is honored.
+
+    A runner entry with a "mac" may be asleep rather than gone. It is woken when
+    the job would go to it if it were up: it is preferred for `op`, or nothing
+    else online can do `op`. With wake=True the packet is sent and the runner is
+    given runnerWakeSecs (default 120) to answer; if it doesn't, routing carries
+    on with whoever is online. With wake=False (the dashboard's dry run) nothing
+    is sent and the sleeping runner is returned marked "asleep"."""
     import requests
 
     target_runner = str(cfg.get("targetRunner") or "").strip().rstrip("/")
@@ -395,34 +431,63 @@ def resolve_runner(cfg, op):
         candidates.append({"name": "default", "url": cfg["runnerUrl"],
                            "token": cfg.get("runnerToken", ""), "ops": None,
                            "prefer": [], "engines": None})
-    scored = []
-    for c in candidates:
+
+    def probe(c):
         url = str(c.get("url") or "").rstrip("/")
-        if not url:
-            continue
-        name = c.get("name", "runner")
-        if target_runner and target_runner not in (name, url):
-            continue
-        declared = c.get("ops")
-        if declared is not None and op not in declared:
-            continue
         try:
             tok = c.get("token", "")
             h = requests.get(url + "/health",
                              headers={"X-Runner-Token": tok, "X-Lada-Token": tok},
                              timeout=4).json()
-        except Exception:  # noqa: BLE001 - offline node: skip, try the next
-            continue
+        except Exception:  # noqa: BLE001 - offline node
+            return None
         if op not in (h.get("ops") or []) or h.get("paused"):
-            continue
+            return False
         engine = (h.get("engines") or {}).get(op) or (c.get("engines") or {}).get(op)
         if target_engine and engine != target_engine:
-            continue
+            return False
         # idle dominates preference: an idle node always outranks a busy one, and
         # 'prefer' only breaks ties among equally-idle/equally-busy nodes.
         score = (2 if not h.get("busy") else 0) + (1 if op in (c.get("prefer") or []) else 0)
-        scored.append((score, {"url": url, "token": c.get("token", ""),
-                               "name": name, "engine": engine}))
+        return (score, {"url": url, "token": c.get("token", ""),
+                        "name": c.get("name", "runner"), "engine": engine})
+
+    scored, asleep = [], []
+    for c in candidates:
+        url = str(c.get("url") or "").rstrip("/")
+        if not url:
+            continue
+        if target_runner and target_runner not in (c.get("name", "runner"), url):
+            continue
+        declared = c.get("ops")
+        if declared is not None and op not in declared:
+            continue
+        r = probe(c)
+        if r:
+            scored.append(r)
+        elif r is None and c.get("mac"):
+            asleep.append(c)
+
+    to_wake = [c for c in asleep if not scored or op in (c.get("prefer") or [])]
+    if to_wake and not wake:
+        c = to_wake[0]
+        return {"url": str(c.get("url")).rstrip("/"), "token": c.get("token", ""),
+                "name": c.get("name", "runner"), "engine": (c.get("engines") or {}).get(op),
+                "asleep": True}
+    if to_wake:
+        for c in to_wake:
+            log.info(f"waking runner '{c.get('name', 'runner')}' for {op}")
+            wake_runner(c)
+        deadline = time.time() + _int(cfg.get("runnerWakeSecs"), 120)
+        woke = None
+        while woke is None and time.time() < deadline:
+            check_cancel()
+            time.sleep(3)
+            woke = next((r for r in map(probe, to_wake) if r), None)
+        if woke:
+            scored.append(woke)
+        else:
+            log.warning("no woken runner answered in time; routing to what is online")
     if not scored:
         if target_runner:
             raise RuntimeError(f"runner '{target_runner}' is offline or can't do '{op}'")
@@ -439,6 +504,8 @@ def preview_route(cfg, op):
     Returns {"runner","engine"} or {"error"}; never dispatches a job."""
     try:
         r = resolve_runner(cfg, op)
+        if r.get("asleep"):
+            return {"runner": r.get("name") + " (asleep - will be woken)", "engine": r.get("engine")}
         return {"runner": r.get("name"), "engine": r.get("engine")}
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}
@@ -497,7 +564,7 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None,
     Cancel/pause/resume forward to the runner via the remote-control hooks."""
     import requests
 
-    runner = resolve_runner(cfg, op)
+    runner = resolve_runner(cfg, op, wake=True)
     base = runner["url"]
     token = runner["token"]
     headers = {"Content-Type": "application/json"}
