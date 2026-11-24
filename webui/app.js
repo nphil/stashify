@@ -369,11 +369,12 @@
       extra.denoise = jd.value;
       if (!extra.engine) extra.engine = "jasna";
     }
-    // High detail: jasna's LTX restoration model. "split" keeps LTX for big mosaics
+    // Detail: jasna's restoration model. "off" sends nothing, so the runner's own
+    // default applies. "fast" forces BasicVSR++. "split" keeps LTX for big mosaics
     // (>= 12% of the frame height) and the fast model for the rest.
     var jx = $("jDetail");
     if (jx && !jx.hidden && jx.value !== "off" && backend === "decensor") {
-      extra.restoration = "ltx";
+      extra.restoration = jx.value === "fast" ? "basicvsrpp" : "ltx";
       if (jx.value === "split") extra.ltx_auto_split = 12;
       if (!extra.engine) extra.engine = "jasna";
     }

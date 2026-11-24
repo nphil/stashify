@@ -855,15 +855,22 @@ def run_job(lane, job):
                 argv += ["--encoder-settings", str(CFG["jasna_encoder_settings"])]
             if CFG["jasna_no_compile"]:
                 argv.append("--no-compile")
-            # restoration model: BasicVSR++ unless the job asks for jasna's LTX model
-            # (much more detail, minutes per minute of video). ltx_auto_split keeps LTX
-            # for the big mosaics only. jasna itself turns denoise off for LTX-restored
+            # restoration model. A job may name one ("basicvsrpp" = the fast model,
+            # or an LTX level with its own ltx_auto_split); a job that names none
+            # gets this runner's default (config jasna_restoration + jasna_ltx_auto_split),
+            # so the Stash plugin's plain "Decensor" button follows the owner's choice.
+            # LTX = much more detail, minutes per minute of video; ltx_auto_split keeps
+            # it for the big mosaics only. jasna turns denoise off for LTX-restored
             # parts and rejects a missing model/licence with a clear error.
-            restoration = str(o.get("restoration") or CFG.get("jasna_restoration") or "").lower()
+            if str(o.get("restoration") or "").strip():
+                restoration, split = str(o["restoration"]).lower(), o.get("ltx_auto_split")
+            else:
+                restoration = str(CFG.get("jasna_restoration") or "").lower()
+                split = CFG.get("jasna_ltx_auto_split")
             if restoration in ("ltx-basic", "ltx", "ltx-4step", "ltx-8step"):
                 argv += ["--restoration-model", restoration]
                 try:
-                    split = int(o.get("ltx_auto_split") or CFG.get("jasna_ltx_auto_split") or 0)
+                    split = int(split or 0)
                 except (TypeError, ValueError):
                     split = 0
                 if 1 <= split <= 100:
