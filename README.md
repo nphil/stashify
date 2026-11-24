@@ -261,7 +261,7 @@ the rental accrues.
   start/end, $/hour, actual $). The Cloud dialog shows month-to-date and the last 10.
 - **Reaper:** at startup and every few minutes, any `stashify-*` machine on your Vast
   account that this coordinator doesn't own (after a crash or restart), or that has
-  outlived its time limit (12 h), is destroyed. So **use one Vast account per
+  outlived its time limit (3 h, `VAST_MAX_JOB_HOURS`), is destroyed. So **use one Vast account per
   Stashify coordinator** — a second one on the same account would have its machines
   destroyed. The Vast key can't be changed while a machine is running.
 

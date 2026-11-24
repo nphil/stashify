@@ -200,12 +200,13 @@ class OfferTest(cf.CloudCase):
         no_price = raw_offer(6)
         del no_price["dph_total"]
         self.vast.offers = [
-            raw_offer(10, "RTX 3090", 0.20), raw_offer(11, "RTX 4090", 0.50),
+            raw_offer(10, "RTX 3090", 0.20, datacenter=False),
+            raw_offer(11, "RTX 4090", 0.50, datacenter=False),
             raw_offer(12, "RTX 4090", 0.30, driver="570.10"),          # driver too old
             raw_offer(13, "RTX 4090", 0.30, vram_mb=12000),            # not enough VRAM
             raw_offer(14, "RTX 4080", 0.30), raw_offer(15, "RTX 4090", 0.30, reliability=0.5),
             bad_price, no_price, raw_offer(16, "RTX 4090", 0.60, datacenter=True),
-            raw_offer(17, "RTX_4090", 0.55)]                           # CLI-style spelling
+            raw_offer(17, "RTX_4090", 0.55, datacenter=False)]         # CLI-style spelling
         ids = [o.id for o in self.cl.search(self.spec())]
         self.assertEqual(ids, [16, 11, 17, 10])        # 4090 datacenter, 4090 cheapest first, then the 3090
 

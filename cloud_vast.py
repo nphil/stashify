@@ -237,8 +237,8 @@ class Config:
     gpus: tuple = ("RTX 5090", "RTX 4090", "RTX 3090")
     min_vram_gb: float = 16
     min_reliability: float = 0.98
-    datacenter_only: bool = False
-    max_job_hours: float = 12.0
+    datacenter_only: bool = True       # the video is uploaded there: no hobbyist hosts by default
+    max_job_hours: float = 3.0
     disk_gb: int = 100
     max_bw_cost: float = 0.02      # $/GB internet cost ceiling (bandwidth is billed on top)
 
