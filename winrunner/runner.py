@@ -63,15 +63,16 @@ except Exception:  # noqa: BLE001
     pass
 
 
-# Route any uncaught exception to the log too. Launched windowless (scheduled
-# task -> run-hidden.vbs), stderr goes nowhere, so a crash at startup - e.g. the
-# port bind failing - would otherwise leave no trace beyond a silent exit.
+# Route any uncaught exception to the log too: the runner has no console, so a
+# crash at startup - e.g. the port bind failing - would otherwise show up only
+# in the supervisor's captured stderr.
 def _log_uncaught(exc_type, exc, tb):
     log.critical("uncaught exception - runner exiting", exc_info=(exc_type, exc, tb))
     sys.__excepthook__(exc_type, exc, tb)
 
 
 sys.excepthook = _log_uncaught
+log.info("runner starting (pid %s, python %s)", os.getpid(), sys.version.split()[0])
 
 
 # --------------------------------------------------------------------------- #

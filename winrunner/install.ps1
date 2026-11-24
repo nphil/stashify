@@ -39,7 +39,8 @@ New-Item -ItemType Directory -Force $Root, "$Root\app", "$Root\models", "$Root\l
 # --- 1. code ---
 Copy-Item "$Src\*.py" "$Root\app\" -Force
 Copy-Item "$Src\webui" "$Root\app\" -Recurse -Force
-Copy-Item "$Src\tray-icon.png", "$Src\run-hidden.vbs" "$Root\app\" -Force
+Copy-Item "$Src\tray-icon.png", "$Src\supervise.ps1" "$Root\app\" -Force
+Remove-Item "$Root\app\run-hidden.vbs" -Force -ErrorAction SilentlyContinue   # pre-supervisor launcher
 Write-Host "code -> $Root\app"
 
 # --- 2. deps ---
@@ -89,7 +90,14 @@ $cfg = [ordered]@{
   upscale_model = "$Root\models\2xLiveActionV1_SPAN_490000.pth"
   ai_fp16 = $true; ai_gpu_index = 0; copy_local = $false; local_temp = "$Root\tmp"
 }
-if ($existing -and $existing.path_map) { $cfg.path_map = $existing.path_map }
+# Re-running the installer is the update path, so everything already in
+# config.json survives it (jasna_exe, model and temp folders, alert_url ...).
+# Only the paths this script has just resolved are refreshed.
+if ($existing) {
+  foreach ($p in $existing.PSObject.Properties) {
+    if ($p.Name -notin "token", "port", "venv_python", "ffmpeg") { $cfg[$p.Name] = $p.Value }
+  }
+}
 Write-Text $cfgPath ($cfg | ConvertTo-Json -Depth 6)
 icacls $cfgPath /inheritance:r /grant:r "${env:USERNAME}:(R,W)" "Administrators:(F)" | Out-Null
 Write-Host "config -> $cfgPath"
@@ -123,24 +131,26 @@ if (netsh int ipv4 show excludedportrange tcp | Select-String $portRow) {
 $winsw = "$Root\$SvcId.exe"
 if (Test-Path $winsw) { & $winsw stop 2>$null | Out-Null; & $winsw uninstall 2>$null | Out-Null; Write-Host "removed old WinSW service" }
 
-# Launch via a VBS wrapper so there is NO console window (uv's venv pythonw.exe
-# trampolines to the console python.exe, which would flash/hold a terminal).
-$wscript = "$env:SystemRoot\System32\wscript.exe"
-$vbs = "$Root\app\run-hidden.vbs"
+# The task runs supervise.ps1, which keeps runner.py alive (restart + backoff,
+# captured stderr, optional alert). conhost --headless gives it NO window
+# without VBScript, which Windows is removing. Two triggers: at logon, and a
+# 5-minute repeat that only matters if the supervisor itself died - a second
+# copy exits at once (IgnoreNew + its own mutex).
+$conhost = "$env:SystemRoot\System32\conhost.exe"
 $me = "$env:USERDOMAIN\$env:USERNAME"
-$action = New-ScheduledTaskAction -Execute $wscript -Argument "//nologo `"$vbs`" `"$py`" `"$Root\app\runner.py`""
+$action = New-ScheduledTaskAction -Execute $conhost -Argument "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$Root\app\supervise.ps1`" -Root `"$Root`""
 $action.WorkingDirectory = "$Root\app"
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $me
+$atLogon = New-ScheduledTaskTrigger -AtLogOn -User $me
+$ensure = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)
 $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-  -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) `
-  -MultipleInstances IgnoreNew
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+  -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $atLogon, $ensure -Principal $principal -Settings $settings -Force | Out-Null
 
 # (re)start now: stop any prior instance holding the port, then launch
 Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" |
-  Where-Object { $_.CommandLine -like "*StashifyRunner*runner.py*" } |
+Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe' OR Name='powershell.exe'" |
+  Where-Object { $_.CommandLine -like "*StashifyRunner*runner.py*" -or $_.CommandLine -like "*StashifyRunner*supervise.ps1*" } |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Start-Sleep 2
 Start-ScheduledTask -TaskName $TaskName
@@ -152,13 +162,16 @@ if (-not (Get-NetFirewallRule -DisplayName "Stashify Runner" -ErrorAction Silent
   Write-Host "firewall: allowed TCP $Port (private networks)"
 }
 
-# --- 6. tray at login (also windowless, via the VBS wrapper) ---
+# --- 6. tray at login (windowless the same way) ---
 $lnk = "$([Environment]::GetFolderPath('Startup'))\Stashify Runner Tray.lnk"
 $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
-$sc.TargetPath = $wscript
-$sc.Arguments = "//nologo `"$vbs`" `"$py`" `"$Root\app\tray.py`""
+$sc.TargetPath = $conhost
+$sc.Arguments = "--headless `"$py`" `"$Root\app\tray.py`""
 $sc.WorkingDirectory = "$Root\app"; $sc.Save()
-Start-Process $wscript -ArgumentList "//nologo `"$vbs`" `"$py`" `"$Root\app\tray.py`""
+Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" |
+  Where-Object { $_.CommandLine -like "*StashifyRunner*tray.py*" } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Start-Process $conhost -ArgumentList "--headless `"$py`" `"$Root\app\tray.py`"" -WorkingDirectory "$Root\app"
 Write-Host "tray installed to Startup + launched"
 
 # --- 7. health ---

@@ -58,8 +58,10 @@ powershell -ExecutionPolicy Bypass -File install-jasna.ps1    # optional: decens
 downloads the SPAN model, writes `config.json` (edit `path_map` if your NAS
 shares differ), registers the **`StashifyRunner`** scheduled task running **as
 you at logon** (so your saved SMB credentials work — a LocalSystem service
-authenticates as the machine account, which the NAS denies; the VBS launcher
-keeps it windowless), opens the firewall for the LAN, and starts the tray.
+authenticates as the machine account, which the NAS denies; a small supervisor,
+`supervise.ps1`, restarts the runner whenever it exits and records why in
+`logs\supervisor.log` - set `alert_url` in `config.json` to be told when it
+keeps failing), opens the firewall for the LAN, and starts the tray.
 Re-run any time to update. `uninstall.ps1` removes it.
 
 `install-jasna.ps1` downloads the ~4.1 GB self-contained
