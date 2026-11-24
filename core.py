@@ -142,7 +142,7 @@ def validate(cfg):
         problems.append(f"backend '{backend}' (use decensor | upscale | transcode | command)")
     if backend == "command" and not str(cfg["commandTemplate"]).strip():
         problems.append("Command Template")
-    if backend in ("decensor", "lada", "upscale", "transcode") and not (
+    if backend in ("decensor", "lada", "upscale", "transcode") and not cfg.get("cloud") and not (
             str(cfg["runnerUrl"]).strip() or cfg.get("runners")):
         problems.append("a runner (RUNNER_URL or RUNNERS)")
 
@@ -699,6 +699,12 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None,
 
 
 def backend_decensor(cfg, input_path, result_dir, on_line=None, log_cb=None, status_cb=None):
+    if cfg.get("cloud"):
+        # Paid cloud Jasna (cloud_jasna.py) rents a GPU instead of using a runner; on_line is
+        # not needed there, status_cb carries the stages.
+        import cloud_jasna
+        return cloud_jasna.run_decensor(cfg, input_path, result_dir, log_cb=log_cb, status_cb=status_cb,
+                                        stamp=stamp_job, check_cancel=check_cancel)
     op = "decensor+upscale" if cfg.get("postUpscale") else "decensor"
     return _runner_dispatch(cfg, input_path, result_dir, op, on_line=on_line, log_cb=log_cb, status_cb=status_cb)
 
