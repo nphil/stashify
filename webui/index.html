@@ -25,6 +25,9 @@
       <button id="runnersBtn" class="btn btn-ghost" title="Manage compute runners" aria-label="Manage compute runners">
         <span class="btn-ico" aria-hidden="true">⚙</span><span class="btn-lbl">Runners</span>
       </button>
+      <button id="cloudBtn" class="btn btn-ghost" title="Cloud GPU (paid): keys, spending limits, spend so far" aria-label="Cloud GPU settings">
+        <span class="btn-ico" aria-hidden="true">☁</span><span class="btn-lbl">Cloud</span>
+      </button>
     </div>
   </header>
 
@@ -57,6 +60,44 @@
           <button type="submit" class="btn btn-primary">Save runner</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <div id="cloudModal" class="modal" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>Cloud GPU (paid)</h2>
+        <button id="cloudClose" class="iconbtn" aria-label="Close">✕</button>
+      </div>
+      <p class="cloud-note">Rents a GPU on Vast.ai for <b>one job</b>, then destroys it. <b>Your video is uploaded to a machine owned by a third party.</b> Nothing is rented unless you choose "Cloud quality (paid)" on a job and confirm the price.</p>
+      <form id="cloudForm" class="runner-form" autocomplete="off">
+        <div class="rf-row"><label>Vast API key</label><input id="cfKey" type="password" autocomplete="new-password" placeholder="(not set)"><button type="button" id="cfKeyDel" class="linkbtn" hidden>Remove</button></div>
+        <div class="rf-row"><label>Jasna licence</label><input id="cfLic" type="password" autocomplete="new-password" placeholder="(not set)"><button type="button" id="cfLicDel" class="linkbtn" hidden>Remove</button></div>
+        <div class="rf-row"><label>Max $ / hour</label><input id="cfPrice" type="number" min="0.05" step="0.05"></div>
+        <div class="rf-row"><label>Cap per job $</label><input id="cfJob" type="number" min="0.1" step="0.5"></div>
+        <div class="rf-row"><label>Cap per month $</label><input id="cfMonth" type="number" min="0.1" step="1"></div>
+        <div class="rf-row rf-btns">
+          <span id="cfMsg" class="rf-msg"></span>
+          <button type="button" id="cfTest" class="btn">Test key</button>
+          <button type="submit" class="btn btn-primary">Save</button>
+        </div>
+      </form>
+      <div id="cfSpend" class="cloud-spend"></div>
+      <div id="cfLedger" class="cloud-ledger"></div>
+    </div>
+  </div>
+
+  <div id="cloudConfirm" class="modal" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>Confirm paid cloud run</h2>
+        <button id="ccClose" class="iconbtn" aria-label="Close">✕</button>
+      </div>
+      <div id="ccBody"></div>
+      <div class="rf-row rf-btns">
+        <button type="button" id="ccCancel" class="btn">Cancel</button>
+        <button type="button" id="ccGo" class="btn btn-primary">Confirm and run</button>
+      </div>
     </div>
   </div>
 
@@ -143,6 +184,15 @@
               <option value="1080">1080p</option>
               <option value="720">720p</option>
             </select>
+            <span id="cloudWrap" class="cloudwrap" title="Paid: rents a GPU on Vast.ai for this job and uploads the video to it. Always off until you choose it; never remembered." hidden>
+              <select id="cloudPreset" aria-label="Cloud quality (paid)">
+                <option value="">Cloud quality (paid): off</option>
+                <option value="close-ups">Sharper close-ups</option>
+                <option value="detail">High detail</option>
+                <option value="detail-close-ups">High detail + sharper close-ups</option>
+              </select>
+              <span id="cloudQuote" class="cloudq"></span>
+            </span>
           </div>
           <div class="op-go">
             <span id="routeWill" class="routewill" title="Where this job will run"></span>

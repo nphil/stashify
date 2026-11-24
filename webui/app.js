@@ -47,7 +47,11 @@
     var text = await r.text(), body;
     try { body = text ? JSON.parse(text) : {}; }
     catch (e) { throw new Error("worker HTTP " + r.status + (r.ok ? " (non-JSON)" : "")); }
-    if (!r.ok) throw new Error(body.error || ("worker HTTP " + r.status));
+    if (!r.ok) {
+      var err = new Error(body.error || ("worker HTTP " + r.status));
+      err.status = r.status; err.body = body;        // the paid-run flow reads these
+      throw err;
+    }
     return body;
   }
   async function stashGQL(query, variables) {
@@ -178,6 +182,7 @@
     wrap.hidden = !jasnaDecensor;
     // primary spatial denoise applies to any jasna decensor (independent of RTX)
     if ($("jDenoise")) $("jDenoise").hidden = !jasnaDecensor;
+    if ($("cloudWrap")) updateCloudWrap(op);          // paid cloud quality: plain Decensor only
     // RTX denoise/deblur pickers only matter once an RTX mode is chosen
     var mode = $("rtxMode") ? $("rtxMode").value : "off";
     var on = !wrap.hidden && mode !== "off";
@@ -329,6 +334,15 @@
     var b = $("decensorSel");
     var e = $("engine").value;
     var verb = e === "upscale" ? "Upscale" : (e === "transcode" ? "Transcode" : "Decensor");
+    cloudSync();                                      // a paid preset re-quotes whenever the selection changes
+    var cq = cloudActive();
+    if ($("routeWill")) $("routeWill").hidden = !!cq; // a cloud job doesn't use a local runner
+    if (cq) {
+      b.textContent = cq.ready ? "Run in cloud · est. $" + cq.total.toFixed(2) + " (" + cq.okCount + ")"
+                               : "Cloud: waiting for a price";
+      b.disabled = !cq.ready || cq.okCount === 0;
+      return;
+    }
     b.textContent = verb + " selected (" + state.sel.size + ")";
     b.disabled = state.sel.size === 0;
   }
@@ -336,6 +350,7 @@
   async function decensorSelected() {
     var ids = Array.from(state.sel);
     if (!ids.length) return;
+    if (cloudPreset()) return cloudConfirmOpen();     // paid: show the quote and ask first; nothing is queued yet
     var eng = $("engine").value;
     var backend = eng === "upscale" ? "upscale" : (eng === "transcode" ? "transcode" : "decensor");
     var extra = { backend: backend };
@@ -384,6 +399,207 @@
     refreshSelBtn();
     if (ok) toast("Queued " + ok + " scene" + (ok > 1 ? "s" : ""));
     pollJobs();
+  }
+
+  // ---- cloud GPU (paid, Vast.ai) ------------------------------------------ //
+  // The quality control is OFF every time the page loads (deliberately not in localStorage):
+  // spending money must be a fresh choice. Every limit is enforced by the server; this is
+  // only the quote + confirm + settings UI.
+  state.cloud = { quote: null, want: "", seq: 0 };
+  var PRESET_LABEL = { "close-ups": "Sharper close-ups", "detail": "High detail",
+                       "detail-close-ups": "High detail + sharper close-ups" };
+  function money(v) { return "$" + Number(v || 0).toFixed(2); }
+  function cloudPreset() {
+    var w = $("cloudWrap"), s = $("cloudPreset");
+    return w && !w.hidden && s ? s.value : "";
+  }
+  function cloudIds() { return Array.from(state.sel).sort(); }
+  function updateCloudWrap(op) {
+    var show = op === "decensor";          // plain Decensor only: no upscale, transcode or post-upscale
+    $("cloudWrap").hidden = !show;
+    if (!show && $("cloudPreset").value) { $("cloudPreset").value = ""; refreshSelBtn(); }
+  }
+  function cloudActive() {
+    var preset = cloudPreset();
+    if (!preset) return null;
+    if (!state.sel.size) return { ready: true, okCount: 0, total: 0 };
+    var q = state.cloud.quote;
+    var ready = !!q && q.preset === preset && q.key === cloudIds().join(",");
+    return { ready: ready, total: ready ? q.total_usd : 0,
+             okCount: ready ? q.quotes.filter(function (x) { return x.ok; }).length : 0 };
+  }
+  function cloudSync() {
+    var want = cloudPreset() + "|" + cloudIds().join(",");
+    if (want === state.cloud.want) return;
+    state.cloud.want = want;
+    cloudRequote();
+  }
+  var _cloudTimer;
+  function cloudRequote() {
+    clearTimeout(_cloudTimer);
+    var preset = cloudPreset(), ids = cloudIds(), box = $("cloudQuote");
+    var seq = ++state.cloud.seq;
+    state.cloud.quote = null;
+    box.className = "cloudq";
+    if (!preset) { box.textContent = ""; return; }
+    if (!ids.length) { box.textContent = "select scenes to get a price"; return; }
+    box.textContent = "getting the price…";
+    _cloudTimer = setTimeout(async function () {
+      try {
+        var res = await workerFetch("cloud/quote?preset=" + encodeURIComponent(preset) +
+                                    "&scenes=" + encodeURIComponent(ids.join(",")));
+        if (seq !== state.cloud.seq) return;           // a newer choice replaced this one
+        res.key = ids.join(",");
+        state.cloud.quote = res;
+        renderCloudQuote(res);
+      } catch (e) {
+        if (seq !== state.cloud.seq) return;
+        box.textContent = e.message; box.className = "cloudq err";
+      }
+      refreshSelBtn();
+    }, 300);
+  }
+  function renderCloudQuote(res) {
+    var ok = res.quotes.filter(function (x) { return x.ok; });
+    var bad = res.quotes.filter(function (x) { return !x.ok; });
+    var parts = [];
+    if (ok.length) parts.push("≈ " + money(res.total_usd) + " (estimate) · " + ok[0].gpu + " " +
+      money(ok[0].price_per_hour) + "/h · ~" + Math.round(ok[0].total_min) + " min" + (ok.length > 1 ? " for the first" : ""));
+    if (bad.length) parts.push(bad.length + " refused: " + bad[0].refusal.message);
+    var box = $("cloudQuote");
+    box.textContent = parts.join(" · ");
+    box.className = "cloudq" + (ok.length ? "" : " err");
+  }
+  function cloudConfirmOpen() {
+    var a = cloudActive(), q = state.cloud.quote, preset = cloudPreset(), ids = cloudIds();
+    if (!a || !a.ready || !a.okCount) { toast("Wait for the cloud price first", true); return; }
+    var body = $("ccBody"); body.innerHTML = "";
+    var warn = el("p", "cloud-note");
+    warn.textContent = "Your video will be uploaded to a rented machine owned by a third party (a Vast.ai host). " +
+      "The machine is destroyed when the job ends.";
+    body.appendChild(warn);
+    var list = el("div", "cc-list");
+    ids.forEach(function (id, i) {
+      var x = q.quotes[i] || {};
+      var row = el("div", "cc-row" + (x.ok ? "" : " bad")), n = el("span", "cc-name"), c = el("span", "cc-cost");
+      n.textContent = (state.scenes[id] || {}).title || ("Scene " + id);
+      c.textContent = x.ok ? "≈ " + money(x.est_usd) + " · ~" + Math.round(x.total_min) + " min"
+                           : "skipped: " + (x.refusal ? x.refusal.message : "no price");
+      row.appendChild(n); row.appendChild(c); list.appendChild(row);
+    });
+    body.appendChild(list);
+    var first = q.quotes.filter(function (x) { return x.ok; })[0];
+    var sum = el("div", "cc-sum");
+    [["Quality", PRESET_LABEL[preset]],
+     ["Machine", first.gpu + " at " + money(first.price_per_hour) + "/h"],
+     ["Estimated total", money(q.total_usd) + " (an estimate, not a fixed price)"],
+     ["Safety stop", "each job is stopped at your " + money(first.job_cap) + " per-job cap"],
+     ["Left this month", money(Math.max(0, first.month_remaining - q.total_usd)) + " after this"]
+    ].forEach(function (kv) {
+      var d = el("div"), b = el("b");
+      b.textContent = kv[0] + ": ";
+      d.appendChild(b); d.appendChild(document.createTextNode(kv[1])); sum.appendChild(d);
+    });
+    body.appendChild(sum);
+    $("ccGo").textContent = "Confirm and run · " + money(q.total_usd);
+    $("ccGo").disabled = false;
+    $("cloudConfirm").hidden = false;
+  }
+  async function cloudSubmit() {
+    var q = state.cloud.quote, preset = cloudPreset(), ids = cloudIds();
+    if (!q || !preset) return;
+    $("ccGo").disabled = true;
+    var ok = 0;
+    for (var i = 0; i < ids.length; i++) {
+      var x = q.quotes[i];
+      if (!x || !x.ok) continue;
+      try {
+        await workerFetch("decensor", { method: "POST", body: JSON.stringify({
+          scene_id: ids[i], backend: "decensor", cloud_preset: preset, confirm_usd: x.est_usd }) });
+        ok++;
+      } catch (e) {
+        toast("Not queued: " + e.message, true);
+        if (e.status === 409) break;       // price or budget moved: stop, nothing was rented, ask again
+      }
+    }
+    $("cloudConfirm").hidden = true;
+    // Always a fresh, explicit choice for the next paid run (and never a double-queue on retry).
+    state.sel.clear();
+    document.querySelectorAll(".card.sel").forEach(function (c) { c.classList.remove("sel"); });
+    $("cloudPreset").value = "";
+    refreshSelBtn();
+    if (ok) toast("Queued " + ok + " paid cloud job" + (ok > 1 ? "s" : ""));
+    pollJobs();
+  }
+
+  function cfMsg(t, cls) { var m = $("cfMsg"); m.textContent = t || ""; m.className = "rf-msg" + (cls ? " " + cls : ""); }
+  function openCloud() { $("cloudModal").hidden = false; loadCloud(); }
+  function closeCloud() { $("cloudModal").hidden = true; $("cfKey").value = ""; $("cfLic").value = ""; }
+  function secretHint(f, input, del) {
+    input.value = "";
+    input.placeholder = f.set ? "set" + (f.last4 ? " · …" + f.last4 : "") +
+      (f.source === "env" ? " (from environment)" : "") + " — type to replace" : "(not set)";
+    del.hidden = !f.set || f.source === "env";
+  }
+  async function loadCloud() {
+    cfMsg("");
+    try {
+      var s = await workerFetch("cloud/settings"), st = await workerFetch("cloud/status");
+      secretHint(s.vast_api_key, $("cfKey"), $("cfKeyDel"));
+      secretHint(s.jasna_license, $("cfLic"), $("cfLicDel"));
+      $("cfPrice").value = s.max_price; $("cfJob").value = s.job_cap; $("cfMonth").value = s.month_cap;
+      $("cfSpend").textContent = "This month: " + money(st.month_to_date) + " of " + money(s.month_cap) +
+        (st.active && st.active.length ? " · " + st.active.length + " machine running now" : "");
+      var box = $("cfLedger"); box.innerHTML = "";
+      (st.recent || []).slice().reverse().forEach(function (e) {
+        var row = el("div", "cl-row");
+        [String(e.ended || "").slice(0, 16).replace("T", " "),
+         (e.scene || ("scene " + e.scene_id)) + " · " + (PRESET_LABEL[e.preset] || e.preset || ""),
+         e.gpu || "", money(e.usd)].forEach(function (t, i) {
+          var c = el("span", i === 3 ? "cl-usd" : ""); c.textContent = t; row.appendChild(c);
+        });
+        box.appendChild(row);
+      });
+      if (!(st.recent || []).length) box.appendChild(el("div", "empty", "No cloud jobs yet"));
+    } catch (e) { cfMsg(e.message, "err"); }
+  }
+  async function saveCloud(ev) {
+    ev.preventDefault();
+    var body = { max_price: +$("cfPrice").value, job_cap: +$("cfJob").value, month_cap: +$("cfMonth").value };
+    if ($("cfKey").value.trim()) body.vast_api_key = $("cfKey").value.trim();
+    if ($("cfLic").value.trim()) body.jasna_license = $("cfLic").value.trim();
+    try {
+      await workerFetch("cloud/settings", { method: "POST", body: JSON.stringify(body) });
+      cfMsg("saved", "ok");
+    } catch (e) { cfMsg(e.message, "err"); return; }
+    loadCloud();
+  }
+  async function testCloud() {
+    cfMsg("testing…");
+    try {
+      var r = await workerFetch("cloud/test", { method: "POST", body: JSON.stringify({ vast_api_key: $("cfKey").value.trim() || undefined }) });
+      if (r.ok) cfMsg("key works · credit " + money(r.balance), "ok");
+      else cfMsg("key rejected: " + r.error, "err");
+    } catch (e) { cfMsg(e.message, "err"); }
+  }
+  async function clearSecret(field) {
+    var body = {}; body[field] = null;
+    try { await workerFetch("cloud/settings", { method: "POST", body: JSON.stringify(body) }); cfMsg("removed", "ok"); }
+    catch (e) { cfMsg(e.message, "err"); }
+    loadCloud();
+  }
+  function bindCloud() {
+    $("cloudBtn").onclick = openCloud;
+    $("cloudClose").onclick = closeCloud;
+    $("cloudModal").addEventListener("click", function (e) { if (e.target === $("cloudModal")) closeCloud(); });
+    $("cloudForm").onsubmit = saveCloud;
+    $("cfTest").onclick = testCloud;
+    $("cfKeyDel").onclick = function () { clearSecret("vast_api_key"); };
+    $("cfLicDel").onclick = function () { clearSecret("jasna_license"); };
+    $("cloudPreset").onchange = refreshSelBtn;
+    $("ccClose").onclick = function () { $("cloudConfirm").hidden = true; };
+    $("ccCancel").onclick = function () { $("cloudConfirm").hidden = true; };
+    $("ccGo").onclick = cloudSubmit;
   }
 
   // ---- jobs -------------------------------------------------------------- //
@@ -458,6 +674,9 @@
     g.innerHTML = "";
     statChip(g, "progress", pct + "%");
     if (j.runner) statChip(g, "runner", j.runner + (j.engine ? " · " + engNice(j.engine) : ""));
+    if (j.cloud_label) statChip(g, "quality", j.cloud_label);
+    if (j.cloud && j.cloud_usd != null)
+      statChip(g, "spent", "$" + Number(j.cloud_usd).toFixed(2) + (j.cloud_cap ? " / $" + Number(j.cloud_cap).toFixed(2) : ""));
     if (j.stage) statChip(g, "stage", j.stage);
     if (j.frame != null && j.total_frames) statChip(g, "frame", j.frame + " / " + j.total_frames);
     if (j.fps != null) statChip(g, "fps", Math.round(j.fps * 10) / 10);
@@ -827,6 +1046,7 @@
       r.pause.textContent = j.paused ? "Resume" : "Pause";
       r.pause.dataset.act = j.paused ? "resume" : "pause";
       r.pause.disabled = false;
+      r.pause.hidden = !!j.cloud;     // a rented machine can't be paused: it keeps billing
     }
   }
 
@@ -930,6 +1150,7 @@
   // ---- init -------------------------------------------------------------- //
   function bind() {
     $("runnersBtn").onclick = openRunners;
+    bindCloud();
     $("runnersClose").onclick = closeRunners;
     $("runnersModal").addEventListener("click", function (e) { if (e.target === $("runnersModal")) closeRunners(); });
     $("addRunnerBtn").onclick = function () { $("addRunnerForm").hidden = false; rfMsg(""); };
