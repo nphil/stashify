@@ -1,6 +1,6 @@
 name: Stashify
 description: Stashify — upscale & decensor for Stash. Remove mosaic censorship and upscale scenes you pick (via a trigger tag) through the Stashify worker (DeepMosaics / Real-ESRGAN / external tools like TecoGAN or JavPlayer), then import the cleaned result back into Stash.
-version: 1.1.1
+version: 2.1.0
 url: https://github.com/nphil/stashify
 exec:
   - python

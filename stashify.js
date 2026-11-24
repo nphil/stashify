@@ -154,6 +154,7 @@
       "</div>" +
       '<div class="decensor-body"></div>';
     document.body.appendChild(panel);
+    panel.classList.add("decensor-hidden");      // opens only from the Stashify button
     panel.querySelector(".decensor-x").onclick = function () {
       panel.classList.add("decensor-hidden");
     };
@@ -164,8 +165,25 @@
     return ensurePanel().querySelector(".decensor-body");
   }
 
+  // The scene page's own toolbar (rating / o-counter / organized / ... menu) gets a
+  // Stashify button. Stash renders that toolbar after the route changes, so this
+  // is retried from tick(); if this Stash version has no such toolbar, a small
+  // round button in the corner stands in after a few seconds.
+  function ensureButton() {
+    var btn = document.getElementById("decensor-open");
+    var bar = document.querySelector(".scene-toolbar .scene-toolbar-group:last-child") ||
+              document.querySelector(".scene-toolbar");
+    if (btn && (bar ? bar.contains(btn) : true)) return;
+    if (btn) btn.remove();
+    if (!bar && ++current.barWait < 6) return;
+    btn = el("button", "decensor-open btn btn-secondary" + (bar ? "" : " decensor-open-float"), "🩹");
+    btn.id = "decensor-open";
+    btn.title = "Stashify: decensor / upscale this scene";
+    btn.onclick = function () { ensurePanel().classList.toggle("decensor-hidden"); };
+    (bar || document.body).appendChild(btn);
+  }
+
   function showIdle() {
-    ensurePanel().classList.remove("decensor-hidden");
     var b = body();
     b.innerHTML = "";
     var btn = el("button", "decensor-btn decensor-primary", "Decensor this scene");
@@ -178,8 +196,8 @@
     b.appendChild(test);
     b.appendChild(result);
 
-    b.appendChild(el("div", "decensor-note", "Runs DeepMosaics" +
-      "&nbsp;→&nbsp;Real-ESRGAN on the worker, then lets you review before replacing."));
+    b.appendChild(el("div", "decensor-note",
+      "Runs on the Stashify worker, then lets you review before replacing."));
   }
 
   function showProgress(job) {
@@ -299,16 +317,20 @@
     var panel = document.getElementById("decensor-panel");
     if (!sceneId) {
       if (panel) panel.remove();
+      var open = document.getElementById("decensor-open");
+      if (open) open.remove();
       stopPolling();
-      current = { sceneId: null, jobId: null, timer: null };
+      current = { sceneId: null, jobId: null, timer: null, barWait: 0 };
       return;
     }
     if (sceneId !== current.sceneId) {
-      // navigated to a different scene: reset
+      // navigated to a different scene: reset, panel closed
       stopPolling();
-      current = { sceneId: sceneId, jobId: null, timer: null };
+      current = { sceneId: sceneId, jobId: null, timer: null, barWait: 0 };
+      ensurePanel().classList.add("decensor-hidden");
       showIdle();
     }
+    ensureButton();
   }
 
   setInterval(tick, 700);

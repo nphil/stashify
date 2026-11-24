@@ -6,7 +6,7 @@
   metadata:
     description: Stashify — upscale & decensor for Stash. Remove mosaic censorship (Lada, temporal) and upscale scenes (SPAN 2x live-action) on demand via the Stashify worker + GPU runner. Adds a scene-page panel and a standalone dashboard.
   sourcerepository: https://github.com/nphil/stashify
-  version: 2.0.0
-  date: 2026-07-15 21:40:00
+  version: 2.1.0
+  date: 2026-11-24 21:27:32
   path: stashify.zip
-  sha256: 95fb7dc8ba0ea53aa791f2bbaed8ebb7b1fbd9ed3d7b04277bcc7f9d706e0feb
+  sha256: 4caf4786b83a788d7177fd1431be83eb25de09be64e95505e8533ed4588a76ed
