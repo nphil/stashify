@@ -198,6 +198,13 @@ def main():
                     help="jasna >=0.8.0 dropped --working-directory and writes the "
                          "output in place; skip the temp working dir entirely.")
     ap.add_argument("--extra", default="", help="extra raw args appended to jasna")
+    ap.add_argument("--restoration-model", default="",
+                    help="jasna restoration model: empty = BasicVSR++ (fast); ltx-basic | ltx | "
+                         "ltx-4step | ltx-8step = the LTX model (far more detail, minutes per "
+                         "minute of video, needs jasna's supporter licence and RTX 20+)")
+    ap.add_argument("--ltx-auto-split", default="",
+                    help="with an LTX model: use LTX only for mosaics at least this percent of "
+                         "the frame height and BasicVSR++ for the rest (much faster)")
     ap.add_argument("--denoise", default="",
                     help="jasna primary spatial denoise on restored crops: low | medium | high "
                          "(empty/none = jasna default, no denoise)")
@@ -256,6 +263,12 @@ def main():
     if args.segments:
         argv += ["--segments", args.segments]
         log("decensor: smart mode - restoring %d segment(s) only" % (args.segments.count(",") + 1))
+    if args.restoration_model:
+        argv += ["--restoration-model-name", args.restoration_model]
+        if args.ltx_auto_split:
+            argv += ["--ltx-auto-split", str(args.ltx_auto_split)]
+        log("decensor: restoration model = " + args.restoration_model +
+            (" (big mosaics only, >= %s%% of frame height)" % args.ltx_auto_split if args.ltx_auto_split else ""))
     den = (args.denoise or "").strip().lower()
     if den in ("low", "medium", "high"):
         argv += ["--denoise", den]

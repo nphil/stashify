@@ -182,6 +182,7 @@
     wrap.hidden = !jasnaDecensor;
     // primary spatial denoise applies to any jasna decensor (independent of RTX)
     if ($("jDenoise")) $("jDenoise").hidden = !jasnaDecensor;
+    if ($("jDetail")) $("jDetail").hidden = !jasnaDecensor;
     if ($("cloudWrap")) updateCloudWrap(op);          // paid cloud quality: plain Decensor only
     // RTX denoise/deblur pickers only matter once an RTX mode is chosen
     var mode = $("rtxMode") ? $("rtxMode").value : "off";
@@ -366,6 +367,14 @@
     var jd = $("jDenoise");
     if (jd && !$("jDenoise").hidden && jd.value !== "off" && backend === "decensor") {
       extra.denoise = jd.value;
+      if (!extra.engine) extra.engine = "jasna";
+    }
+    // High detail: jasna's LTX restoration model. "split" keeps LTX for big mosaics
+    // (>= 12% of the frame height) and the fast model for the rest.
+    var jx = $("jDetail");
+    if (jx && !jx.hidden && jx.value !== "off" && backend === "decensor") {
+      extra.restoration = "ltx";
+      if (jx.value === "split") extra.ltx_auto_split = 12;
       if (!extra.engine) extra.engine = "jasna";
     }
     // RTX Super Res: jasna-only secondary detail pass. Preset maps to quality+scale;
@@ -1227,6 +1236,7 @@
       _pinRestore.engine = localStorage.getItem("dc_enginePin");   // applied once options exist
       _pinRestore.runner = localStorage.getItem("dc_runnerPin");
       if ($("jDenoise")) $("jDenoise").value = localStorage.getItem("dc_denoise") || "off";
+      if ($("jDetail")) $("jDetail").value = localStorage.getItem("dc_detail") || "off";
       if ($("rtxMode")) $("rtxMode").value = localStorage.getItem("dc_rtx_mode") || "off";
       if ($("rtxDenoise")) $("rtxDenoise").value = localStorage.getItem("dc_rtx_denoise") || "auto";
       if ($("rtxDeblur")) $("rtxDeblur").value = localStorage.getItem("dc_rtx_deblur") || "auto";
@@ -1261,6 +1271,9 @@
     };
     if ($("jDenoise")) $("jDenoise").onchange = function () {
       try { localStorage.setItem("dc_denoise", $("jDenoise").value); } catch (e) {}
+    };
+    if ($("jDetail")) $("jDetail").onchange = function () {
+      try { localStorage.setItem("dc_detail", $("jDetail").value); } catch (e) {}
     };
     if ($("rtxMode")) $("rtxMode").onchange = function () {
       updateRtx();       // toggle denoise/deblur visibility with the chosen mode

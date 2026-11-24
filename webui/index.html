@@ -153,6 +153,11 @@
               <option value="medium">Denoise: med</option>
               <option value="high">Denoise: high</option>
             </select>
+            <select id="jDetail" title="High detail uses Jasna's LTX model: far more natural detail, about 4-5x slower (3080 only, needs the Jasna supporter licence)" aria-label="Detail" hidden>
+              <option value="off">Detail: normal</option>
+              <option value="split">Detail: high on big mosaics</option>
+              <option value="all">Detail: high everywhere</option>
+            </select>
             <span id="rtxWrap" class="rtxgroup" title="Jasna secondary restoration — extra detail via RTX Super Res (3080 only)" hidden>
               <select id="rtxMode" title="RTX Super Res detail pass (jasna, 3080 only)" aria-label="RTX Super Res">
                 <option value="off">RTX: off</option>

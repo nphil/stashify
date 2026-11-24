@@ -855,10 +855,26 @@ def run_job(lane, job):
                 argv += ["--encoder-settings", str(CFG["jasna_encoder_settings"])]
             if CFG["jasna_no_compile"]:
                 argv.append("--no-compile")
+            # restoration model: BasicVSR++ unless the job asks for jasna's LTX model
+            # (much more detail, minutes per minute of video). ltx_auto_split keeps LTX
+            # for the big mosaics only. jasna itself turns denoise off for LTX-restored
+            # parts and rejects a missing model/licence with a clear error.
+            restoration = str(o.get("restoration") or CFG.get("jasna_restoration") or "").lower()
+            if restoration in ("ltx-basic", "ltx", "ltx-4step", "ltx-8step"):
+                argv += ["--restoration-model", restoration]
+                try:
+                    split = int(o.get("ltx_auto_split") or CFG.get("jasna_ltx_auto_split") or 0)
+                except (TypeError, ValueError):
+                    split = 0
+                if 1 <= split <= 100:
+                    argv += ["--ltx-auto-split", str(split)]
+            else:
+                restoration = ""
             # primary spatial denoise on restored crops (jasna --denoise), independent
-            # of the RTX secondary pass. Validated to jasna's accepted levels.
+            # of the RTX secondary pass. Validated to jasna's accepted levels. With LTX
+            # it only applies to the BasicVSR++ share of an auto-split.
             denoise_primary = str(o.get("denoise") or CFG.get("jasna_denoise") or "").lower()
-            if denoise_primary in ("low", "medium", "high"):
+            if denoise_primary in ("low", "medium", "high") and (not restoration or "--ltx-auto-split" in argv):
                 argv += ["--denoise", denoise_primary]
             if preview_on:
                 argv += ["--segments", seg_string, "--codec", seg_codec]

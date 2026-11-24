@@ -105,6 +105,8 @@ OVERRIDES = {
     "runner": "targetRunner",              # pin this job to a specific runner (name or url)
     "engine": "targetEngine",              # pin this job to a specific engine (lada | jasna | span)
     "denoise": "denoise",                  # jasna primary spatial denoise (low|medium|high; jasna-only)
+    "restoration": "restoration",          # jasna restoration model: ltx-basic | ltx | ltx-4step | ltx-8step
+    "ltx_auto_split": "ltx_auto_split",    # LTX only for mosaics >= this percent of the frame height
     "secondary": "secondary",              # decensor secondary restoration (rtx-super-res; jasna-only)
     "rtx_quality": "rtx_quality",          # rtx-super-res: low | medium | high | ultra
     "rtx_scale": "rtx_scale",              # rtx-super-res: 2 | 4
