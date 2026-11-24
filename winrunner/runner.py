@@ -131,7 +131,12 @@ def load_config():
     # decensor engine: a frozen jasna.exe (github.com/Kruk2/jasna). The op is
     # advertised only when this path exists, so config can pre-set it safely.
     cfg["jasna_exe"] = _expand(cfg.get("jasna_exe") or "")
-    cfg.setdefault("jasna_detection_model", "rfdetr-v5")
+    # RF-DETR detector: whichever the installed jasna bundles (v6 since jasna 0.9,
+    # v5 before). The live-preview scan runs the same model's .onnx directly.
+    _mw = os.path.join(os.path.dirname(cfg["jasna_exe"]), "model_weights")
+    _det = next((n for n in ("rfdetr-v6", "rfdetr-v5")
+                 if os.path.isfile(os.path.join(_mw, n + ".onnx"))), "rfdetr-v5")
+    cfg.setdefault("jasna_detection_model", _det)
     cfg.setdefault("jasna_max_clip_size", 90)    # 90 fits 10GB VRAM; 180 needs 12GB+
     cfg.setdefault("jasna_encoder_settings", "")  # e.g. "cq=23,lookahead=32"
     cfg.setdefault("jasna_no_compile", False)     # skip TRT compile of BasicVSR++
@@ -155,7 +160,7 @@ def load_config():
     cfg.setdefault("jasna_preview_height", 720)    # preview clip height (downscaled)
     cfg.setdefault("jasna_preview_encoder", "libx264")  # OFF the 3080 (cpu/igpu) - no job contention
     cfg["rfdetr_onnx"] = _expand(cfg.get("rfdetr_onnx") or (
-        os.path.join(os.path.dirname(cfg["jasna_exe"]), "model_weights", "rfdetr-v5.onnx")
+        os.path.join(_mw, cfg["jasna_detection_model"] + ".onnx")
         if cfg["jasna_exe"] else ""))
     cfg["local_temp"] = _expand(cfg.get("local_temp") or os.path.join(HERE, "tmp"))
     cfg["ffmpeg"] = resolve_ffmpeg(cfg.get("ffmpeg", "auto"))
@@ -486,16 +491,31 @@ class Lane:
                     self.running_id = None
                 continue
             try:
+                _keep_awake(True)
                 run_job(self, job)
             except Exception as exc:  # noqa: BLE001
                 log.exception("job %s failed", jid)
                 set_job(jid, state="error", message=str(exc), error=str(exc), _ended_at=time.time())
                 push_log(jid, "ERROR: " + str(exc), "error")
             finally:
+                _keep_awake(False)
                 with self.lock:
                     self.running_id = None
                     self.proc = None
                     self.paused = False
+
+
+def _keep_awake(on):
+    """Hold off idle sleep for the calling lane thread while it runs a job: a
+    decensor is hours of GPU work with nobody at the keyboard, and Windows would
+    otherwise suspend the PC mid-job. The request is per thread and ends with it,
+    so a crashed runner can't leave the machine unable to sleep."""
+    if not IS_WIN:
+        return
+    import ctypes
+    ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+    ctypes.windll.kernel32.SetThreadExecutionState(
+        ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if on else 0))
 
 
 LANES = {}

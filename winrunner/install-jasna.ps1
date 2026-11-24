@@ -1,7 +1,7 @@
 # Installs the Jasna decensor engine for the Stashify Windows runner.
 #
 # Downloads the frozen Jasna release (github.com/Kruk2/jasna, self-contained:
-# bundled Python/TensorRT/ffmpeg/mkvmerge + model weights, ~4.1 GB in 3 parts),
+# bundled Python/TensorRT/ffmpeg/mkvmerge + model weights, ~3.4 GB in parts),
 # extracts it, points the runner's config.json at jasna.exe, and restarts the
 # runner task. Needs 7-Zip for the split .7z (uses an installed 7z.exe if
 # found, else downloads the standalone 7zr.exe from 7-zip.org).
@@ -10,39 +10,41 @@
 #   ... -InstallDir "F:\Jasna"      # default: %LOCALAPPDATA%\StashifyRunner\jasna
 #   ... -SkipDownload               # parts already in $InstallDir\parts
 param(
-    [string]$Version = "0.8.0",
+    [string]$Version = "0.12.4",
     [string]$Root = "$env:LOCALAPPDATA\StashifyRunner",
     [string]$InstallDir = "",
     [switch]$SkipDownload
 )
 $ErrorActionPreference = "Stop"
 if (-not $InstallDir) { $InstallDir = Join-Path $Root "jasna" }
-$rel = "https://github.com/Kruk2/jasna/releases/download/v$Version"
-# asset naming changed at v0.8.0: jasna-<ver>-win.7z.00N (was jasna-windows-v<ver>.7z.00N)
 $verNum = ($Version -replace '^v', '' -replace '-.*$', '')
-$isNewNaming = try { [version]$verNum -ge [version]"0.8.0" } catch { $true }
-$parts = if ($isNewNaming) {
-    @("jasna-$Version-win.7z.001", "jasna-$Version-win.7z.002", "jasna-$Version-win.7z.003")
-} else {
-    @("jasna-windows-v$Version.7z.001", "jasna-windows-v$Version.7z.002", "jasna-windows-v$Version.7z.003")
-}
 $partsDir = Join-Path $InstallDir "parts"
 $cfgPath = Join-Path $Root "config.json"
 
 New-Item -ItemType Directory -Force $partsDir | Out-Null
 
 # --- download the release parts (resumable via curl.exe, ships with Win10+) ---
+# The part names and their count have changed three times across releases, so
+# they come from the release itself: every Windows NVIDIA .7z part it lists.
 if (-not $SkipDownload) {
-    foreach ($p in $parts) {
-        $dest = Join-Path $partsDir $p
-        Write-Host "downloading $p ..." -ForegroundColor Cyan
-        & curl.exe -L --fail --retry 3 -C - -o $dest "$rel/$p"
-        if ($LASTEXITCODE -ne 0) { throw "download failed: $p" }
+    $assets = (Invoke-RestMethod "https://api.github.com/repos/Kruk2/jasna/releases/tags/v$Version").assets |
+        Where-Object { $_.name -match '\.7z\.\d+$' -and $_.name -match 'win' -and $_.name -notmatch 'amd' } |
+        Sort-Object name
+    if (-not $assets) { throw "release v$Version lists no Windows NVIDIA .7z parts" }
+    foreach ($a in $assets) {
+        $dest = Join-Path $partsDir $a.name
+        Write-Host "downloading $($a.name) ..." -ForegroundColor Cyan
+        & curl.exe -L --fail --retry 3 -C - -o $dest $a.browser_download_url
+        if ($LASTEXITCODE -ne 0) { throw "download failed: $($a.name)" }
+        if ($a.digest -like "sha256:*" -and
+            (Get-FileHash $dest -Algorithm SHA256).Hash -ne $a.digest.Substring(7)) {
+            Remove-Item $dest -Force
+            throw "checksum mismatch: $($a.name) (deleted - run again)"
+        }
     }
 }
-foreach ($p in $parts) {
-    if (-not (Test-Path (Join-Path $partsDir $p))) { throw "missing part: $p (use -SkipDownload only if parts are present)" }
-}
+$parts = @(Get-ChildItem $partsDir -Filter "*.7z.0*" | Sort-Object Name | ForEach-Object { $_.Name })
+if (-not $parts) { throw "no .7z parts in $partsDir (use -SkipDownload only if parts are present)" }
 
 # --- find or fetch a 7z extractor ---
 $sevenZip = @("$env:ProgramFiles\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe") |
