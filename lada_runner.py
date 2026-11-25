@@ -33,6 +33,45 @@ LADA_CLI = os.environ.get("LADA_CLI", "/opt/lada/.venv/bin/lada-cli")
 LADA_DIR = os.environ.get("LADA_DIR", "/opt/lada")
 VENV_PY = os.environ.get("LADA_VENV_PY", "/opt/lada/.venv/bin/python")
 UPSCALE_SCRIPT = os.environ.get("UPSCALE_SCRIPT", "/opt/lada/upscale_cli.py")
+TRANSCODE_SCRIPT = os.environ.get("TRANSCODE_SCRIPT", "/opt/lada/transcode_cli.py")
+FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
+FFPROBE = os.environ.get("FFPROBE", "ffprobe")
+RUNNER_OPS = ["decensor", "upscale", "decensor+upscale", "transcode"]
+RUNNER_ENGINES = {"decensor": "lada", "decensor+upscale": "lada", "upscale": "span",
+                  "transcode": "ffmpeg"}
+_TRANSCODE_PREFS = ("hevc_nvenc", "h264_nvenc", "libx265")
+_transcode_enc = None
+
+
+def pick_transcode_encoder(encoders_text):
+    """First of hevc_nvenc > h264_nvenc > libx265 listed by `ffmpeg -encoders`."""
+    for enc in _TRANSCODE_PREFS:
+        if re.search(r"\b" + enc + r"\b", encoders_text or ""):
+            return enc
+    return "libx265"
+
+
+def resolve_transcode_encoder():
+    """Probe ffmpeg once (listing, not a trial encode) for the transcode encoder."""
+    global _transcode_enc
+    if _transcode_enc is None:
+        try:
+            out = subprocess.run([FFMPEG, "-hide_banner", "-encoders"], capture_output=True,
+                                 text=True, timeout=20).stdout
+        except Exception:
+            out = ""
+        _transcode_enc = pick_transcode_encoder(out)
+    return _transcode_enc
+
+
+def _transcode_argv(o, input_path, out_dir, encoder):
+    enc = o.get("transcode_encoder") or resolve_transcode_encoder()
+    argv = [VENV_PY, TRANSCODE_SCRIPT, "--input", input_path, "--output-dir", out_dir,
+            "--ffmpeg", FFMPEG, "--ffprobe", FFPROBE, "--encoder", enc]
+    for k in ("codec", "height", "quality", "container"):
+        if o.get(k) not in (None, ""):
+            argv += ["--" + k, str(o[k])]
+    return argv
 MODELS_DIR = os.environ.get("LADA_MODEL_WEIGHTS_DIR", "/models")
 TOKEN = os.environ.get("RUNNER_TOKEN") or os.environ.get("LADA_TOKEN", "")   # RUNNER_TOKEN preferred; LADA_TOKEN legacy
 PORT = int(os.environ.get("PORT", "8711"))
@@ -395,6 +434,8 @@ def run_job(job):
         phases.append(("lada", _lada_argv))
     if op in ("upscale", "decensor+upscale"):
         phases.append(("upscale", _upscale_argv))
+    if op == "transcode":
+        phases.append(("transcode", _transcode_argv))
     if not phases:
         set_job(jid, state="error", message="unknown op " + op, error="unknown op " + op,
                 _ended_at=time.time())
@@ -557,8 +598,7 @@ def health_payload():
         busy = _running_id is not None
     return {"ok": True, "device": os.environ.get("RUNNER_DEVICE") or os.environ.get("LADA_DEVICE", "cuda"),
             "models": models, "busy": busy, "events": True,
-            "ops": ["decensor", "upscale", "decensor+upscale"],
-            "engines": {"decensor": "lada", "decensor+upscale": "lada", "upscale": "span"}}
+            "ops": RUNNER_OPS, "engines": RUNNER_ENGINES}
 
 
 def _jobs_public():
@@ -624,8 +664,8 @@ class Handler(BaseHTTPRequestHandler):
             import socket
             return self._send(200, {"stashify": True,
                                     "node": os.environ.get("NODE_NAME") or socket.gethostname(),
-                                    "kind": "linux", "ops": ["decensor", "upscale", "decensor+upscale"],
-                                    "engines": {"decensor": "lada", "decensor+upscale": "lada", "upscale": "span"},
+                                    "kind": "linux", "ops": RUNNER_OPS,
+                                    "engines": RUNNER_ENGINES,
                                     "events": True})
         if raw == "/health" or raw == "":
             return self._send(200, health_payload())
