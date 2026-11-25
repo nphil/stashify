@@ -121,8 +121,8 @@ def _final_stage_progress(output_dir, input_path):
 # The bar's own % restarts every step, so whole-job progress comes from the clock:
 # time run so far against jasna's "run H:MM:SS left".
 _RE_LTX = re.compile(
-    r"LTX\s+(\d)/(\d)\s+(\w+):\s*(\d{1,3})%.*?(\d+)/(\d+)\s*\[.*?"
-    r"(?:([\d.]+)\s*frame/s)?[^\]]*?run\s+(?:(\d+):)?(\d+):(\d+)\s+left", re.IGNORECASE)
+    r"LTX\s+(\d)/(\d)\s+(\w+):\s*\d{1,3}%.*?run\s+(?:(\d+):)?(\d+):(\d+)\s+left", re.IGNORECASE)
+_RE_LTX_FPS = re.compile(r"([\d.]+)\s*frame/s", re.IGNORECASE)
 _T0 = time.time()
 
 
@@ -130,7 +130,9 @@ def _normalize_ltx(seg):
     m = _RE_LTX.search(seg)
     if not m:
         return None
-    step, steps, name, _pct, frame, _total, fps, h, mi, s = m.groups()
+    step, steps, name, h, mi, s = m.groups()
+    f = _RE_LTX_FPS.search(seg)
+    fps = f.group(1) if f else None
     left = int(h or 0) * 3600 + int(mi) * 60 + int(s)
     ran = time.time() - _T0
     pct = int(100 * ran / (ran + left)) if ran + left > 0 else 0
