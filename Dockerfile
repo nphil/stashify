@@ -9,15 +9,18 @@ FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1
 
-RUN pip install --no-cache-dir stashapp-tools requests
+# stashapp-tools + the pinned hireling release (the GPU-rental core behind cloud Jasna; it is
+# installed from the release tarball, so this image needs no git). requests is imported lazily.
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt requests && rm /tmp/requirements.txt
 
-# Cloud GPU rentals (Vast.ai): the coordinator reaches a rented machine with ssh + rsync.
+# Cloud GPU rentals: the coordinator reaches a rented machine with ssh + rsync.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends openssh-client rsync \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY core.py worker.py server.py cloud_api.py cloud_jasna.py cloud_ssh.py cloud_vast.py entrypoint.sh /app/
+COPY core.py worker.py server.py cloud_api.py cloud_jasna.py entrypoint.sh /app/
 COPY webui/ /app/webui/
 RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 

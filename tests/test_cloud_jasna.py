@@ -14,8 +14,9 @@ sys.path.insert(0, HERE)
 
 import cloudfakes as cf              # noqa: E402
 from cloudfakes import KEY, LICENCE, Resp, raw_offer   # noqa: E402
-import cloud_ssh                     # noqa: E402
-import cloud_vast                    # noqa: E402
+import hireling                       # noqa: E402
+from hireling import ssh             # noqa: E402
+from hireling.providers.vast import parse_offer   # noqa: E402
 import cloud_jasna as cj             # noqa: E402
 import core                          # noqa: E402
 
@@ -64,22 +65,22 @@ class World:
     def handle(self, tag, cmd, kw):
         script = script_of(cmd)
         if "nvidia-smi" in script:
-            return cloud_ssh.RunResult(0, ["NVIDIA GeForce RTX 4090, 24564 MiB, 580.95.05"])
+            return ssh.RunResult(0, ["NVIDIA GeForce RTX 4090, 24564 MiB, 580.95.05"])
         if "apt-get install" in script and "jasna-linux-nvidia" in script:
             code = self.install_code.get(tag, 0)
-            return cloud_ssh.RunResult(code, ["[stashify] step: installed"] if code == 0 else ["E: boom"])
+            return ssh.RunResult(code, ["[stashify] step: installed"] if code == 0 else ["E: boom"])
         if "hevc_nvenc" in script:
             mark = cj.OK_MARK if self.encoder_ok.get(tag, True) else cj.FAIL_MARK
-            return cloud_ssh.RunResult(0, [mark])
+            return ssh.RunResult(0, [mark])
         if "read -r JASNA_LICENSE_CODE" in script:
             self.activation_stdin.append(kw["stdin_data"])
             code, lines = self.activation
-            return cloud_ssh.RunResult(code, lines)
+            return ssh.RunResult(code, lines)
         if "./jasna --input" in script:
             return self._run(script, kw)
         if "stat -c %s" in script:
-            return cloud_ssh.RunResult(0, [str(self.remote_size)])
-        return cloud_ssh.RunResult(0, [])
+            return ssh.RunResult(0, [str(self.remote_size)])
+        return ssh.RunResult(0, [])
 
     def _run(self, script, kw):
         self.jasna_cmds.append(script)
@@ -94,7 +95,7 @@ class World:
                     break
             if kw["on_line"]:
                 kw["on_line"](line)
-        return cloud_ssh.RunResult(self.run_code, self.run_lines[-2:] if self.run_code == 0 else ["Error: boom"])
+        return ssh.RunResult(self.run_code, self.run_lines[-2:] if self.run_code == 0 else ["Error: boom"])
 
 
 class JasnaCase(cf.CloudCase):
@@ -156,7 +157,7 @@ class PresetTest(unittest.TestCase):
         self.assertEqual(cj.GPUS[:2], ("RTX 5090", "RTX 4090"))       # prefer 5090, then 4090
         self.assertGreaterEqual(cj.MIN_VRAM_GB, 16)
         self.assertGreaterEqual(cj.MIN_DRIVER, 580)
-        spec = cj.rent_spec(cloud_vast.Config(), 5_000_000_000)
+        spec = cj.rent_spec(hireling.settings.Config(), 5_000_000_000)
         self.assertEqual(spec.env, {"NVIDIA_DRIVER_CAPABILITIES": "all"})
         self.assertEqual((spec.min_vram_gb, spec.min_driver), (16, 580))
         self.assertGreaterEqual(spec.disk_gb, 80 + 15)               # upstream: >= 80 GB, plus the video x3
@@ -164,7 +165,7 @@ class PresetTest(unittest.TestCase):
 
 class EstimateTest(cf.CloudCase):
     def offer(self, gpu="RTX 4090", price=0.40, down=900.0):
-        return cloud_vast._parse_offer(raw_offer(1, gpu, price, inet_down=down))
+        return parse_offer(raw_offer(1, gpu, price, inet_down=down))
 
     def test_known_scene_known_numbers(self):
         est = cj.estimate(SCENE, "detail", self.offer(), 4.6)
@@ -238,7 +239,7 @@ class QuoteTest(cf.CloudCase):
         self.assertIsNone(self.quote()["refusal"])
 
     def test_refused_when_month_to_date_plus_estimate_is_over_the_monthly_cap(self):
-        self.cl.ledger.append({"ended": cloud_vast._iso(self.clock.time()), "usd": 9.80, "status": "ok"})
+        self.cl.ledger.append({"ended": hireling.util.iso(self.clock.time()), "usd": 9.80, "status": "ok"})
         q = self.quote()
         self.assertEqual(q["refusal"]["code"], "over_month_cap")
         self.assertEqual(q["month_to_date"], 9.8)
@@ -413,7 +414,7 @@ class LifecycleTest(JasnaCase):
     # -- every way the job can end must end in a destroy -------------------------- #
 
     def test_encoder_check_failure_tries_the_next_offer(self):
-        self.world.encoder_ok = {7001: False}
+        self.world.encoder_ok = {"vast-7001": False}
         self.run_job()
         self.assertEqual([e["status"] for e in self.ledger()], ["failed-offer", "ok"])
         self.assertEqual(len(self.world.activation_stdin), 1)             # only the good machine was activated
@@ -421,14 +422,14 @@ class LifecycleTest(JasnaCase):
         self.assertClean()
 
     def test_a_failed_install_also_tries_the_next_offer(self):
-        self.world.install_code = {7001: 100}
+        self.world.install_code = {"vast-7001": 100}
         self.run_job()
         self.assertEqual([e["status"] for e in self.ledger()], ["failed-offer", "ok"])
         self.assertClean()
 
     def test_three_bad_machines_then_stop(self):
-        self.world.encoder_ok = {7001: False, 7002: False, 7003: False, 7004: False}
-        with self.assertRaises(cloud_vast.BoxFailed):
+        self.world.encoder_ok = {"vast-7001": False, "vast-7002": False, "vast-7003": False, "vast-7004": False}
+        with self.assertRaises(hireling.BoxFailed):
             self.run_job()
         self.assertEqual(self.vast.count("PUT", "/asks/"), 3)
         self.assertEqual(self.world.activation_stdin, [])                  # the licence never left home
@@ -499,9 +500,9 @@ class LifecycleTest(JasnaCase):
         def partial(tag, remote, local, **kw):
             with open(local, "wb") as fh:
                 fh.write(b"half")
-            raise cloud_ssh.SshError("connection lost")
+            raise ssh.SshError("connection lost")
         self.tp.get = lambda ep, tag, remote, local, **kw: partial(tag, remote, local)
-        with self.assertRaises(cloud_ssh.SshError):
+        with self.assertRaises(ssh.SshError):
             self.run_job()
         self.assertEqual(os.listdir(self.out), [])
         self.assertClean()
@@ -528,7 +529,7 @@ class LifecycleTest(JasnaCase):
             self.run_job(cfg)
         self.assertEqual(cm.exception.code, "over_job_cap")
         self.settings.update({"job_cap": 3.00})
-        self.cl.ledger.append({"ended": cloud_vast._iso(self.clock.time()), "usd": 9.90, "status": "ok"})
+        self.cl.ledger.append({"ended": hireling.util.iso(self.clock.time()), "usd": 9.90, "status": "ok"})
         with self.assertRaises(cj.CloudRefused) as cm:
             self.run_job(cfg)
         self.assertEqual(cm.exception.code, "over_month_cap")
@@ -656,7 +657,7 @@ class ReleaseTest(unittest.TestCase):
     def test_github_errors_become_a_clear_failure(self):
         def boom(url):
             raise OSError("rate limit exceeded for token %s" % KEY)
-        cloud_vast.register_secret(KEY)
+        hireling.register_secret(KEY)
         with self.assertRaises(cj.CloudJobFailed) as cm:
             cj.release_assets(http_get=boom, now=1.0)
         self.assertIn("GitHub", str(cm.exception))

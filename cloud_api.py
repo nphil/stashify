@@ -9,13 +9,12 @@ refusal the server enforces, so the dashboard cannot disagree with the enforceme
 Every function returns (http_status, payload) when it can fail; payloads never contain a
 secret (the key and the licence are write-only)."""
 
-import dataclasses
 import math
 import re
 
 import cloud_jasna
-import cloud_vast
-from cloud_vast import CloudError, redact
+import hireling
+from hireling import CloudError, redact
 
 REFUSED = 409          # a refusal conflicts with the current settings, budget or market
 
@@ -34,21 +33,24 @@ def settings_get(cl):
     return 200, cl.settings.public()
 
 
-def _key_changes(cl, value):
-    current = cl.settings.get("vast_api_key")
+def _key_changes(cl, field, value):
+    current = cl.settings.get(field)
     if value is None:
         return bool(current)
     return isinstance(value, str) and bool(value.strip()) and value.strip() != current
 
 
 def settings_save(cl, body):
-    """A bad value is a 400 with a plain message and changes nothing. The Vast key cannot
-    change while a machine is running: the new key could not destroy it."""
+    """A bad value is a 400 with a plain message and changes nothing. A provider's key cannot
+    change while one of its machines is running: the new key could not destroy it."""
     if not isinstance(body, dict):
         return 400, {"error": "expected a JSON object"}
-    if "vast_api_key" in body and _key_changes(cl, body["vast_api_key"]) and cl.busy():
-        return REFUSED, {"error": "A cloud machine is still running, or not yet confirmed destroyed. "
-                                  "Change the Vast key after it is gone.", "code": "busy"}
+    for provider in cl.settings.providers:
+        field = "%s_api_key" % provider
+        if field in body and _key_changes(cl, field, body[field]) and cl.busy(provider):
+            return REFUSED, {"error": "A cloud machine is still running, or not yet confirmed destroyed. "
+                                      "Change the %s key after it is gone." % provider.capitalize(),
+                             "code": "busy"}
     try:
         return 200, cl.settings.update(body)
     except ValueError as exc:
@@ -56,36 +58,48 @@ def settings_save(cl, body):
 
 
 def test_key(cl, body):
-    pasted = body.get("vast_api_key") if isinstance(body, dict) else None
-    return 200, cl.test_key(pasted if isinstance(pasted, str) else None)
+    """The settings page's Test button. The dashboard sends {vast_api_key}; another provider
+    sends {provider, <provider>_api_key}. A good answer keeps `balance`, the dashboard's name."""
+    body = body if isinstance(body, dict) else {}
+    provider = body["provider"] if isinstance(body.get("provider"), str) else "vast"
+    pasted = body.get("%s_api_key" % provider)
+    res = cl.test_key(provider, pasted if isinstance(pasted, str) else None)
+    if res.get("ok"):
+        res["balance"] = res["credit"]
+    return 200, res
 
 
 def status(cl):
-    return 200, cl.status()
+    """Settings-page status: spend, running machines, and each provider with its credit
+    (looked up at most once a minute)."""
+    return 200, cl.status(with_credit=True)
 
 
 # -- market view ------------------------------------------------------------------------ #
 
+# Query parameters that belong to Stashify, not to hireling's market contract.
+OFFER_PARAMS = ("scene", "preset", "op", "upscale", "upscale_height", "hours")
+
+
 def offers(cl, query):
-    """GET /api/cloud/offers?min_vram=24&hours=2 : what Jasna could rent right now."""
-    cfg = cl.config()
-    if not cfg.api_key:
+    """GET /api/cloud/offers : the whole GPU market behind the enabled providers, with
+    hireling's filter / sort / page parameters, every offer marked compatible or not with
+    what Jasna needs (and why not)."""
+    if not cl.enabled_providers():
         return REFUSED, {"error": "Add your Vast.ai API key in Cloud settings first.", "code": "no_key"}
-    spec = cloud_jasna.rent_spec(cfg)
-    min_vram = _num(query.get("min_vram"))
-    if min_vram and min_vram > spec.min_vram_gb:
-        spec = dataclasses.replace(spec, min_vram_gb=min_vram)
-    hours = _num(query.get("hours"))
     try:
-        rows = cl.offers(spec)
-    except cloud_vast.VastQuotaError as exc:
-        return 429, {"error": redact(exc), "code": "search_quota"}
+        payload = hireling.offers_payload(cl, query, requirements=cloud_jasna.requirements(cl.config()),
+                                          ignore=OFFER_PARAMS)
+    except ValueError as exc:
+        return 400, {"error": str(exc), "code": "bad_query"}
+    except hireling.NotConfigured as exc:
+        return REFUSED, {"error": redact(exc), "code": "no_key"}
     except CloudError as exc:
         return 502, {"error": redact(exc), "code": "offers_unavailable"}
-    if hours and hours > 0:
-        for row in rows:
-            row["cost"] = round(row["price"] * hours, 2)
-    return 200, {"offers": rows, "max_price": cfg.max_price, "min_vram": spec.min_vram_gb}
+    if payload["errors"] and not payload["offers"]:        # nothing to show and a provider failed: say why
+        return 502, {"error": next(iter(payload["errors"].values())), "code": "offers_unavailable",
+                     "errors": payload["errors"]}
+    return 200, payload
 
 
 # -- scenes ----------------------------------------------------------------------------- #

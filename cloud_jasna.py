@@ -1,8 +1,9 @@
-"""Cloud Jasna: decensor a scene on a rented Vast.ai GPU (opt-in, paid, always confirmed).
+"""Cloud Jasna: decensor a scene on a rented GPU (opt-in, paid, always confirmed).
 
-Built on cloud_vast.Cloud.rent(), which owns the safety net (always destroy, spend caps,
-ledger, reaper). This module adds only the Jasna specifics, following upstream's
-cloud guide (https://github.com/Kruk2/jasna/blob/main/docs/en/cloud.md):
+Built on the hireling package (https://github.com/nphil/hireling): its Cloud.rent() owns
+the safety net (always destroy, spend caps, ledger, reaper). This module adds only the
+Jasna specifics, following upstream's cloud guide
+(https://github.com/Kruk2/jasna/blob/main/docs/en/cloud.md):
 
   rent RTX-class GPU (driver >= 580, NVIDIA_DRIVER_CAPABILITIES=all) -> apt + unpack the
   Linux build in /root -> hevc_nvenc check (else next offer, max 3) -> activate with the
@@ -13,6 +14,7 @@ cloud guide (https://github.com/Kruk2/jasna/blob/main/docs/en/cloud.md):
 Exactly three presets exist. Never offered: Normal/BasicVSR++, plain LTX, --ltx-fast.
 """
 
+import dataclasses
 import math
 import os
 import re
@@ -20,9 +22,50 @@ import shlex
 import threading
 import time
 
-import cloud_ssh
-import cloud_vast
-from cloud_vast import CloudError, redact, register_secret
+import hireling
+from hireling import CloudError, redact, register_secret
+
+# -- the one Cloud of this process ---------------------------------------------------- #
+
+LABEL_PREFIX = "stashify-"           # rented machines are named stashify-<8 hex>; only those are ever reaped
+SECRET_FIELDS = {"jasna_license": "JASNA_LICENSE_CODE"}      # write-only, next to the provider keys
+# The settings file and the environment keep the names they always had (VAST_*).
+ENV_NAMES = {
+    "max_price": "VAST_MAX_PRICE", "job_cap": "VAST_JOB_CAP", "month_cap": "VAST_MONTH_CAP",
+    "max_bw_cost": "VAST_MAX_BW_COST", "max_job_hours": "VAST_MAX_JOB_HOURS",
+    "datacenter_only": "VAST_DATACENTER_ONLY", "gpus": "VAST_GPUS",
+    "min_vram_gb": "VAST_MIN_VRAM_GB", "min_reliability": "VAST_MIN_RELIABILITY",
+    "disk_gb": "VAST_DISK_GB"}
+
+
+def make_cloud(base_dir=None, env=None, **kw):
+    """A hireling Cloud with Stashify's names: state in CLOUD_DIR (default /config)."""
+    env = os.environ if env is None else env
+    base = base_dir or env.get("CLOUD_DIR") or "/config"
+    settings = hireling.Settings(os.path.join(base, "cloud.json"), env, secrets=SECRET_FIELDS,
+                                 env_names=ENV_NAMES)
+    return hireling.Cloud(settings, base, label_prefix=LABEL_PREFIX,
+                          ssh_dir=env.get("VAST_SSH_DIR") or None, **kw)
+
+
+_default = None
+_default_lock = threading.Lock()
+
+
+def cloud():
+    """The process-wide Cloud (made on first use)."""
+    global _default
+    with _default_lock:
+        if _default is None:
+            _default = make_cloud()
+        return _default
+
+
+def set_cloud(instance):
+    """Replace the process-wide instance (tests inject one built on fakes)."""
+    global _default
+    with _default_lock:
+        _default = instance
 
 # -- the three presets (the ONLY ones) ------------------------------------------ #
 
@@ -157,19 +200,25 @@ def _transfer_min(gb, mbps):
     return gb * 8000.0 / max(mbps, 1.0) / 60.0
 
 
-def rent_spec(cfg, size_bytes=0, environ=None):
-    """What to rent for Jasna. Disk follows upstream (>= 80 GB) plus room for the video
-    and the result."""
+def requirements(cfg, size_bytes=0, environ=None):
+    """What Jasna needs from ANY machine, plus the owner's limits, as data: it marks offers
+    compatible or not in the market browser and is the base of every rental. Disk follows
+    upstream (>= 80 GB) plus room for the video and the result."""
     env = os.environ if environ is None else environ
     gb = size_bytes / 1e9
-    return cloud_vast.RentSpec(
-        gpus=GPUS, min_vram_gb=MIN_VRAM_GB, max_price=cfg.max_price,
+    return hireling.RentSpec(
+        gpu_pattern=r"^RTX", min_vram_gb=MIN_VRAM_GB, max_price=cfg.max_price,
         disk_gb=max(int(cfg.disk_gb), 80 + int(math.ceil(3 * gb))),
         image=env.get("JASNA_CLOUD_IMAGE") or env.get("VAST_IMAGE") or IMAGE,
         env={"NVIDIA_DRIVER_CAPABILITIES": "all"},
         min_reliability=cfg.min_reliability, datacenter_only=cfg.datacenter_only,
         min_driver=MIN_DRIVER, min_inet_down=MIN_INET_DOWN_MBPS, max_bw_cost=cfg.max_bw_cost,
         max_hours=cfg.max_job_hours)
+
+
+def rent_spec(cfg, size_bytes=0, environ=None):
+    """The automatic choice: the preferred RTX cards, best first (GPUS)."""
+    return dataclasses.replace(requirements(cfg, size_bytes, environ), gpus=GPUS)
 
 
 def estimate(scene, preset_key, offer, release_gb=RELEASE_GB_FALLBACK):
@@ -212,7 +261,7 @@ def build_quote(cl, scene, preset_key, queued_usd=0.0, release_gb=None):
         out["ok"] = False
         return out
 
-    if not cfg.api_key:
+    if not cl.enabled_providers():
         return refuse("no_key", "Add your Vast.ai API key in Cloud settings first.")
     if not cl.settings.get("jasna_license"):
         return refuse("no_licence", "Add your Jasna licence code in Cloud settings first.")
@@ -221,7 +270,7 @@ def build_quote(cl, scene, preset_key, queued_usd=0.0, release_gb=None):
                                      "cannot be estimated.")
     try:
         offer = cl.best_offer(rent_spec(cfg, scene.get("size") or 0))
-    except cloud_vast.VastQuotaError:
+    except hireling.QuotaError:
         return refuse("search_quota", "Vast's search quota for today is used up. Try tomorrow.")
     except CloudError as exc:
         return refuse("offers_unavailable", "Could not look up GPU prices: %s" % redact(exc))
@@ -402,7 +451,7 @@ def run_decensor(cfg, input_path, result_dir, *, on_line=None, log_cb=None, stat
     (or returns true) when the user cancels. stamp(**fields): live job fields
     (runner/spent). Raises CloudRefused / CloudJobFailed / cloud_vast errors; every one
     of them has already destroyed the rented box."""
-    cl = cl or cloud_vast.cloud()
+    cl = cl or cloud()
     job = cfg["cloud"]
     preset_key, scene = job["preset"], job["scene"]
     say = log_cb or (lambda _line: None)
@@ -441,7 +490,7 @@ def run_decensor(cfg, input_path, result_dir, *, on_line=None, log_cb=None, stat
     def on_offer(n, offer):
         rented.append(offer.id)
         phase("copy", 0.02 * n, "Renting %s at $%.2f/hour (machine %d of up to %d)"
-              % (offer.gpu, offer.price, n, cloud_vast.MAX_ATTEMPTS), True)
+              % (offer.gpu, offer.price, n, hireling.cloud.MAX_ATTEMPTS), True)
         say("[cloud] renting %s at $%.2f/hour" % (offer.gpu, offer.price))
 
     def log_remote(line):
@@ -453,12 +502,12 @@ def run_decensor(cfg, input_path, result_dir, *, on_line=None, log_cb=None, stat
         phase("copy", 0.30, "Installing Jasna on the rented %s" % box.gpu, True)
         res = box.run_script(install_script(urls), on_line=log_remote, timeout=2400)
         if res.code != 0:
-            raise cloud_vast.VerifyFailed("installing Jasna failed: %s" % " | ".join(res.tail[-3:]))
+            raise hireling.VerifyFailed("installing Jasna failed: %s" % " | ".join(res.tail[-3:]))
         phase("copy", 0.85, "Checking the video encoder", True)
         res = box.run_script(encoder_check_script(), on_line=log_remote, timeout=180)
         text = " ".join(res.tail)
         if OK_MARK not in text:
-            raise cloud_vast.VerifyFailed("this machine's NVENC video encoder does not work")
+            raise hireling.VerifyFailed("this machine's NVENC video encoder does not work")
 
     meta = {"job_id": job.get("job_id"), "scene_id": scene.get("id"), "scene": scene.get("title"),
             "preset": preset_key}
@@ -471,10 +520,10 @@ def run_decensor(cfg, input_path, result_dir, *, on_line=None, log_cb=None, stat
             produced = _fetch_result(box, input_path, result_dir, phase, say, last)
             say("[cloud] finished: spent $%.2f (estimate was $%.2f)" % (box.spent_total(), quote["est_usd"]))
             return produced
-    except cloud_vast.NoOffers:
+    except hireling.NoOffers:
         raise CloudRefused("no_offer", "No suitable GPU is available under $%.2f/hour right now. "
                            "Nothing was rented." % cl.config().max_price) from None
-    except (cloud_vast.SpendCapReached, cloud_vast.LifetimeExceeded) as exc:
+    except (hireling.SpendCapReached, hireling.LifetimeExceeded) as exc:
         raise CloudJobFailed("Stopped: %s. %s" % (exc, _after_stop(cl, job, bool(rented)))) from None
 
 
@@ -516,7 +565,7 @@ def _on_box(box, cfg, job, input_path, result_dir, urls, licence, progress, phas
 
     phase("decensor", 0.0, "Starting Jasna (the first run prepares the GPU and may download the model)", True)
     res = box.run(run_command(remote_in, job["preset"]), tty=True, prompts=PROMPTS,
-                  grace=cloud_ssh.INT_GRACE_S, on_line=run_line)
+                  grace=hireling.ssh.INT_GRACE_S, on_line=run_line)
     if res.code != 0:
         box.outcome = ("error", "jasna exited %d" % res.code)
         raise CloudJobFailed("Jasna failed on the rented machine (exit %d): %s"

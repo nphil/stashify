@@ -36,7 +36,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import core
 import cloud_api
-import cloud_vast
+import cloud_jasna
 
 logging.basicConfig(
     level=logging.INFO,
@@ -784,7 +784,7 @@ def worker_loop():
             set_job(job_id, state="cancelled", message="Cancelled", paused=False, _ended_at=time.time())
         except Exception as exc:  # noqa: BLE001
             logging.exception(f"Job {job_id} action {action} failed")
-            msg = cloud_vast.redact(exc)      # a key or licence must never reach the job log
+            msg = cloud_jasna.redact(exc)      # a key or licence must never reach the job log
             push_log(job_id, "ERROR: " + msg, "error")
             set_job(job_id, state="error", message=msg, error=msg, _ended_at=time.time())
         finally:
@@ -921,7 +921,7 @@ class Handler(BaseHTTPRequestHandler):
     def cloud_get(self, path):
         from urllib.parse import urlparse, parse_qs
         query = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
-        cl = cloud_vast.cloud()
+        cl = cloud_jasna.cloud()
         if path == "/api/cloud/settings":
             return self._send(*cloud_api.settings_get(cl))
         if path == "/api/cloud/status":
@@ -933,13 +933,13 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 metas = cloud_api.scene_metas(stash_gql, ids)
             except Exception as exc:  # noqa: BLE001
-                return self._send(502, {"error": "stash: " + cloud_vast.redact(exc)})
+                return self._send(502, {"error": "stash: " + cloud_jasna.redact(exc)})
             return self._send(*cloud_api.quotes(cl, list(zip(ids, metas)), query.get("preset", ""),
                                                 queued_cloud_usd()))
         return self._send(404, {"error": "not found"})
 
     def cloud_post(self, path):
-        cl = cloud_vast.cloud()
+        cl = cloud_jasna.cloud()
         if path == "/api/cloud/settings":
             return self._send(*cloud_api.settings_save(cl, self._body()))
         if path == "/api/cloud/test":
@@ -952,10 +952,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             (meta,) = cloud_api.scene_metas(stash_gql, [scene_id])
         except Exception as exc:  # noqa: BLE001
-            return self._send(502, {"error": "stash: " + cloud_vast.redact(exc)})
+            return self._send(502, {"error": "stash: " + cloud_jasna.redact(exc)})
         backend = overrides.get("backend") or core.config_from_env().get("backend")
         with _cloud_admit_lock:
-            status, payload = cloud_api.admit(cloud_vast.cloud(), body, meta, queued_cloud_usd(), backend)
+            status, payload = cloud_api.admit(cloud_jasna.cloud(), body, meta, queued_cloud_usd(), backend)
             if status != 202:
                 return self._send(status, payload)
             job = new_job(scene_id, overrides, cloud=payload)
@@ -1273,7 +1273,7 @@ def main():
     threading.Thread(target=gpu_poller, daemon=True).start()
     threading.Thread(target=preview_poller, daemon=True).start()
     try:
-        cloud_vast.cloud().start_reaper()   # destroys stray rented machines at startup and every few minutes
+        cloud_jasna.cloud().start_reaper()   # destroys stray rented machines at startup and every few minutes
     except Exception as exc:  # noqa: BLE001 - a cloud problem must never stop the server
         logging.warning(f"Cloud reaper not started: {exc}")
     httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)

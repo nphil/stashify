@@ -19,7 +19,7 @@ import cloudfakes as cf              # noqa: E402
 from cloudfakes import KEY, LICENCE, Resp   # noqa: E402
 import cloud_api                     # noqa: E402
 import cloud_jasna as cj             # noqa: E402
-import cloud_vast                    # noqa: E402
+import hireling                       # noqa: E402
 import core                          # noqa: E402
 import server                        # noqa: E402
 
@@ -72,7 +72,9 @@ class SettingsApiTest(cf.CloudCase):
         self.assertEqual(self.vast.live(), [])
 
     def test_test_key_shows_the_balance(self):
-        self.assertEqual(cloud_api.test_key(self.cl, {}), (200, {"ok": True, "balance": 12.34}))
+        status, result = cloud_api.test_key(self.cl, {})
+        self.assertEqual(status, 200)
+        self.assertEqual((result["ok"], result["balance"], result["provider"]), (True, 12.34, "vast"))
         self.assertEqual(cloud_api.test_key(self.cl, {"vast_api_key": "typed-but-unsaved-key-123"})[1]["ok"], True)
         self.assertEqual(self.settings.get("vast_api_key"), KEY)        # testing does not save
 
@@ -91,12 +93,12 @@ class OffersApiTest(cf.CloudCase):
         self.assertEqual((status, payload["code"]), (409, "no_key"))
         self.assertEqual(self.vast.calls, [])
 
-    def test_lists_offers_with_an_optional_cost(self):
-        status, payload = cloud_api.offers(self.cl, {"hours": "2"})
+    def test_lists_the_market_with_compatibility_marks(self):
+        status, payload = cloud_api.offers(self.cl, {})
         self.assertEqual(status, 200)
-        self.assertEqual(payload["offers"][0]["gpu"], "RTX 4090")
-        self.assertEqual(payload["offers"][0]["cost"], round(payload["offers"][0]["price"] * 2, 2))
-        self.assertEqual(payload["max_price"], 1.0)
+        self.assertEqual({o["gpu"] for o in payload["offers"]} <= {"RTX 4090", "RTX 3090", "RTX 5090"}, True)
+        self.assertTrue(all(o["compatible"] is True for o in payload["offers"]))
+        self.assertEqual(payload["filters"]["max_price"], 1.0)
         self.assertNotIn(KEY, json.dumps(payload))
 
     def test_a_search_failure_is_a_502(self):
@@ -198,7 +200,7 @@ class AdmitTest(cf.CloudCase):
         self.assertIn("quote", payload)
 
     def test_refused_when_month_to_date_plus_the_estimate_is_over_the_cap(self):
-        self.cl.ledger.append({"ended": cloud_vast._iso(self.clock.time()), "usd": 9.80, "status": "ok"})
+        self.cl.ledger.append({"ended": hireling.util.iso(self.clock.time()), "usd": 9.80, "status": "ok"})
         status, payload = self.admit()
         self.assertEqual((status, payload["code"]), (409, "over_month_cap"))
 
@@ -251,8 +253,8 @@ class ServerRoutesTest(cf.CloudCase):
                         mock.patch.object(server, "stash_gql", self.fake_gql)):
             patcher.start()
             self.addCleanup(patcher.stop)
-        cloud_vast.set_cloud(self.cl)
-        self.addCleanup(cloud_vast.set_cloud, None)
+        cj.set_cloud(self.cl)
+        self.addCleanup(cj.set_cloud, None)
         self.gql_scene = stash_scene("5")
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.port = self.httpd.server_address[1]
@@ -328,7 +330,8 @@ class ServerRoutesTest(cf.CloudCase):
         self.assertEqual(mode, 0o600)
 
     def test_test_key_button(self):
-        self.assertEqual(self.call("POST", "/api/cloud/test", {}), (200, {"ok": True, "balance": 12.34}))
+        status, result = self.call("POST", "/api/cloud/test", {})
+        self.assertEqual((status, result["ok"], result["balance"]), (200, True, 12.34))
 
     # -- the paid job ------------------------------------------------------------ #
 
@@ -387,7 +390,7 @@ class ServerRoutesTest(cf.CloudCase):
 
     def test_refused_over_the_monthly_cap(self):
         est = self.quote()["est_usd"]
-        self.cl.ledger.append({"ended": cloud_vast._iso(self.clock.time()), "usd": 9.80, "status": "ok"})
+        self.cl.ledger.append({"ended": hireling.util.iso(self.clock.time()), "usd": 9.80, "status": "ok"})
         status, body = self.submit(confirm_usd=est)
         self.assertEqual((status, body["code"]), (409, "over_month_cap"))
         self.assertNothingQueuedOrRented()

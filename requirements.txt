@@ -1,1 +1,3 @@
 stashapp-tools>=0.2.50
+# GPU rental core for cloud Jasna, pinned to a release tag (installed from the tag's tarball: no git needed).
+hireling @ https://github.com/nphil/hireling/archive/refs/tags/v0.1.0.tar.gz
