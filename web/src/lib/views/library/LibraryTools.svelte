@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { focusLayer } from '../../ui/actions';
+  import { focusLayer, lightDismiss } from '../../ui/actions';
   import Icon from '../../ui/Icon.svelte';
   import Seg from '../../ui/Seg.svelte';
   import { selection } from '../../stores/selection.svelte';
@@ -38,6 +38,7 @@
   const allOn = $derived(items.length > 0 && items.every((s) => selection.has(s.id)));
   const selectLabel = $derived(`Select all ${items.length.toLocaleString()}${model.hasMore ? ' loaded' : ''}`);
 
+  const closeMenu = (): void => { ui.menu = null; };
   const toggle = (id: string): void => { ui.menu = ui.menu === id ? null : id; };
 
   function pickSort(v: SortId): void {
@@ -52,16 +53,10 @@
     model.setMinRes(v);
     ui.menu = null;
   }
-  /* a press outside the tools row closes the open menu (Escape is handled by ui.back) */
-  function away(e: PointerEvent): void {
-    if (ui.menu?.startsWith('lib:') && !(e.target instanceof Node && root.contains(e.target))) ui.menu = null;
-  }
   function onSearchKey(e: KeyboardEvent): void {
     if (e.key === 'Enter') model.flushQ();
   }
 </script>
-
-<svelte:window onpointerdown={away} />
 
 <div class="lib-tools" bind:this={root}>
   <label class="field grow">
@@ -75,7 +70,7 @@
       <Icon name="sort" />{sort.chip[model.prefs.dir]}<Icon name="chevD" small />
     </button>
     {#if ui.menu === SORT}
-      <div class="lib-menu pop enter" role="group" aria-label="Sort scenes" use:focusLayer>
+      <div class="lib-menu pop enter" role="group" aria-label="Sort scenes" use:focusLayer use:lightDismiss={closeMenu}>
         <Choice options={SORTS} value={model.prefs.sort} label="Sort by" onpick={pickSort} />
         {#if model.prefs.sort !== 'random'}
           <div class="dir"><Seg options={dirOptions} value={model.prefs.dir} label="Direction" onchange={pickDir} /></div>
@@ -89,7 +84,7 @@
       <Icon name="film" />{size.chip}<Icon name="chevD" small />
     </button>
     {#if ui.menu === SIZE}
-      <div class="lib-menu pop enter" role="group" aria-label="Minimum size" use:focusLayer>
+      <div class="lib-menu pop enter" role="group" aria-label="Minimum size" use:focusLayer use:lightDismiss={closeMenu}>
         <Choice options={SIZES} value={model.prefs.minRes} label="Minimum size" onpick={pickSize} />
       </div>
     {/if}

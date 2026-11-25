@@ -5,7 +5,7 @@
   import { startRun } from '../../run';
   import Icon from '../../ui/Icon.svelte';
   import Skeleton from '../../ui/Skeleton.svelte';
-  import { focusLayer, trayHeight } from '../../ui/actions';
+  import { focusLayer, lightDismiss, trayHeight } from '../../ui/actions';
   import { cloud } from '../../stores/cloud.svelte';
   import { jobs } from '../../stores/jobs.svelte';
   import { nav } from '../../stores/nav.svelte';
@@ -100,7 +100,7 @@
             <Icon name="sliders" /><span class="tl">{chip}</span><Icon name="chevD" small />
           </button>
           {#if open === 'settings'}
-            <div class="tpop pop sheet enter" role="dialog" aria-label="Settings" use:focusLayer>
+            <div class="tpop pop sheet enter" role="dialog" aria-label="Settings" use:focusLayer use:lightDismiss={() => ui.back()}>
               <div class="fgrp"><span class="h">What</span><OpList /></div>
               <div class="fgrp"><span class="h">Quality</span><QualityList /></div>
               <div class="fgrp"><span class="h">Where</span><WhereList /></div>
@@ -130,7 +130,7 @@
             <Icon name={OPS[options.op].icon} /><span class="tl">{OPS[options.op].name}</span><Icon name="chevD" small />
           </button>
           {#if open === 'op'}
-            <div class="tpop pop enter" role="dialog" aria-label="What to do" use:focusLayer><OpList /></div>
+            <div class="tpop pop enter" role="dialog" aria-label="What to do" use:focusLayer use:lightDismiss={() => ui.back()}><OpList /></div>
           {/if}
         </div>
         <div class="twrap">
@@ -138,7 +138,7 @@
             <Icon name="sliders" /><span class="tl">{qualityLabel(options.op)}</span><Icon name="chevD" small />
           </button>
           {#if open === 'quality'}
-            <div class="tpop pop enter" role="dialog" aria-label="Quality" use:focusLayer><QualityList /></div>
+            <div class="tpop pop enter" role="dialog" aria-label="Quality" use:focusLayer use:lightDismiss={() => ui.back()}><QualityList /></div>
           {/if}
         </div>
         <div class="twrap">
@@ -146,7 +146,7 @@
             <Icon name={plan.whereIcon} /><span class="tl">{plan.whereLabel}</span><Icon name="chevD" small />
           </button>
           {#if open === 'where'}
-            <div class="tpop pop end enter" role="dialog" aria-label="Where to run" use:focusLayer><WhereList /></div>
+            <div class="tpop pop end enter" role="dialog" aria-label="Where to run" use:focusLayer use:lightDismiss={() => ui.back()}><WhereList /></div>
           {/if}
         </div>
         {@render runButton()}

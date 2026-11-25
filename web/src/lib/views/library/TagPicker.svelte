@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { focusLayer } from '../../ui/actions';
+  import { focusLayer, lightDismiss } from '../../ui/actions';
   import Icon from '../../ui/Icon.svelte';
   import { ui } from '../../stores/ui.svelte';
   import Choice from './Choice.svelte';
@@ -51,7 +51,7 @@
     <Icon name="tag" />{model.prefs.tag?.name ?? 'All tags'}<Icon name="chevD" small />
   </button>
   {#if open}
-    <div class="lib-menu pop enter" role="group" aria-label="Filter by tag" bind:this={menu} use:focusLayer={{ initial: 'input' }}>
+    <div class="lib-menu pop enter" role="group" aria-label="Filter by tag" bind:this={menu} use:focusLayer={{ initial: 'input' }} use:lightDismiss={() => (ui.menu = null)}>
       <label class="field"><Icon name="search" /><input type="search" placeholder="Search tags" aria-label="Search tags" autocomplete="off" bind:value={tq} onkeydown={key} /></label>
       {#if !searching}<div class="hd">Most used</div>{/if}
       {#if searching && !shown.length}

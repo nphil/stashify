@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from '../ui/Icon.svelte';
   import Switch from '../ui/Switch.svelte';
-  import { focusLayer } from '../ui/actions';
+  import { focusLayer, lightDismiss } from '../ui/actions';
   import { theme, themeById } from '../stores/theme.svelte';
   import { ui } from '../stores/ui.svelte';
   import { THEMES, type ThemeMeta } from './themes.generated';
@@ -32,12 +32,6 @@
     ui.menu = null;
     q = '';
     if (refocus) visibleTrigger()?.focus({ preventScroll: true });
-  }
-  function outside(e: PointerEvent): void {
-    if (!open) return;
-    const t = e.target;
-    if (t instanceof Element && (pop?.contains(t) || t.closest('[data-theme-trigger]'))) return;
-    close(false);
   }
   function popKey(e: KeyboardEvent): void {
     if (e.key === 'Escape') { e.stopPropagation(); if (q) q = ''; else close(); }
@@ -72,15 +66,13 @@
   const lightName = $derived(themeById.get(theme.pref.light)?.name ?? '');
 </script>
 
-<svelte:window onpointerdown={outside} />
-
 <div class="thm">
   <button type="button" class="iconbtn" data-theme-trigger aria-label="Theme" aria-haspopup="dialog" aria-expanded={open}
     aria-controls={`${uid}-pop`} onclick={() => (open ? close() : ((q = ''), (ui.menu = 'theme')))}><Icon name="swatch" /></button>
 
   {#if open}
     <button type="button" class="thm-scrim" tabindex="-1" aria-hidden="true" onclick={() => close()}></button>
-    <div class="thm-pop pop enter" id={`${uid}-pop`} role="dialog" tabindex="-1" aria-label="Theme" bind:this={pop} onkeydown={popKey} use:focusLayer={{ initial: 'input' }}>
+    <div class="thm-pop pop enter" id={`${uid}-pop`} role="dialog" tabindex="-1" aria-label="Theme" bind:this={pop} onkeydown={popKey} use:focusLayer={{ initial: 'input' }} use:lightDismiss={() => close(false)}>
       <label class="field">
         <Icon name="search" />
         <input type="search" placeholder="Search themes" aria-label="Search themes" autocomplete="off" bind:value={q} />

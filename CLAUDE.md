@@ -66,6 +66,8 @@ ShipLog facts (learned 2026-08-14 by reading its source):
   Rows, text and controls sit inside that inset and never touch the card edge;
   separators may run full width, content may not. New card = use the token, not
   a literal. Check every new card at 390 and 1440 wide before shipping.
+- **Popups light-dismiss:** every menu/popover/sheet closes on an outside click/tap and on Escape via the shared
+  `lightDismiss` action (`web/src/lib/ui/actions.ts`) + `ui.back()`; the dismissing click is swallowed. Never hand-roll one.
 - **Text never clips:** text containers (chips, pills, buttons, tokens) grow with their
   content: `min-height`, never a fixed size + `overflow: hidden`. An ellipsis box gets
   `text-overflow` and vertical room for descenders (see `.ell`, base.css), and sits in a

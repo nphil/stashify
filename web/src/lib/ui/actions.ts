@@ -49,3 +49,28 @@ export function trayHeight(node: HTMLElement) {
     },
   };
 }
+
+/** The ONE light-dismiss for every popup (menus, popovers, sheets; not dialogs holding unsaved input): a press outside the
+ *  popup closes it via `close`, and that press's click is swallowed so it cannot also activate what is underneath.
+ *  The open trigger (`[aria-haspopup][aria-expanded="true"]`) is left alone so its own click toggles cleanly; another popup's
+ *  trigger closes this one but still gets its click. Escape is handled once, globally, by `ui.back()`. */
+export function lightDismiss(node: HTMLElement, close: () => void) {
+  let fn = close;
+  const onDown = (e: PointerEvent): void => {
+    const t = e.target;
+    if (!(t instanceof Element) || node.contains(t)) return;
+    const trigger = t.closest('[aria-haspopup]');
+    if (trigger?.getAttribute('aria-expanded') === 'true') return;
+    fn();
+    if (trigger) return;
+    const eat = (c: Event): void => { c.stopPropagation(); c.preventDefault(); stop(); };
+    const stop = (): void => { window.removeEventListener('click', eat, true); clearTimeout(timer); };
+    const timer = setTimeout(stop, 700);
+    window.addEventListener('click', eat, true);
+  };
+  document.addEventListener('pointerdown', onDown, true);
+  return {
+    update(next: () => void) { fn = next; },
+    destroy() { document.removeEventListener('pointerdown', onDown, true); },
+  };
+}

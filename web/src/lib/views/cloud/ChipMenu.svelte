@@ -5,7 +5,7 @@
 <script lang="ts">
   /* A filter chip that opens a small menu of choices. Which menu is open lives in `ui.menu`, so Escape, the scrim and the mock states agree. */
   import { ui } from '../../stores/ui.svelte';
-  import { focusLayer } from '../../ui/actions';
+  import { focusLayer, lightDismiss } from '../../ui/actions';
   import Icon from '../../ui/Icon.svelte';
   import type { IconName } from '../../ui/icons';
 
@@ -24,16 +24,6 @@
 
   const open = $derived(ui.menu === id);
   let wrap: HTMLDivElement;
-
-  /* a press anywhere else closes it */
-  $effect(() => {
-    if (!open) return;
-    const away = (e: PointerEvent): void => {
-      if (!(e.target instanceof Node) || !wrap.contains(e.target)) ui.menu = null;
-    };
-    document.addEventListener('pointerdown', away, true);
-    return () => document.removeEventListener('pointerdown', away, true);
-  });
 
   function pick(it: MenuItem): void {
     if (it.disabled) return;
@@ -63,7 +53,7 @@
     <Icon name={icon} small />{label}<Icon name="chevD" small />
   </button>
   {#if open}
-    <div class={['menu', 'pop', 'enter', end && 'r']} role="menu" aria-label={label} tabindex="-1" use:focusLayer={{ trap: false }} onkeydown={keys}>
+    <div class={['menu', 'pop', 'enter', end && 'r']} role="menu" aria-label={label} tabindex="-1" use:focusLayer={{ trap: false }} use:lightDismiss={() => (ui.menu = null)} onkeydown={keys}>
       {#each items as it (it.value)}
         {#if it.group}<div class="hd" role="presentation">{it.group}</div>{/if}
         <button type="button" class="opt" role="menuitemradio" aria-checked={it.checked} aria-disabled={it.disabled || undefined} tabindex="-1" onclick={() => pick(it)}>
