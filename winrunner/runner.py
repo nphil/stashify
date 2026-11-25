@@ -239,6 +239,10 @@ _RE_FPS = re.compile(r"([\d.]+)\s*f/s", re.IGNORECASE)
 _RE_SPEED = re.compile(r"(\d+\.?\d*)x(?!\d)")
 _RE_PCT = re.compile(r"(\d{1,3})\s*%\s*\|")   # tqdm-bar percent only, not an incidental "GPU 27%"
 _PROGRESS_PREFIX = re.compile(r"^\s*(upscaling|transcode|decensor|processing)", re.IGNORECASE)
+_RE_LTX_STEP = re.compile(r"LTX step (\d+) of (\d+)(?:\s*\((\w+)\))?", re.IGNORECASE)
+# what a progress line's prefix means in plain words (the dashboard's status title)
+_PHASE_BY_PREFIX = {"upscaling": "Upscaling", "transcode": "Converting", "decensor": "Restoring mosaics",
+                    "processing": "Processing"}
 
 
 def parse_progress(line):
@@ -251,6 +255,16 @@ def parse_progress(line):
     pm = _RE_PCT.search(line)
     if pm:
         f["progress"] = round(min(100, int(pm.group(1))) / 100.0, 3)
+        # a determinate line says what is running; step/steps/detail are cleared when it is not LTX
+        pre = _PROGRESS_PREFIX.match(line)
+        f["phase"] = _PHASE_BY_PREFIX[pre.group(1).lower()] if pre else "Processing"
+        f["step"] = f["steps"] = f["detail"] = None
+        f["estimate"] = False
+        lt = _RE_LTX_STEP.search(line)
+        if lt:
+            f["phase"] = "Restoring in high detail"
+            f["step"], f["steps"], f["detail"] = int(lt.group(1)), int(lt.group(2)), lt.group(3)
+            f["estimate"] = True          # LTX progress is the clock against jasna's own "left"
     lf = _RE_FRAME.search(line)
     if lf:
         f["frame"] = int(lf.group(1))
@@ -280,17 +294,18 @@ def parse_progress(line):
 # one-time TensorRT compile, model/engine load, final mux - animates with a meaningful
 # label instead of sitting frozen at 0%. Determinate phases (frames flowing) clear it.
 _RE_HEARTBEAT = re.compile(r"no tqdm\]:\s*(.+?)(?:\s+-\s|$)", re.IGNORECASE)
+# (pattern, message, indeterminate or None, phase or None). A phase of None leaves the phase alone,
+# so a milestone line that interleaves with the tqdm bar cannot flicker the title.
 _NARRATION = [
     (re.compile(r"compiling (tensorrt|sub-engine)", re.I),   # a REAL first-run compile (rare)
-     ("Compiling TensorRT engines (first run only — this won't repeat)", True)),
-    (re.compile(r"muxing|remux", re.I), ("Muxing final output (audio + metadata)", True)),
+     "Compiling TensorRT engines (first run only — this won't repeat)", True, "Compiling engines (first run only)"),
+    (re.compile(r"muxing|remux", re.I), "Muxing final output (audio + metadata)", True, "Finishing the video"),
     (re.compile(r"loading (cached )?(tensorrt|models|engines)|using trt", re.I),
-     ("Loading models & engines", True)),
-    (re.compile(r"restoring mosaic clip", re.I), ("Restoring mosaics", None)),   # runs with tqdm; msg only
-    (re.compile(r"smart mode - restoring", re.I), ("Restoring mosaic segments", None)),
-    (re.compile(r"scanning for mosaic", re.I), ("Scanning for mosaics", True)),
-    (re.compile(r"upscaling decensored", re.I), ("Upscaling decensored output", None)),
-    (re.compile(r"LTX step \d of \d", re.I), ("Restoring in high detail (LTX)", None)),
+     "Loading models & engines", True, "Loading models"),
+    (re.compile(r"restoring mosaic clip", re.I), "Restoring mosaics", None, None),   # runs with tqdm; msg only
+    (re.compile(r"smart mode - restoring", re.I), "Restoring mosaic segments", None, None),
+    (re.compile(r"scanning for mosaic", re.I), "Scanning for mosaics", True, "Scanning for mosaics"),
+    (re.compile(r"upscaling decensored", re.I), "Upscaling decensored output", None, None),
 ]
 
 
@@ -313,18 +328,37 @@ def _heartbeat_msg(phase):
     return "Working"
 
 
+def _heartbeat_phase(phase):
+    p = (phase or "").lower()
+    if "compil" in p:
+        return "Compiling engines (first run only)"
+    if "load" in p:
+        return "Loading models"
+    if any(w in p for w in ("mux", "assembl", "encod")):
+        return "Finishing the video"
+    return None                                  # restoring / unknown: the progress lines own the title
+
+
 def parse_narration(line):
-    """A no-% subprocess line that names the current phase -> {message[, indeterminate]}.
+    """A no-% subprocess line that names the current phase -> {message[, indeterminate, phase]}.
     The jasna heartbeat (fires only after real silence) is ALWAYS indeterminate; milestone
     lines that interleave with tqdm set the message only so the bar doesn't flicker. {} = ignore."""
     hb = _RE_HEARTBEAT.search(line)
     if hb:
-        return {"message": _heartbeat_msg(hb.group(1)), "indeterminate": True}
-    for rx, (msg, indet) in _NARRATION:
+        f = {"message": _heartbeat_msg(hb.group(1)), "indeterminate": True}
+        ph = _heartbeat_phase(hb.group(1))
+        if ph:
+            f["phase"] = ph
+            m = re.search(r"(\d{1,3})\s*%", hb.group(1))
+            f["detail"] = (m.group(1) + "%") if m else None
+        return f
+    for rx, msg, indet, phase in _NARRATION:
         if rx.search(line):
             f = {"message": msg}
             if indet is not None:
                 f["indeterminate"] = indet
+            if phase:
+                f["phase"] = phase
             return f
     return {}
 
@@ -382,6 +416,15 @@ def set_job(jid, **f):
         j = _jobs.get(jid)
         if j:
             j.update(f)
+            j["_active"] = time.time()
+
+
+def touch(jid):
+    """The job's process just produced output: it is alive, whether or not the status changed."""
+    with _jobs_lock:
+        j = _jobs.get(jid)
+        if j:
+            j["_active"] = time.time()
 
 
 def public(job):
@@ -390,6 +433,8 @@ def public(job):
     if sa:
         out["elapsed"] = int((job.get("_ended_at") or time.time()) - sa)
     out["log_cursor"] = log_cursor(job["id"])
+    if job.get("state") == "running" and job.get("_active") and not job.get("paused"):
+        out["idle_s"] = max(0, int(time.time() - job["_active"]))   # silence, not a clock: no skew with the coordinator
     return out
 
 
@@ -613,11 +658,17 @@ def resolve_lane_encoder(lane):
 # the ops
 # --------------------------------------------------------------------------- #
 
+# a new pass starts clean: nothing measured by the previous one may show as this one's speed or time left
+_PASS_RESET = {"step": None, "steps": None, "detail": None, "estimate": False,
+               "eta": None, "fps": None, "frame": None, "total_frames": None}
+
+
 def _stream_subprocess(lane, jid, argv, scale=None):
     """Run a CLI, streaming lada-style progress into the job. A watchdog kills a
     stalled subprocess (no output for STALL_SECS) so a dead SMB mount can't wedge
     the lane forever. scale=(phase_idx, n_phases) maps this CLI's 0-100% into its
-    slice of the whole job so a decensor+upscale chain doesn't bounce back to 0."""
+    slice of the whole job so a decensor+upscale chain doesn't bounce back to 0 (an older
+    coordinator shows that; a newer one re-weights the passes by time from pass_progress)."""
     push_log(jid, "$ " + subprocess.list2cmdline(argv), "event")
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, encoding="utf-8", errors="replace", bufsize=1,
@@ -641,12 +692,14 @@ def _stream_subprocess(lane, jid, argv, scale=None):
     try:
         for line in proc.stdout:
             last["t"] = time.time()
+            touch(jid)
             line = line.rstrip("\n")
             push_log(jid, line, "proc")
             f = parse_progress(line)
             if f.get("progress") is not None:
                 if scale:
                     idx, n = scale
+                    f["pass_progress"] = f["progress"]       # this pass alone; the coordinator weights passes by time
                     f["progress"] = round((idx + f["progress"]) / n, 3)
                 f["indeterminate"] = False        # real % -> solid, moving bar
                 set_job(jid, **f)
@@ -710,7 +763,8 @@ def _purge(path, tries=8, delay=0.5):
         pass
 
 
-def _copy_with_progress(jid, src, dst, label="Copying source local", stage="copy", hold=None):
+def _copy_with_progress(jid, src, dst, label="Copying source local", stage="copy", hold=None,
+                        phase="Copying video to the PC"):
     """Chunked copy that drives the job's progress bar + status, so a multi-GB
     copy over a slow link isn't a frozen-looking wait.
 
@@ -724,7 +778,8 @@ def _copy_with_progress(jid, src, dst, label="Copying source local", stage="copy
     last = 0.0
 
     def _set(pct, done=False):
-        set_job(jid, stage=stage, indeterminate=False,
+        set_job(jid, stage=stage, indeterminate=False, phase=phase, step=None, steps=None, estimate=False,
+                detail=None if done or not total else "%.1f of %.1f GB" % (copied / (1 << 30), gb),
                 progress=(hold if hold is not None else (1.0 if done else round(pct, 3))),
                 message=("%s - done" % label) if done else
                         ("%s - %d%% (%.1f / %.1f GB)" % (label, int(pct * 100),
@@ -758,7 +813,7 @@ def run_job(lane, job):
     os.makedirs(out_dir, exist_ok=True)
 
     set_job(jid, state="running", message="Preparing " + op, started_at=time.time(),
-            stage=op, indeterminate=True)
+            stage=op, indeterminate=True, phase="Preparing", pass_no=1, passes=2 if op == "decensor+upscale" else 1)
 
     tmp_copy = None
     mid_dir = None
@@ -806,7 +861,8 @@ def run_job(lane, job):
                 argv.append("--no-trt")
             # a preceding copy-local left stage=copy/progress=1.0; reset for the upscale
             # phase so its silent SPAN-model load animates instead of freezing at the copy band
-            set_job(jid, stage=op, progress=0.0, indeterminate=True, message="Loading upscale model")
+            set_job(jid, stage=op, progress=0.0, indeterminate=True, message="Loading upscale model",
+                    phase="Loading the upscaler", **_PASS_RESET)
             rc, cancelled = _stream_subprocess(lane, jid, argv)
         elif op in ("decensor", "decensor+upscale"):
             if not decensor_available():
@@ -932,7 +988,8 @@ def run_job(lane, job):
             # subprocess is silent while it loads/compiles engines, so show an animated
             # "loading" state until the first tqdm frame refines the message + bar.
             set_job(jid, stage=op, progress=0.0, indeterminate=True,
-                    message="Loading models & engines")
+                    message="Loading models & engines", phase="Loading models",
+                    pass_no=1, passes=n_phases, pass_progress=0.0, **_PASS_RESET)
             rc, cancelled = _stream_subprocess(lane, jid, argv, scale=(0, n_phases))
             seg_stop.set()
             if _seg is not None and rc == 0 and not cancelled:
@@ -940,7 +997,8 @@ def run_job(lane, job):
                 # smooth "decensored portions only" sample clip for review
                 if _seg_thread:
                     _seg_thread.join(timeout=45)
-                set_job(jid, message="Building decensored sample", indeterminate=True)
+                set_job(jid, message="Building decensored sample", indeterminate=True,
+                        phase="Building the preview sample", step=None, steps=None, detail=None)
                 if _seg.build_sample():
                     set_job(jid, sample=True)
             if chain and rc == 0 and not cancelled:
@@ -950,7 +1008,8 @@ def run_job(lane, job):
                     push_log(jid, "chain: decensor produced no output", "error")
                 else:
                     set_job(jid, stage="upscale", message="Upscaling decensored output",
-                            indeterminate=True)
+                            indeterminate=True, phase="Loading the upscaler", pass_no=2, passes=n_phases,
+                            pass_progress=0.0, **_PASS_RESET)
                     push_log(jid, "chain: upscaling decensored output", "event")
                     enc = o.get("encoder") or resolve_lane_encoder("ai")
                     argv = [CFG["venv_python"], os.path.join(HERE, "upscale_cli.py"),
@@ -978,7 +1037,8 @@ def run_job(lane, job):
                              % (os.path.getsize(produced_local) / (1 << 30)), "event")
                     try:
                         _copy_with_progress(jid, produced_local, tmp_dest,
-                                            label="Copying result to NAS", stage=op, hold=1.0)
+                                            label="Copying result to NAS", stage=op, hold=1.0,
+                                            phase="Saving result")
                         os.replace(tmp_dest, dest)
                     except OSError as exc:
                         rc = 1
@@ -1009,7 +1069,8 @@ def run_job(lane, job):
         set_job(jid, state="error", message="no output produced", indeterminate=False,
                 error="no output produced", _ended_at=time.time())
         return
-    set_job(jid, state="done", progress=1.0, message="Done", indeterminate=False,
+    set_job(jid, state="done", progress=1.0, message="Done", indeterminate=False, phase="Done",
+            step=None, steps=None, detail=None, eta=0,
             output_path=to_container(produced), _ended_at=time.time())
     push_log(jid, "Done -> " + to_container(produced), "event")
 
@@ -1130,7 +1191,8 @@ def _scan_mosaics(jid, src):
             "--stride-seconds", str(CFG.get("jasna_preview_stride", 0.75))]
     push_log(jid, "preview: scanning for mosaic segments...", "event")
     set_job(jid, stage="scan", progress=0.0, indeterminate=True,
-            message="Scanning for mosaic segments")
+            message="Scanning for mosaic segments", phase="Scanning for mosaics",
+            step=None, steps=None, detail=None, estimate=False)
     data = None
     # stream live so the (multi-minute) scan shows progress instead of a silent wait
     try:
@@ -1150,7 +1212,8 @@ def _scan_mosaics(jid, src):
             m = re.match(r"scan-progress:\s*(\d+)%", line)
             if m:
                 set_job(jid, stage="scan", progress=round(int(m.group(1)) / 100.0, 3),
-                        indeterminate=False, message="Scanning for mosaics %s%%" % m.group(1))
+                        indeterminate=False, message="Scanning for mosaics %s%%" % m.group(1),
+                        phase="Scanning for mosaics", detail="%s%%" % m.group(1))
             else:
                 push_log(jid, line, "proc")
         proc.wait()

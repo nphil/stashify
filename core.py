@@ -23,6 +23,8 @@ import threading
 import subprocess
 from urllib.parse import urlparse
 
+import jobprogress
+
 
 # --------------------------------------------------------------------------- #
 # logging (injectable)
@@ -524,45 +526,19 @@ def preview_route(cfg, op):
         return {"error": str(exc)}
 
 
-# Coordinator progress bands. The runner reports per-phase progress (each phase runs
-# 0->1), so we map its phases into monotonic sub-slices of the whole bar — the bar only
-# ever moves forward, never resets between copy -> scan -> the main GPU op.
-_STAGE_BANDS = {"copy": (0.0, 0.06), "scan": (0.06, 0.12)}
-_MAIN_BAND = (0.12, 1.0)   # decensor / upscale / transcode / chain fill the rest
+def _poll_json(url, headers, timeout=(4, 20), retry_delay=0.25):
+    """GET a runner job URL as JSON. One quick retry on a connection-level failure, the same as the
+    health probe: the network drops a share of TCP connects to a healthy PC, and one dropped connect
+    is no news. Raises the last error."""
+    import requests
 
-
-def _map_runner_status(jb, lo, hi):
-    """Map the runner job dict (jb) into a coordinator (frac, message, stats) so the
-    dashboard faithfully mirrors the runner's live phase/progress/message instead of
-    re-guessing from log lines. frac is placed in a monotonic sub-band of [lo,hi]."""
-    span = hi - lo
-    stage = jb.get("stage") or ""
-    a, b = _STAGE_BANDS.get(stage, _MAIN_BAND)
-    prog = jb.get("progress")
-    if not isinstance(prog, (int, float)):
-        # a runner that reports frame/total but not a 0-1 progress (e.g. lada)
-        fr, tot = jb.get("frame"), jb.get("total_frames")
-        prog = (fr / tot) if (fr and tot) else 0.0
-    prog = min(1.0, max(0.0, prog))
-    frac = lo + span * (a + (b - a) * prog)
-    stats = {
-        "stage": stage or None,
-        "frame": jb.get("frame"),
-        "total_frames": jb.get("total_frames"),
-        "fps": jb.get("fps"),
-        "eta": jb.get("eta"),
-    }
-    # Indeterminate handling. A runner that sends the flag (Windows/jasna) is authoritative.
-    # A runner that DOESN'T (lada) would otherwise leave the coordinator's seeded True stuck
-    # on forever, so once it reports real numeric progress we assert determinate; before any
-    # progress we leave it unset so the dashboard's "active + no number" heuristic animates
-    # its silent load.
-    has_num = prog > 0 or bool(jb.get("frame") and jb.get("total_frames"))
-    if jb.get("indeterminate") is not None:
-        stats["indeterminate"] = bool(jb.get("indeterminate"))
-    elif has_num:
-        stats["indeterminate"] = False
-    return frac, jb.get("message"), stats
+    for attempt in (0, 1):
+        try:
+            return requests.get(url, headers=headers, timeout=timeout).json()
+        except (requests.ConnectionError, requests.Timeout):
+            if attempt:
+                raise
+            time.sleep(retry_delay)
 
 
 def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None, status_cb=None):
@@ -645,17 +621,21 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None,
     set_live_preview(type="runner", out_dir=sub, input=input_path,
                      rid=rid, base=base, token=token)
     cursor = 0
+    failures = 0                      # polls in a row that failed even after the quick retry
     try:
         while True:
             check_cancel()
             try:
-                jb = requests.get(f"{base}/jobs/{rid}", headers=headers, timeout=20).json()
-            except Exception as exc:  # noqa: BLE001 - transient; keep polling
-                log.warning(f"Lada poll error: {exc}")
+                jb = _poll_json(f"{base}/jobs/{rid}", headers)
+            except Exception as exc:  # noqa: BLE001 - transient: the job's state is not touched, keep polling
+                failures += 1
+                if failures == 3 or failures % 15 == 0:
+                    log.warning(f"Runner poll failing ({failures} in a row): {exc}")
                 time.sleep(2)
                 continue
+            failures = 0
             try:
-                lg = requests.get(f"{base}/jobs/{rid}/log?after={cursor}", headers=headers, timeout=20).json()
+                lg = _poll_json(f"{base}/jobs/{rid}/log?after={cursor}", headers)
                 for ln in lg.get("lines", []):
                     text = ln.get("text", "")
                     # When we mirror the runner's structured status directly (status_cb),
@@ -1185,8 +1165,10 @@ def process_to_review(stash, cfg, scene_id, progress=None, log_cb=None):
         # the coordinator job, mapped into the 0.0-0.97 band, so the dashboard never sits
         # frozen at "Running <op>" 0% during the long pre-frame phases. The last 3% is
         # reserved for the Stash import/scan finalize below.
+        tracker = jobprogress.Tracker(0.0, 0.97)
+
         def status_cb(jb):
-            frac, msg, stats = _map_runner_status(jb, 0.0, 0.97)
+            frac, msg, stats = tracker.update(jb)
             p(frac, msg, stats)
 
         # on_line=_band(...) stays as the fallback for raw-log runners without status.

@@ -331,7 +331,17 @@ _job_log_seq = {}               # job_id -> last sequence number
 _job_logs_lock = threading.Lock()
 
 
+_RE_BAR_LINE = re.compile(r"\d{1,3}\s*%\s*\|")     # a tqdm / lada progress bar line
+
+
+def is_progress_line(text):
+    return bool(_RE_BAR_LINE.search(text))
+
+
 def push_log(job_id, text, level="proc"):
+    """Append a line to a job's live log. A progress-bar line REPLACES the previous one when that
+    was also a bar (a two-hour job is one live line, not thousands, and the events before it are
+    not pushed out of the buffer); the entry is flagged `live` so the dashboard pins it."""
     if not job_id or text is None:
         return
     text = str(text).strip()
@@ -345,7 +355,12 @@ def push_log(job_id, text, level="proc"):
             dq = _job_logs[job_id] = deque(maxlen=LOG_MAX)
         seq = _job_log_seq.get(job_id, 0) + 1
         _job_log_seq[job_id] = seq
-        dq.append({"seq": seq, "t": round(time.time(), 3), "level": level, "text": text})
+        row = {"seq": seq, "t": round(time.time(), 3), "level": level, "text": text}
+        if level == "proc" and is_progress_line(text):
+            row["live"] = True
+            if dq and dq[-1].get("live"):
+                dq.pop()
+        dq.append(row)
 
 
 def job_log_cursor(job_id):
@@ -788,6 +803,14 @@ def new_job(scene_id, overrides, cloud=None, title=None):
         "total_frames": None,
         "fps": None,
         "eta": None,
+        "phase": None,
+        "step": None,
+        "steps": None,
+        "detail": None,
+        "pass_no": None,
+        "passes": None,
+        "estimate": False,
+        "updated_at": None,
         "paused": False,
         "started_at": None,
         "created": time.time(),
@@ -834,6 +857,10 @@ def public(job):
         with _gpu_lock:
             g = dict(_gpu)
     out["gpu_stats"] = g or {}
+    ua = job.get("updated_at")
+    if ua and job.get("state") == "running" and not job.get("paused") and not job.get("cloud") \
+            and job.get("stage") != "import":
+        out["idle_s"] = max(0, int(time.time() - ua))   # how long since the job last gave a sign of life
     out["log_cursor"] = job_log_cursor(job.get("id"))
     out["preview"] = preview_file(job.get("id"), "after") is not None
     out["segments"] = job_segments(job.get("id"))   # live mosaic-segment before/after clips
@@ -877,20 +904,33 @@ def set_job(job_id, **fields):
             job.update(fields)
 
 
+# What the card shows besides the number. Always set from a status (a None clears it), so a step or
+# time left never outlives the phase it belonged to.
+STATUS_KEYS = ("phase", "step", "steps", "detail", "pass_no", "passes", "estimate")
+
+
 def progress_cb(job_id):
-    last = {"msg": None}
+    last = {"msg": None, "frac": 0.0}
 
     def cb(frac, msg=None, stats=None):
-        fields = {"progress": round(float(frac), 3)}
+        last["frac"] = max(last["frac"], round(float(frac), 3))      # the bar never goes backwards
+        fields = {"progress": last["frac"]}
+        stats = stats or {}
         if msg:
             fields["message"] = msg
             if msg != last["msg"]:            # a new stage/step -> log it once
                 last["msg"] = msg
                 push_log(job_id, msg, "event")
-        if stats:
-            for k in ("stage", "frame", "total_frames", "fps", "eta", "indeterminate", "cloud_phase"):
-                if stats.get(k) is not None:
-                    fields[k] = stats[k]
+            if "phase" not in stats:          # the coordinator's own step: its message is already plain words
+                stats = dict(stats, phase=msg, step=None, steps=None, detail=None, pass_no=None, passes=None,
+                             estimate=False)
+        for k in ("stage", "frame", "total_frames", "fps", "eta", "indeterminate", "cloud_phase"):
+            if stats.get(k) is not None:
+                fields[k] = stats[k]
+        for k in STATUS_KEYS:
+            if k in stats:
+                fields[k] = stats[k]
+        fields["updated_at"] = stats.get("updated_at") or time.time()
         set_job(job_id, **fields)
     return cb
 
@@ -916,13 +956,15 @@ def do_process(job):
     cfg = job_config(job)
     set_job(job_id, state="running", message="Starting", started_at=time.time(),
             paused=False, stage=None, frame=None, total_frames=None, fps=None, eta=None,
-            indeterminate=True, backend=cfg.get("backend"))
+            indeterminate=True, backend=cfg.get("backend"), phase="Starting", step=None, steps=None,
+            detail=None, pass_no=None, passes=None, estimate=False, updated_at=time.time())
     stash = get_stash()
     info = core.process_to_review(stash, cfg, job["scene_id"],
                                   progress=progress_cb(job_id), log_cb=raw_log_sink(job_id))
     set_job(
         job_id, state="review_ready", progress=1.0, message="Preview ready to review",
-        indeterminate=False,
+        indeterminate=False, phase="Ready to review", step=None, steps=None, detail=None, eta=None,
+        pass_no=None, passes=None, estimate=False,
         review_scene_id=info.get("review_scene_id"), output_path=info.get("output_path"),
         result=info.get("result") or None, _info=info, _ended_at=time.time(),
     )

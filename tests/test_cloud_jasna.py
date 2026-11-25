@@ -22,6 +22,7 @@ from hireling import ssh             # noqa: E402
 from hireling.providers.vast import parse_offer   # noqa: E402
 import cloud_jasna as cj             # noqa: E402
 import core                          # noqa: E402
+import jobprogress                   # noqa: E402
 
 SCENE = {"id": "5", "title": "My Scene [1080p]", "duration": 600.0, "size": 50_000_000,
          "height": 1080, "width": 1920}
@@ -400,7 +401,7 @@ class LifecycleTest(JasnaCase):
 
     def test_progress_only_moves_forward_on_the_dashboard_bar(self):
         self.run_job()
-        fracs = [core._map_runner_status(jb, 0.0, 0.97)[0] for jb in self.status]
+        fracs = [jobprogress.Tracker(0.0, 0.97).update(jb)[0] for jb in self.status]   # one tracker each: no clamp, the raw mapping
         self.assertTrue(fracs)
         self.assertEqual(fracs, sorted(fracs), "the bar went backwards")
         self.assertLessEqual(max(fracs), 0.97)
