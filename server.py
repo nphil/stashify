@@ -406,7 +406,7 @@ def event_hub():
     with _hub_lock:
         if _hub is None:
             _hub = events.EventHub([("jobs", jobs_snapshot, 0.5), ("gpus", gpus_snapshot, 1.0),
-                                    ("runners", runners_snapshot, 5.0), ("cloud", cloud_snapshot, 10.0)],
+                                    ("runners", runners_snapshot, 5.0, True), ("cloud", cloud_snapshot, 10.0)],
                                    logs=(log_batches, log_snapshot))
         return _hub
 

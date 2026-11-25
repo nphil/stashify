@@ -83,6 +83,12 @@ class HubTest(unittest.TestCase):
         (second,) = self.drain(sub, 1)
         self.assertIn(b"data: [1,2]", second)
 
+    def test_an_always_topic_repeats_an_unchanged_snapshot(self):
+        hub = events.EventHub([("runners", lambda: [1], 0.02, True)])
+        sub = hub.subscribe()
+        self.addCleanup(hub.unsubscribe, sub)
+        self.assertEqual(len(self.drain(sub, 3)), 3)
+
     def test_a_new_client_is_sent_the_latest_snapshot_at_once(self):
         hub = self.hub({"v": {"a": 1}})
         one = hub.subscribe()

@@ -44,7 +44,9 @@ class Subscriber:
 
 
 class EventHub:
-    """topics: [(name, fn, interval_s)]; fn() returns the JSON-able snapshot (an exception skips
+    """topics: [(name, fn, interval_s)] or (name, fn, interval_s, always): `always` re-sends an
+    unchanged snapshot every round (the runner list, so the page can count consecutive misses);
+    fn() returns the JSON-able snapshot (an exception skips
     that round). logs: (batches, snapshot) or None; batches(cursors) returns the new
     {job_id, cursor, lines} payloads and advances `cursors`; snapshot() returns every
     running job's buffered lines, for a client that has just connected."""
@@ -67,7 +69,7 @@ class EventHub:
     def subscribe(self):
         sub = Subscriber()
         with self._lock:
-            for name, _fn, _every in self.topics:
+            for name, *_rest in self.topics:
                 if name in self._last:
                     sub.offer(self._last[name][1])
             if self.logs:
@@ -93,8 +95,8 @@ class EventHub:
 
     def _start(self):
         stop = self._stop = threading.Event()
-        for name, fn, every in self.topics:
-            threading.Thread(target=self._topic_loop, args=(stop, name, fn, every), daemon=True,
+        for name, fn, every, *always in self.topics:
+            threading.Thread(target=self._topic_loop, args=(stop, name, fn, every, bool(always and always[0])), daemon=True,
                              name="events-" + name).start()
         if self.logs:
             threading.Thread(target=self._log_loop, args=(stop,), daemon=True, name="events-log").start()
@@ -110,13 +112,13 @@ class EventHub:
                 sub.offer(frame)
             return True
 
-    def _topic_loop(self, stop, name, fn, every):
+    def _topic_loop(self, stop, name, fn, every, always=False):
         last_text = None
         while not stop.is_set():
             try:
                 data = fn()
                 text = json.dumps(data, separators=(",", ":"))
-                if text != last_text:
+                if always or text != last_text:
                     def make(eid, name=name, data=data, text=text):
                         frame = sse_frame(name, data, eid)
                         self._last[name] = (text, frame)
