@@ -217,6 +217,12 @@ For a scene that deserves the best quality, Stashify can **rent a GPU on
 normal review / replace flow, and **destroy the machine**. Nothing is ever rented unless
 you ask for it, job by job.
 
+The renting itself (market search, creating and destroying machines, the reaper, the spend
+ledger) is done by the separate, provider-neutral package
+[**hireling**](https://github.com/nphil/hireling), installed from a tagged release (pinned in
+`requirements.txt`; the Dockerfile installs from there). Vast.ai is the only provider that
+works today. Stashify decides what to run and what it may cost.
+
 > **Privacy trade-off — read first.** The video is uploaded to a machine owned by a
 > stranger (a Vast host), not to anything you control. The copy is deleted when the
 > machine is destroyed, but you cannot audit the host. Don't send scenes you wouldn't
@@ -228,8 +234,24 @@ you ask for it, job by job.
    write-only fields: stored in `/config/cloud.json` (mode 0600), never shown again
    (the dashboard only says *set · …abcd*). Add prepaid credit on Vast first.
 2. Set the three limits: **max price per hour** (default $1.00), **cap per job**
-   ($3.00) and **cap per month** ($10.00).
+   ($3.00) and **cap per month** ($10.00). Three more limits are saved the same way
+   (`POST /api/cloud/settings`) or by environment variable: **max job hours** (default 3,
+   how long any one rental may live), **max traffic price** (default $0.02 per GB: a host
+   that charges more for internet traffic is skipped) and **datacenter machines only**
+   (default off).
 3. **Test key** calls Vast and shows your credit balance.
+
+**What can run in the cloud** (`op` in the request; `decensor` when it is left out):
+
+| `op` | What happens | Also needs |
+|---|---|---|
+| `decensor` | Jasna restoration | `cloud_preset` |
+| `decensor+upscale` | restoration, then an upscale of the result, in the same rental | `cloud_preset`, `upscale`, `upscale_height` |
+| `upscale` | upscale only. Refused when the video is already that tall | `upscale`, `upscale_height` |
+
+`upscale` is `span` (the default), `realplksr` or `rtx-super-res`; `upscale_height` is
+`1080`, `1440` or `2160` (the default). Anything else (transcode, custom commands, other
+upscale models) is refused (`bad_op`, `bad_upscale`, `bad_upscale_height`).
 
 **Use it:** select scenes → *Decensor*, then choose **Cloud quality (paid)**. It is
 *off* every time the page loads (never remembered) and is not part of the runner
@@ -243,27 +265,61 @@ picker. Exactly three presets exist:
 
 Choosing one shows a **quote** (the GPU and its $/hour, estimated minutes, estimated
 total, what is left of this month's cap). The Run button then shows the price and
-needs a **confirm click every time**. The quote is an *estimate* from Jasna's
-published speed table plus setup and model-download time; the real cost is whatever
-the rental accrues.
+needs a **confirm click every time**.
+
+**Which machine.** By default Stashify picks one for you (the cheapest suitable RTX card,
+up to three tries). A request can also choose:
+
+- `hardware`: `cheapest`, `fastest`, `best_value` or `most_reliable`. Each names **one**
+  machine for that scene, worked out from that job's own estimate;
+- `offer_id` (with `provider`): one exact machine from the market browser below;
+- `gpu`, `provider` and `cloud_filters` (a JSON object: price, reliability, VRAM, GPU
+  count...) to narrow the automatic search. Filters only ever tighten what Jasna and your
+  limits already require.
+
+A chosen machine is rented **exactly, or not at all**: if somebody took it meanwhile,
+nothing is rented and the job is refused (`offer_gone`); it is never swapped for another
+one. A `hardware` choice is turned into one machine when the job is queued.
+
+**The estimate.** Per machine: setup (apt, Jasna, model download) + upload and download
+of the video at home speed + GPU time from Jasna's published speed table, padded by 20%.
+The price is compute + disk + traffic (each shown separately, with the GB moved), rounded
+up to a whole cent. The real cost is whatever the rental accrues. Upscale speeds are
+rough guesses (not measured on rented machines yet), and every estimate that uses them says so.
+
+**API** (all routes need the worker token, `X-Decensor-Token`):
+
+| Route | What it does |
+|---|---|
+| `GET /api/cloud/offers` | The market behind the enabled providers: hireling's filters, sorts (`sort=`) and paging (`limit`, `offset`), `facets`, `hardware_presets`, each offer `compatible` or not (with the reason). Add `scene=<id>` (and `op`, `preset`, `upscale`, `upscale_height`) to get, per offer, what **that job** would take and cost: `estimate{minutes, est_usd, setup_min, transfer_min, processing_min, disk_gb, breakdown{compute, storage, bandwidth, bw_down, bw_up, gb_down, gb_up}, assumptions}`. Add `hours=<n>` instead of a scene to cost a plain rental. |
+| `GET /api/cloud/quote?scenes=5,6&preset=…` | What the dashboard shows before a run: one quote per scene, with the machine, the estimate and, when refused, `refusal{code, message}`. Takes the same plan keys (`op`, `upscale`, `upscale_height`, `hardware`, `offer_id`, `provider`, `gpu`). |
+| `POST /api/decensor` | `cloud: true` (or `cloud_preset`) + `confirm_usd` + the plan keys queues one paid job. The job shows `cloud_op`, `cloud_gpu`, `cloud_offer_id`, `cloud_provider`. |
+| `GET /api/cloud/status` | Spend, running machines, the last rentals, and every provider with its prepaid `credit`. |
+| `GET`/`POST /api/cloud/settings`, `POST /api/cloud/test` | The key and the limits (`max_price`, `job_cap`, `month_cap`, `max_bw_cost`, `max_job_hours`, `datacenter_only`); the key check. |
 
 **Safety rules** — enforced by the server, not just the page:
 
-- Refused when: no key or no licence; the estimate is over the per-job cap;
-  this month's spend so far + queued paid jobs + the estimate is over the monthly cap;
-  or the price moved well above what you confirmed.
+- Refused when: no key or no licence; the estimate is over the per-job cap; the estimate
+  needs longer than **max job hours**; this month's spend so far + queued paid jobs + the
+  estimate is over the monthly cap; an upscale would not change the size; the machine you
+  picked is gone; or the price moved well above what you confirmed. Queueing the job and the
+  run itself both look the market up afresh (the quote on the page may be up to two minutes
+  old), so a stale page cannot rent a machine that is no longer offered.
 - While running, the cost is tracked continuously. At the per-job cap the job is
   stopped, nothing partial is kept, the machine is destroyed, and the job says so.
-- A machine is destroyed on **every** path: success, failure, cancel, crash. A bad
+- A machine is destroyed on **every** path: success, failure, cancel, crash. In automatic mode a bad
   machine (unreachable, no working video encoder, failed install) is dropped and the
   next offer is tried, at most 3.
-- Every rental is appended to `/config/cloud-ledger.jsonl` (job, scene, preset, GPU,
+- Every rental is appended to `/config/cloud-ledger.jsonl` (job, scene, operation, preset, GPU,
   start/end, $/hour, actual $). The Cloud dialog shows month-to-date and the last 10.
-- **Reaper:** at startup and every few minutes, any `stashify-*` machine on your Vast
-  account that this coordinator doesn't own (after a crash or restart), or that has
-  outlived its time limit (3 h, `VAST_MAX_JOB_HOURS`), is destroyed. So **use one Vast account per
+- **Reaper:** at startup and every few minutes, any machine labelled `stashify-<8 hex>` on your
+  Vast account that this coordinator doesn't own (after a crash or restart), or that has
+  outlived its time limit (**max job hours**, default 3 h), is destroyed. So **use one Vast account per
   Stashify coordinator** — a second one on the same account would have its machines
   destroyed. The Vast key can't be changed while a machine is running.
+
+Files written before hireling (`cloud.json`, `cloud-ledger.jsonl`, `cloud-instances.json`)
+are read and written in the same format: a record without a `provider` is a Vast one.
 
 Needs `openssh-client` + `rsync` (in the image) and a persistent `/config` mount (in
 the unRAID template). Environment variables are optional **overrides** that win over
