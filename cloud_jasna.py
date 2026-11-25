@@ -11,7 +11,13 @@ Jasna specifics, following upstream's cloud guide
   -> download the result -> destroy. The result then goes through the normal
   review/replace flow like any other decensor.
 
-Exactly three presets exist. Never offered: Normal/BasicVSR++, plain LTX, --ltx-fast.
+Transcode runs on the same rentals without Jasna or its licence: a static ffmpeg build with
+NVENC is installed at boot (see ffmpeg_asset) and winrunner/transcode_cli.py runs it with the
+same request fields and progress lines as the home runners.
+
+Which cards can do which operation is decided in cloud_caps.py (one place).
+
+Exactly three Jasna presets exist. Never offered: Normal/BasicVSR++, plain LTX, --ltx-fast.
 """
 
 import dataclasses
@@ -23,6 +29,7 @@ import shlex
 import threading
 import time
 
+import cloud_caps
 import hireling
 from hireling import CloudError, redact, register_secret
 
@@ -86,21 +93,33 @@ def preset_args(key):
 
 # -- hardware / pricing knowledge ------------------------------------------------ #
 
-# RTX-class only: upstream says data-centre cards (A100/H100/B200) do not work. Best first.
-GPUS = ("RTX 5090", "RTX 4090", "RTX 5080", "RTX 3090")
-MIN_VRAM_GB = 16
-MIN_DRIVER = 580
-MIN_INET_DOWN_MBPS = 200
+# Which cards can do which operation (GPU family, VRAM, driver) is cloud_caps.py's business.
 IMAGE = "ubuntu:24.04"
 RELEASE_API = "https://api.github.com/repos/Kruk2/jasna/releases/latest"
 RELEASE_URL_PREFIX = "https://github.com/Kruk2/jasna/releases/download/"
 ASSET_RE = re.compile(r"^jasna-linux-nvidia-[A-Za-z0-9._-]*part\d+$")
 RELEASE_GB_FALLBACK = 4.7          # v0.12.4: 3 parts, 4.63 GB (only used for the estimate)
 RELEASE_CACHE_S = 3600
+# Transcode needs an ffmpeg with NVENC. The static GPL build from the FFmpeg-Builds project has it
+# (and libx265) in one file that loads the driver's encoder library at run time, so the plain
+# ubuntu image is enough. Their release keeps only the current stable branches, so the asset is
+# looked up (FFMPEG_API), never hard-coded.
+FFMPEG_API = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/latest"
+FFMPEG_URL_PREFIX = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
+FFMPEG_ASSET_RE = re.compile(r"^ffmpeg-n(\d+)\.(\d+)-latest-linux64-gpl-\d+\.\d+\.tar\.xz$")
+FFMPEG_MASTER_ASSET = "ffmpeg-master-latest-linux64-gpl.tar.xz"
+FFMPEG_GB_FALLBACK = 0.16          # about 154 MB (only used for the estimate)
+FFMPEG_DIR = "/root/ffmpeg"
+TRANSCODE_CLI_REMOTE = "/root/transcode_cli.py"
 
 # Minutes of GPU time per minute of 1080p video, Standard model, mosaics throughout
 # (upstream docs/en/models.md "How long it takes").
 BASE_MIN_PER_MIN = {"RTX 5090": 1.0, "RTX 4090": 1.5, "RTX 5080": 2.0, "RTX 3090": 3.0}
+# Any other card is placed between those by its raw compute: the 3090 (35.6 TFLOPS) is the anchor,
+# time scales with the 0.8 power of the compute ratio (the 4090 has 2.3x the compute and is 2x faster).
+REF_TFLOPS, REF_MIN_PER_MIN, TFLOPS_EXPONENT = 35.6, 3.0, 0.8
+UNKNOWN_MIN_PER_MIN = 4.0            # compute not reported: assume a bit slower than a 3090
+MIN_PER_MIN_RANGE = (1.0, 8.0)
 TIER_SLOWDOWN = {"ltx": 1.0, "ltx-8step": 2.5}          # High is ~2.5x slower than Standard
 LARGE_CANVAS_SLOWDOWN = 3.0                             # "a whole video up to ~3x longer"
 MODEL_DOWNLOAD_GB = {"ltx": 15.0, "ltx-8step": 28.0}    # Standard 15 GB; High needs ~13 GB more
@@ -111,10 +130,22 @@ ACTIVATE_MIN = 2.0            # "installation verified" can look stuck for up to
 FIRST_RUN_PREP_MIN = 4.0      # Jasna prepares for the GPU on the first LTX run
 HOME_UPLINK_MBPS = 80         # assumed home-to-cloud speed (10 MB/s); documented guess
 DEFAULT_DOWN_MBPS = 300
+# Transcode rules of thumb. ESTIMATES, not measurements on a rented machine: ffmpeg decodes on the
+# CPU and NVENC encodes, which on a typical rented host runs about 8x real time for 1080p video
+# (roughly 250 fps for 30 fps material), and about 1/pixels of that for taller video. NVENC speed is
+# set by the chip generation, not the price of the card, so it is not scaled per GPU.
+NVENC_X_REALTIME_1080P = 8.0
+TRANSCODE_INSTALL_MIN = 2.0   # apt + unpacking a 150 MB ffmpeg
+ENCODER_CHECK_MIN = 0.5       # the one-second test encode
+TRANSCODE_RESULT_SHARE = 0.45  # HEVC at quality 24 is about this share of a typical source's size
+TRANSCODE_DEFAULT_QUALITY = 24     # the home runners' default (winrunner/transcode_cli.py)
 
-# The three kinds of paid run. "decensor+upscale" runs Jasna's own upscaler after the mosaic
-# restoration; "upscale" only upscales (it asks for no restoration beyond Jasna's default).
-OPS = ("decensor", "decensor+upscale", "upscale")
+# The kinds of paid run. "decensor+upscale" runs Jasna's own upscaler after the mosaic
+# restoration; "upscale" only upscales (it asks for no restoration beyond Jasna's default);
+# "transcode" re-encodes with ffmpeg (no Jasna, no licence).
+OPS = cloud_caps.OPS
+TRANSCODE_HEIGHTS = (144, 4320)                             # accepted output heights, inclusive
+TRANSCODE_QUALITIES = (1, 51)                               # CQ / CRF, as the home runners take it
 UPSCALE_MODELS = ("span", "realplksr", "rtx-super-res")     # Jasna's others need more than a rented RTX box has
 UPSCALE_HEIGHTS = (1080, 1440, 2160)                        # the output heights Jasna accepts
 DEFAULT_UPSCALE, DEFAULT_UPSCALE_HEIGHT = "span", 2160
@@ -123,7 +154,7 @@ DEFAULT_PRESET = "detail"     # what the market browser costs a scene with when 
 # rented Linux machine yet: generous guesses, listed as an assumption on every estimate that uses them.
 UPSCALE_MIN_PER_MIN = {"span": 0.35, "realplksr": 0.9, "rtx-super-res": 0.5}
 PASS_THROUGH_SHARE = 0.25     # an upscale-only run still scans every frame: this share of a restoration pass
-APT_GB = 0.2                  # what apt downloads to install Jasna
+APT_GB = 0.2                  # what apt downloads to install Jasna (or ffmpeg's few packages)
 
 
 class CloudRefused(CloudError):
@@ -197,6 +228,52 @@ def cached_release_gb():
     return data["gb"] if data else RELEASE_GB_FALLBACK
 
 
+_ffmpeg_cache = {"at": 0.0, "data": None}
+
+
+def ffmpeg_asset(http_get=None, now=None):
+    """{'tag', 'name', 'url', 'size', 'gb'} of the static ffmpeg build a transcode installs on
+    the box. Resolved here, before anything is rented. The release holds a few stable branches
+    (ffmpeg-n<major>.<minor>-...) next to the moving master build: the OLDEST stable branch is
+    taken, because its NVENC headers ask the least of the host's driver; master is the last resort.
+    Cached for an hour like the Jasna release."""
+    now = time.time() if now is None else now
+    with _release_lock:
+        if _ffmpeg_cache["data"] and now - _ffmpeg_cache["at"] < RELEASE_CACHE_S:
+            return _ffmpeg_cache["data"]
+    try:
+        data = (http_get or _github_get)(FFMPEG_API)
+        found = []
+        for a in data.get("assets") or []:
+            name, url = str(a.get("name") or ""), str(a.get("browser_download_url") or "")
+            if not (url.startswith(FFMPEG_URL_PREFIX) and url.endswith(name)):
+                continue
+            m = FFMPEG_ASSET_RE.match(name)
+            rank = (0, int(m.group(1)), int(m.group(2))) if m else (1, 0, 0) if name == FFMPEG_MASTER_ASSET else None
+            if rank:
+                found.append((rank, {"name": name, "url": url, "size": int(a.get("size") or 0)}))
+        if not found:
+            raise CloudJobFailed("the ffmpeg download for transcoding is not on GitHub right now")
+        best = min(found, key=lambda f: f[0])[1]
+        out = dict(best, tag=str(data.get("tag_name") or ""), gb=best["size"] / 1e9 or FFMPEG_GB_FALLBACK)
+    except CloudJobFailed:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any lookup problem means "do not rent"
+        raise CloudJobFailed("could not look up the ffmpeg download on GitHub: %s" % redact(exc)) from None
+    with _release_lock:
+        _ffmpeg_cache.update(at=now, data=out)
+    return out
+
+
+def cached_tool_gb(op):
+    """Download size of the software `op` installs, for ESTIMATES (never touches the network)."""
+    if op == cloud_caps.TRANSCODE:
+        with _release_lock:
+            data = _ffmpeg_cache["data"]
+        return data["gb"] if data else FFMPEG_GB_FALLBACK
+    return cached_release_gb()
+
+
 # -- scene facts ------------------------------------------------------------------ #
 
 def scene_meta(scene):
@@ -232,6 +309,18 @@ class Plan:
     gpu: str = ""                 # or: only this GPU model (another machine of it is fine)
     hardware: str = ""            # or: the machine a hardware choice (cheapest, fastest...) means right now
     filters: dict = dataclasses.field(default_factory=dict)   # extra search filters; they only tighten
+    transcode_height: int = 0     # transcode only: output height in pixels, 0 = keep the source's
+    transcode_quality: int = 0    # transcode only: CQ/CRF, 0 = the default (24)
+
+    @property
+    def jasna(self):
+        """True when the run needs Jasna and its licence (everything but transcode)."""
+        return cloud_caps.uses_jasna(self.op)
+
+    @property
+    def restoring(self):
+        """True when mosaics are restored (so a quality preset applies)."""
+        return self.op in ("decensor", "decensor+upscale")
 
     @property
     def chosen(self):
@@ -247,13 +336,14 @@ class Plan:
         """The request fields that make this plan again (plan_from_body(plan.as_dict()) == plan)."""
         return {"op": self.op, "upscale": self.upscale, "upscale_height": self.upscale_height,
                 "offer_id": self.offer_id, "provider": self.provider, "gpu": self.gpu,
-                "hardware": self.hardware, "cloud_filters": dict(self.filters)}
+                "hardware": self.hardware, "cloud_filters": dict(self.filters),
+                "transcode_height": self.transcode_height, "transcode_quality": self.transcode_quality}
 
 
 _GPU_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.+/-]{0,39}$")
 _OFFER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 _MODEL_NAMES = {"span": "SPAN", "realplksr": "RealPLKSR", "rtx-super-res": "RTX Super Resolution"}
-_BAD_OP = "Cloud GPUs run Decensor, Decensor + upscale or Upscale only."
+_BAD_OP = "Cloud GPUs run Decensor, Decensor + upscale, Upscale or Transcode."
 
 
 def truthy(value):
@@ -265,14 +355,14 @@ def truthy(value):
 
 def plan_from_body(body, backend=None):
     """Validate the "what and where" part of a request (the POST /api/decensor body, or the
-    quote's query string) into a Plan. `backend` ('decensor' | 'lada' | 'upscale' | ...) names
-    the operation when the request does not (`op`, else `post_upscale` on a Decensor).
+    quote's query string) into a Plan. `backend` ('decensor' | 'lada' | 'upscale' | 'transcode')
+    names the operation when the request does not (`op`, else `post_upscale` on a Decensor).
     Raises PlanError."""
     body = body or {}
     op = str(body.get("op") or "").strip().replace(" ", "+")     # a query string turns '+' into ' '
     if not op:
-        if backend == "upscale":
-            op = "upscale"
+        if backend in ("upscale", "transcode"):
+            op = backend
         elif backend in (None, "", "decensor", "lada"):
             op = "decensor+upscale" if truthy(body.get("post_upscale")) else "decensor"
         else:
@@ -280,7 +370,7 @@ def plan_from_body(body, backend=None):
     if op not in OPS:
         raise PlanError("bad_op", _BAD_OP)
     upscale, height = "", 0
-    if op != "decensor":
+    if op in ("upscale", "decensor+upscale"):
         upscale = str(body.get("upscale") or DEFAULT_UPSCALE).strip().lower()
         if upscale not in UPSCALE_MODELS:
             raise PlanError("bad_upscale", "Cloud upscaling uses one of: %s." % ", ".join(UPSCALE_MODELS))
@@ -320,11 +410,31 @@ def plan_from_body(body, backend=None):
         hireling.RentSpec.from_dict(filters, allowed=hireling.FILTER_FIELDS)
     except ValueError as exc:
         raise PlanError("bad_filters", str(exc)) from None
-    return Plan(op, upscale, height, offer_id, provider, gpu, hardware, dict(filters))
+    t_height, t_quality = _transcode_fields(body) if op == cloud_caps.TRANSCODE else (0, 0)
+    return Plan(op, upscale, height, offer_id, provider, gpu, hardware, dict(filters), t_height, t_quality)
+
+
+def _transcode_fields(body):
+    """(output height, quality) of a transcode request; 0 for "the default" (keep the height / 24)."""
+    out = []
+    for key, (lo, hi), label in (("transcode_height", TRANSCODE_HEIGHTS, "height"),
+                                 ("transcode_quality", TRANSCODE_QUALITIES, "quality")):
+        raw = body.get(key)
+        try:
+            value = 0 if raw in (None, "") else int(float(raw))
+        except (TypeError, ValueError):
+            value = -1
+        if value != 0 and not lo <= value <= hi:
+            raise PlanError("bad_transcode", "The transcode %s must be a number from %d to %d."
+                            % (label, lo, hi))
+        out.append(value)
+    return tuple(out)
 
 
 def plan_label(plan, preset_key=None):
     """The words the dashboard shows for a run: the quality preset, plus what it upscales to."""
+    if plan.op == "transcode":
+        return "Transcode" + (" to %dp" % plan.transcode_height if plan.transcode_height else " \u00b7 same size")
     if plan.op == "upscale":
         return "Upscale to %dp \u00b7 %s" % (plan.upscale_height, _MODEL_NAMES[plan.upscale])
     label = PRESETS[preset_key]["label"]
@@ -368,49 +478,55 @@ def narrow(base, filters):
     return spec.validate()
 
 
-def disk_needed(size_bytes, ratio=1.0):
-    """GB of rental disk: upstream's 80 GB for Jasna and its models, plus the source, a
-    working copy and the result (`ratio` times the source when it is upscaled)."""
-    return 80 + int(math.ceil((2.0 + ratio) * size_bytes / 1e9))
+def disk_needed(size_bytes, ratio=1.0, op="decensor"):
+    """GB of rental disk: the software and models (upstream's 80 GB for Jasna, 20 GB for ffmpeg),
+    plus the source, a working copy and the result (`ratio` times the source's size)."""
+    return cloud_caps.need_for(op).base_disk_gb + int(math.ceil((2.0 + ratio) * size_bytes / 1e9))
 
 
-def requirements(cfg, size_bytes=0, environ=None, ratio=1.0):
-    """What Jasna needs from ANY machine, plus the owner's limits, as data: it marks offers
-    compatible or not in the market browser and is the base of every rental."""
+def requirements(cfg, size_bytes=0, environ=None, ratio=1.0, op="decensor"):
+    """What `op` needs from ANY machine (cloud_caps), plus the owner's limits, as data: it marks
+    offers compatible or not in the market browser and is the base of every rental. No GPU list:
+    every card that can do the job is allowed."""
     env = os.environ if environ is None else environ
+    need = cloud_caps.need_for(op)
     return hireling.RentSpec(
-        gpu_pattern=r"^RTX", min_vram_gb=MIN_VRAM_GB, max_price=cfg.max_price,
-        disk_gb=max(int(cfg.disk_gb), disk_needed(size_bytes, ratio)),
+        gpu_pattern=need.gpu_pattern, min_vram_gb=need.min_vram_gb, max_price=cfg.max_price,
+        disk_gb=max(int(cfg.disk_gb), disk_needed(size_bytes, ratio, op)),
         image=env.get("JASNA_CLOUD_IMAGE") or env.get("VAST_IMAGE") or IMAGE,
         env={"NVIDIA_DRIVER_CAPABILITIES": "all"},
         min_reliability=cfg.min_reliability, datacenter_only=cfg.datacenter_only,
-        min_driver=MIN_DRIVER, min_inet_down=MIN_INET_DOWN_MBPS, max_bw_cost=cfg.max_bw_cost,
+        min_driver=need.min_driver, min_inet_down=need.min_inet_down, max_bw_cost=cfg.max_bw_cost,
         max_hours=cfg.max_job_hours)
 
 
-def rent_spec(cfg, size_bytes=0, environ=None):
-    """The automatic choice: the preferred RTX cards, best first (GPUS)."""
-    return dataclasses.replace(requirements(cfg, size_bytes, environ), gpus=GPUS)
-
-
 def result_ratio(scene, plan):
-    """How many times more pixels the result has than the source (1.0 when nothing is upscaled)."""
+    """How many times bigger the result file is than the source: more pixels when upscaled, a
+    fraction when transcoded (HEVC at the chosen quality, at the chosen height), 1.0 otherwise."""
+    if plan.op == cloud_caps.TRANSCODE:
+        ratio = TRANSCODE_RESULT_SHARE * 2.0 ** ((TRANSCODE_DEFAULT_QUALITY - (plan.transcode_quality
+                                                  or TRANSCODE_DEFAULT_QUALITY)) / 6.0)
+        src = scene.get("height") or 0
+        if plan.transcode_height and src and plan.transcode_height < src:
+            ratio *= (plan.transcode_height / float(src)) ** 2
+        return min(max(ratio, 0.05), 1.5)
     if not plan.upscale:
         return 1.0
     return max(1.0, (plan.upscale_height / float(scene.get("height") or 1080)) ** 2)
 
 
 def plan_spec(plan, cfg, size_bytes=0, environ=None, ratio=1.0):
-    """The RentSpec a plan searches and rents with. Nothing steered: the automatic RTX
-    preference order. Otherwise the requirements narrowed to what the owner asked for (a
-    hardware choice looks at every compatible machine, so it never uses the preference list)."""
+    """The RentSpec a plan searches and rents with. Nothing steered: every machine that can do
+    the operation, cheapest first (datacentre hosts ahead of community ones). Otherwise the
+    requirements narrowed to what the owner asked for."""
+    base = requirements(cfg, size_bytes, environ, ratio, plan.op)
     if not plan.steered:
-        return dataclasses.replace(requirements(cfg, size_bytes, environ, ratio), gpus=GPUS)
+        return base
     chosen = dict(plan.filters)
     for key, value in (("gpu", plan.gpu), ("offer_id", plan.offer_id), ("provider", plan.provider)):
         if value:
             chosen[key] = value
-    return narrow(requirements(cfg, size_bytes, environ, ratio), chosen)
+    return narrow(base, chosen)
 
 
 # -- estimate / quote ------------------------------------------------------------- #
@@ -428,6 +544,8 @@ class JobCost(hireling.JobEstimate):
     transfer_min: float = 0.0
     processing_min: float = 0.0
     disk_gb: int = 0
+    up_min: float = 0.0          # of transfer_min: the video going up from home
+    down_min: float = 0.0        # ... and the result coming back
 
     @property
     def est_usd(self):
@@ -437,19 +555,71 @@ class JobCost(hireling.JobEstimate):
         out = super().as_dict()
         out.update(est_usd=self.est_usd, setup_min=round(self.setup_min, 1),
                    transfer_min=round(self.transfer_min, 1), processing_min=round(self.processing_min, 1),
-                   total_min=out["minutes"], disk_gb=self.disk_gb)
+                   total_min=out["minutes"], disk_gb=self.disk_gb,
+                   up_min=round(self.up_min, 1), down_min=round(self.down_min, 1))
         return out
+
+
+def gpu_min_per_min(offer):
+    """(minutes of GPU time per minute of 1080p video, True when upstream published it for this
+    card). Other cards are placed by their raw compute, or assumed slowish when it is unknown."""
+    known = BASE_MIN_PER_MIN.get(offer.gpu)
+    if known:
+        return known, True
+    tflops = (offer.total_flops or 0) / max(offer.num_gpus or 1, 1)
+    if tflops <= 0:
+        return UNKNOWN_MIN_PER_MIN, False
+    est = REF_MIN_PER_MIN * (REF_TFLOPS / tflops) ** TFLOPS_EXPONENT
+    return min(max(est, MIN_PER_MIN_RANGE[0]), MIN_PER_MIN_RANGE[1]), False
+
+
+def transcode_x_realtime(scene):
+    """How many times faster than real time the encode runs: a rule of thumb (see
+    NVENC_X_REALTIME_1080P), slower in proportion to the pixels per frame."""
+    height = scene.get("height") or 1080
+    width = scene.get("width") or height * 16.0 / 9.0
+    return NVENC_X_REALTIME_1080P / max(0.25, (width * height) / (1920.0 * 1080.0))
+
+
+def _estimate_transcode(scene, offer, tool_gb, plan, disk_gb):
+    """What a transcode costs on one offer. The WHOLE file goes up from home and the (smaller)
+    result comes back, so on a quick encode the transfers are most of the time and the bill's
+    traffic line: both ways are counted, and so is the disk for as long as the box is rented."""
+    minutes = (scene.get("duration") or 0) / 60.0
+    speed = transcode_x_realtime(scene)
+    processing = minutes / speed * SAFETY
+    size_gb = (scene.get("size") or 0) / 1e9
+    ratio = result_ratio(scene, plan)
+    result_gb = size_gb * ratio
+    down = max((offer.inet_down or DEFAULT_DOWN_MBPS) * 0.7, 100.0)
+    setup = BOOT_MIN + TRANSCODE_INSTALL_MIN + _transfer_min(tool_gb, min(down, 800.0)) + ENCODER_CHECK_MIN
+    up_min, down_min = _transfer_min(size_gb, HOME_UPLINK_MBPS), _transfer_min(result_gb, HOME_UPLINK_MBPS)
+    hours = (setup + up_min + down_min + processing) / 60.0
+    disk = disk_needed(scene.get("size") or 0, ratio, plan.op) if disk_gb is None else disk_gb
+    cost = hireling.estimate_cost(offer, hours, disk_gb=disk, gb_down=size_gb + tool_gb + APT_GB, gb_up=result_gb)
+    notes = ["Encoding time is a rule of thumb, not a measurement: about %.0fx real time for 1080p on the "
+             "NVENC video encoder (slower for taller video), padded by %d%%. It is much the same on "
+             "any card that has one." % (NVENC_X_REALTIME_1080P, round((SAFETY - 1.0) * 100)),
+             "The whole video goes up from home (%.1f GB) and the result comes back (about %.1f GB), "
+             "assumed at %.0f MB/s each way: %.0f of the estimated %.0f minutes are file transfer."
+             % (size_gb, result_gb, HOME_UPLINK_MBPS / 8.0, up_min + down_min, hours * 60.0)]
+    return JobCost(hours=hours, cost=cost, assumptions=tuple(notes), setup_min=setup,
+                   transfer_min=up_min + down_min, processing_min=processing, disk_gb=disk,
+                   up_min=up_min, down_min=down_min)
 
 
 def estimate_job(scene, preset_key, offer, release_gb=RELEASE_GB_FALLBACK, plan=None, disk_gb=None):
     """What one scene costs on one offer, in time and money (a JobCost). An ESTIMATE:
     upstream's speed table is for 1080p with mosaics throughout; taller video is scaled
     linearly and everything is padded by SAFETY. The runtime cap, not this number, guards the
-    money. disk_gb is the rental disk (default: what the plan needs for this scene)."""
+    money. disk_gb is the rental disk (default: what the plan needs for this scene).
+    release_gb is the size of what the machine installs (the Jasna release; ffmpeg for a transcode)."""
     plan = plan or Plan()
-    restoring = plan.op != "upscale"
+    if plan.op == cloud_caps.TRANSCODE:
+        return _estimate_transcode(scene, offer, release_gb, plan, disk_gb)
+    restoring = plan.restoring
     minutes = (scene.get("duration") or 0) / 60.0
-    base = BASE_MIN_PER_MIN.get(offer.gpu, max(BASE_MIN_PER_MIN.values()))
+    base, published = gpu_min_per_min(offer)
     res = max(1.0, (scene.get("height") or 1080) / 1080.0)
     if restoring:
         p = PRESETS[preset_key]
@@ -467,14 +637,17 @@ def estimate_job(scene, preset_key, offer, release_gb=RELEASE_GB_FALLBACK, plan=
     down = max((offer.inet_down or DEFAULT_DOWN_MBPS) * 0.7, 100.0)
     setup = (BOOT_MIN + INSTALL_FIXED_MIN + _transfer_min(release_gb, min(down, 800.0)) + ACTIVATE_MIN
              + _transfer_min(model_gb, down) + FIRST_RUN_PREP_MIN)
-    transfer = _transfer_min(size_gb, HOME_UPLINK_MBPS) + _transfer_min(result_gb, HOME_UPLINK_MBPS)
-    total = setup + transfer + processing
+    up_min, down_min = _transfer_min(size_gb, HOME_UPLINK_MBPS), _transfer_min(result_gb, HOME_UPLINK_MBPS)
+    total = setup + up_min + down_min + processing
     hours = total / 60.0
-    disk = disk_needed(scene.get("size") or 0, ratio) if disk_gb is None else disk_gb
+    disk = disk_needed(scene.get("size") or 0, ratio, plan.op) if disk_gb is None else disk_gb
     cost = hireling.estimate_cost(offer, hours, disk_gb=disk, gb_down=size_gb + release_gb + model_gb + APT_GB,
                                   gb_up=result_gb)
     notes = ["GPU time follows Jasna's published speeds for %s, padded by %d%%."
              % (offer.gpu or "this GPU", round((SAFETY - 1.0) * 100))]
+    if not published:
+        notes[0] = ("%s is not in Jasna's published speed table: its speed is worked out from its raw "
+                    "compute, padded by %d%%." % (offer.gpu or "This GPU", round((SAFETY - 1.0) * 100)))
     if not restoring:
         notes.append("No mosaic restoration is wanted, but Jasna still scans every frame "
                      "(counted as %d%% of a full restoration pass)." % round(PASS_THROUGH_SHARE * 100))
@@ -482,7 +655,8 @@ def estimate_job(scene, preset_key, offer, release_gb=RELEASE_GB_FALLBACK, plan=
         notes.append("Upscaling time is a rough guess: it has not been measured on rented machines yet.")
     notes.append("Uploading from home is assumed to run at %.0f MB/s." % (HOME_UPLINK_MBPS / 8.0))
     return JobCost(hours=hours, cost=cost, assumptions=tuple(notes), setup_min=setup,
-                   transfer_min=transfer, processing_min=processing, disk_gb=disk)
+                   transfer_min=up_min + down_min, processing_min=processing, disk_gb=disk,
+                   up_min=up_min, down_min=down_min)
 
 
 def estimate(scene, preset_key, offer, release_gb=RELEASE_GB_FALLBACK, plan=None, disk_gb=None):
@@ -495,8 +669,8 @@ def make_estimator(cfg, scene, preset_key, plan=None, release_gb=None):
     """callable(offer) -> JobCost for hireling's market browser: the same numbers a quote
     shows, so a machine's listed price is what the user is later asked to confirm."""
     plan = plan or Plan()
-    rel = cached_release_gb() if release_gb is None else release_gb
-    disk = requirements(cfg, scene.get("size") or 0, ratio=result_ratio(scene, plan)).disk_gb
+    rel = cached_tool_gb(plan.op) if release_gb is None else release_gb
+    disk = requirements(cfg, scene.get("size") or 0, ratio=result_ratio(scene, plan), op=plan.op).disk_gb
     return lambda offer: estimate_job(scene, preset_key, offer, rel, plan, disk)
 
 
@@ -525,6 +699,7 @@ def sum_costs(costs):
                       assumptions=tuple(dict.fromkeys(a for c in costs for a in c.assumptions)),
                       setup_min=sum(c.setup_min for c in costs), transfer_min=sum(c.transfer_min for c in costs),
                       processing_min=sum(c.processing_min for c in costs),
+                      up_min=sum(c.up_min for c in costs), down_min=sum(c.down_min for c in costs),
                       disk_gb=max(c.disk_gb for c in costs), usd_sum=sum(c.est_usd for c in costs))
 
 
@@ -564,7 +739,7 @@ def quote_with_spec(cl, scene, preset_key, plan=None, queued_usd=0.0, release_gb
     fresh: look the market up again instead of reusing a result up to two minutes old
     (admission and the run itself do, so what is rented is what was priced)."""
     plan = plan or Plan()
-    restoring = plan.op != "upscale"
+    restoring = plan.restoring
     if restoring and preset_key not in PRESETS:
         raise ValueError("unknown cloud preset %r" % (preset_key,))
     cfg = cl.config()
@@ -585,7 +760,7 @@ def quote_with_spec(cl, scene, preset_key, plan=None, queued_usd=0.0, release_gb
 
     if not cl.enabled_providers():
         return refuse("no_key", "Add your Vast.ai API key in Cloud settings first.")
-    if not cl.settings.get("jasna_license"):
+    if plan.jasna and not cl.settings.get("jasna_license"):
         return refuse("no_licence", "Add your Jasna licence code in Cloud settings first.")
     if not (scene.get("duration") or 0) > 0:
         return refuse("no_duration", "Stash does not know this video's length, so the cost "
@@ -595,7 +770,7 @@ def quote_with_spec(cl, scene, preset_key, plan=None, queued_usd=0.0, release_gb
         return refuse("upscale_not_needed", "This video is already %dp, so upscaling it to %dp would "
                       "add nothing. Pick a larger size." % (height, plan.upscale_height))
     spec = plan_spec(plan, cfg, scene.get("size") or 0, ratio=result_ratio(scene, plan))
-    rel = cached_release_gb() if release_gb is None else release_gb
+    rel = cached_tool_gb(plan.op) if release_gb is None else release_gb
     try:
         if plan.hardware and not plan.offer_id:
             offer = pick_hardware(cl, spec, make_estimator(cfg, scene, preset_key, plan, rel),
@@ -695,6 +870,74 @@ def encoder_check_script():
             % (JASNA_DIR_GLOB, OK_MARK, FAIL_MARK))
 
 
+ENCODER_RE = re.compile(r"STASHIFY_ENCODER=(hevc_nvenc|h264_nvenc|libx265|none)\b")
+TRANSCODE_ENCODERS = ("hevc_nvenc", "h264_nvenc", "libx265")      # best first: GPU HEVC, GPU H.264, CPU HEVC
+
+
+def transcode_install_script(url):
+    """ffmpeg for a transcode: a static build (it carries NVENC and libx265 in one file), plus
+    python3 for winrunner/transcode_cli.py and rsync for the transfers."""
+    return "\n".join([
+        "set -euo pipefail",
+        "export DEBIAN_FRONTEND=noninteractive",
+        "echo '[stashify] step: system packages'",
+        "apt-get update -qq",
+        "apt-get install -y -qq --no-install-recommends ca-certificates wget xz-utils python3-minimal rsync",
+        "cd /root",
+        "echo '[stashify] step: downloading ffmpeg'",
+        "wget -nv -c --tries=5 --retry-connrefused --waitretry=5 -O ffmpeg.tar.xz %s" % shlex.quote(url),
+        "echo '[stashify] step: unpacking ffmpeg'",
+        "mkdir -p %s" % FFMPEG_DIR,
+        "tar -xJf ffmpeg.tar.xz -C %s --strip-components=1" % FFMPEG_DIR,
+        "rm -f ffmpeg.tar.xz",
+        "test -x %s/bin/ffmpeg" % FFMPEG_DIR,
+        "test -x %s/bin/ffprobe" % FFMPEG_DIR,
+        "echo '[stashify] step: installed'",
+    ]) + "\n"
+
+
+def transcode_encoder_script():
+    """Try the encoders in order (GPU HEVC, GPU H.264, CPU HEVC) with a one-second test encode and
+    print STASHIFY_ENCODER=<the first that works>, or =none."""
+    return ("for enc in %s; do\n"
+            "  if %s/bin/ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc2=duration=1:size=1280x720 "
+            "-c:v $enc -f null - ; then echo \"STASHIFY_ENCODER=$enc\"; exit 0; fi\n"
+            "done\n"
+            "echo STASHIFY_ENCODER=none\n" % (" ".join(TRANSCODE_ENCODERS), FFMPEG_DIR))
+
+
+def transcode_encoder(lines):
+    """The encoder the check chose (from its output lines), or None when none worked."""
+    for line in reversed(list(lines or ())):
+        m = ENCODER_RE.search(str(line))
+        if m:
+            return None if m.group(1) == "none" else m.group(1)
+    return None
+
+
+def transcode_command(remote_in, encoder, plan):
+    """The remote command of a transcode: winrunner/transcode_cli.py with the request's fields, its
+    result moved to the one place the download looks (REMOTE_OUT)."""
+    args = ["python3", TRANSCODE_CLI_REMOTE, "--input", remote_in, "--output-dir", "/root/out",
+            "--ffmpeg", FFMPEG_DIR + "/bin/ffmpeg", "--ffprobe", FFMPEG_DIR + "/bin/ffprobe",
+            "--encoder", encoder, "--quality", str(plan.transcode_quality or TRANSCODE_DEFAULT_QUALITY),
+            "--container", "mp4"]
+    if plan.transcode_height:
+        args += ["--height", str(plan.transcode_height)]
+    stem = os.path.splitext(os.path.basename(remote_in))[0]
+    return "%s && mv -f /root/out/%s.transcoded.mp4 %s" % (" ".join(shlex.quote(a) for a in args), stem, REMOTE_OUT)
+
+
+def transcode_cli_path():
+    """Where this process finds the transcode script it uploads to the box (the same file the home
+    runners use)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in (os.path.join(here, "transcode_cli.py"), os.path.join(here, "winrunner", "transcode_cli.py")):
+        if os.path.isfile(cand):
+            return cand
+    raise CloudJobFailed("Stashify's transcode script is missing, so nothing was rented")
+
+
 def activation_script():
     """The licence code arrives on STDIN (a line), so it is never in a command line,
     a process list or a log. A bare `jasna` with the code set activates and exits."""
@@ -721,7 +964,7 @@ def job_args(preset_key, plan=None):
 
 def output_suffix(plan):
     """The file-name suffix core.op_suffix gives what this operation produces."""
-    return "_upscaled" if plan.op == "upscale" else "_decensored"
+    return {"upscale": "_upscaled", "transcode": "_transcoded"}.get(plan.op, "_decensored")
 
 
 def run_command(remote_in, preset_key, plan=None):
@@ -740,7 +983,7 @@ PROMPTS = [(re.compile(r"Download \([^)]*\)\? \[y/N\]:\s*$"), b"y\n"),
 _RE_PCT_BAR = re.compile(r"(\d{1,3})\s*%\s*\|")
 _RE_FRAMES = re.compile(r"\(([\d,]+)f\)")
 _RE_REMAIN = re.compile(r"Remaining:\s*((?:\d+:)?\d{1,2}:\d{2})")
-_RE_SPEED = re.compile(r"([\d.]+)\s*fps", re.IGNORECASE)
+_RE_SPEED = re.compile(r"([\d.]+)\s*(?:fps|f/s)", re.IGNORECASE)     # jasna: 3.0fps; transcode_cli: 3.2f/s
 _RE_RSYNC_PCT = re.compile(r"\b(\d{1,3})%")
 
 
@@ -756,9 +999,10 @@ class RunProgress:
     stays below 100% until the process exits. The formats are from upstream's source and
     the Windows wrapper; a line that does not match is simply ignored."""
 
-    def __init__(self):
+    def __init__(self, op="decensor"):
         self.pct = 0.0
         self._dl_bucket = -1
+        self._message = "Transcoding in the cloud" if op == cloud_caps.TRANSCODE else "Decensoring in the cloud"
 
     def parse(self, line):
         """Returns a dict of runner-style fields, or None for a non-progress line. A "log"
@@ -779,7 +1023,7 @@ class RunProgress:
         pct = min(99.0, float(m.group(1)))
         self.pct = max(self.pct, pct)
         out = {"progress": self.pct / 100.0, "indeterminate": False,
-               "message": "Decensoring in the cloud"}
+               "message": self._message}
         f = _RE_FRAMES.search(line)
         if f:
             frame = int(f.group(1).replace(",", ""))
@@ -825,7 +1069,8 @@ def _after_stop(cl, job, rented):
 # message each stage reports; a message that starts none of these changes nothing.
 _PHASES = (("boot", ("Looking up", "Renting", "Installing", "Checking the video encoder", "Activating")),
            ("upload", ("Uploading",)),
-           ("run", ("Starting Jasna", "Decensoring", "Downloading the LTX")),
+           ("run", ("Starting Jasna", "Starting the transcode", "Decensoring", "Transcoding",
+                    "Downloading the LTX")),
            ("download", ("Downloading the result",)))
 
 
@@ -837,8 +1082,8 @@ def cloud_phase_of(message):
 
 
 def run_decensor(cfg, input_path, result_dir, *, on_line=None, log_cb=None, status_cb=None,
-                 cl=None, stamp=None, check_cancel=None, release_fn=None):
-    """Run one scene through cloud Jasna (Decensor, Decensor + upscale or Upscale). Returns
+                 cl=None, stamp=None, check_cancel=None, release_fn=None, ffmpeg_fn=None):
+    """Run one scene on a cloud GPU (Decensor, Decensor + upscale, Upscale or Transcode). Returns
     the produced file inside result_dir.
 
     cfg["cloud"] = {preset, scene, plan, est_usd, confirm_usd, job_id}. check_cancel(): raises
@@ -868,21 +1113,28 @@ def run_decensor(cfg, input_path, result_dir, *, on_line=None, log_cb=None, stat
         raise CloudRefused("price_changed", "The price moved from the $%.2f you confirmed to about $%.2f. "
                            "Nothing was rented; submit again to confirm the new price."
                            % (float(job.get("confirm_usd") or 0), quote["est_usd"]))
-    licence = cl.settings.get("jasna_license")
-    register_secret(licence)
+    licence = cl.settings.get("jasna_license") if plan.jasna else None
+    if licence:
+        register_secret(licence)
 
     # 2. Resolve the download links before spending anything.
-    phase("copy", 0.0, "Looking up the latest Jasna release", True)
-    rel = (release_fn or release_assets)()
-    urls = [a["url"] for a in rel["assets"]]
+    if plan.jasna:
+        phase("copy", 0.0, "Looking up the latest Jasna release", True)
+        rel = (release_fn or release_assets)()
+        urls = [a["url"] for a in rel["assets"]]
+    else:
+        phase("copy", 0.0, "Looking up the ffmpeg download", True)
+        urls = [(ffmpeg_fn or ffmpeg_asset)()["url"]]
 
-    progress = RunProgress()
+    progress = RunProgress(plan.op)
+    chosen = {}                       # what verify() found on the machine that was kept
     last = {"up": -1, "down": -1, "t": -1e9, "msg": None}
     rented = []
 
     def tick(box):
         if stamp:
-            stamp(runner="%s \u00b7 %s" % (cl.provider(box.provider).display_name, box.gpu), engine="jasna",
+            stamp(runner="%s \u00b7 %s" % (cl.provider(box.provider).display_name, box.gpu),
+                  engine="jasna" if plan.jasna else "ffmpeg",
                   cloud=True, cloud_usd=round(box.spent_total(), 2), cloud_cap=round(box.cap, 2),
                   cloud_gpu=box.gpu, cloud_offer_id=str(box.offer.id), cloud_provider=box.provider,
                   provider=cl.provider(box.provider).display_name,
@@ -898,8 +1150,19 @@ def run_decensor(cfg, input_path, result_dir, *, on_line=None, log_cb=None, stat
         say("[cloud] " + line)
 
     def verify(box):
-        """Machine acceptance: install Jasna, then the encoder check. Failing either means
+        """Machine acceptance: install the software, then the encoder check. Failing either means
         THIS machine is bad (no internet, no NVENC) -> the next offer is tried."""
+        if not plan.jasna:
+            phase("copy", 0.30, "Installing ffmpeg on the rented %s" % box.gpu, True)
+            res = box.run_script(transcode_install_script(urls[0]), on_line=log_remote, timeout=1200)
+            if res.code != 0:
+                raise hireling.VerifyFailed("installing ffmpeg failed: %s" % " | ".join(res.tail[-3:]))
+            phase("copy", 0.85, "Checking the video encoder", True)
+            res = box.run_script(transcode_encoder_script(), on_line=log_remote, timeout=180)
+            chosen["encoder"] = transcode_encoder(res.tail)
+            if not chosen["encoder"]:
+                raise hireling.VerifyFailed("this machine has no working video encoder")
+            return
         phase("copy", 0.30, "Installing Jasna on the rented %s" % box.gpu, True)
         res = box.run_script(install_script(urls), on_line=log_remote, timeout=2400)
         if res.code != 0:
@@ -917,7 +1180,10 @@ def run_decensor(cfg, input_path, result_dir, *, on_line=None, log_cb=None, stat
                      on_offer=on_offer) as box:
             tick(box)
             say("[cloud] machine ready: %s, $%.2f/hour, spend cap $%.2f" % (box.gpu, box.dph, box.cap))
-            _on_box(box, cfg, job, input_path, result_dir, urls, licence, progress, phase, say, last, plan)
+            if chosen.get("encoder") == "libx265":
+                say("[cloud] no GPU video encoder works on this machine: encoding on its CPU (slow)")
+            _on_box(box, cfg, job, input_path, result_dir, urls, licence, progress, phase, say, last, plan,
+                    chosen.get("encoder"))
             produced = _fetch_result(box, input_path, result_dir, phase, say, last, output_suffix(plan))
             if stamp:
                 stamp(cloud_phase="cleanup")
@@ -933,17 +1199,18 @@ def run_decensor(cfg, input_path, result_dir, *, on_line=None, log_cb=None, stat
         raise CloudJobFailed("Stopped: %s. %s" % (exc, _after_stop(cl, job, bool(rented)))) from None
 
 
-def _on_box(box, cfg, job, input_path, result_dir, urls, licence, progress, phase, say, last, plan):
-    """Activate, upload, run jasna. Any failure raises (and rent() destroys the box)."""
+def _on_box(box, cfg, job, input_path, result_dir, urls, licence, progress, phase, say, last, plan, encoder=None):
+    """Activate (Jasna only), upload, run. Any failure raises (and rent() destroys the box)."""
     def log_remote(line):
         say("[cloud] " + line)
 
-    phase("scan", 0.05, "Activating Jasna", True)
-    res = box.run_script(activation_script(), stdin_data=(licence + "\n").encode("utf-8"),
-                         on_line=log_remote, timeout=600)
-    if res.code != 0:
-        box.outcome = ("error", "activation failed")
-        raise ActivationFailed("Jasna activation failed: %s" % _jasna_failure(res.tail))
+    if plan.jasna:
+        phase("scan", 0.05, "Activating Jasna", True)
+        res = box.run_script(activation_script(), stdin_data=(licence + "\n").encode("utf-8"),
+                             on_line=log_remote, timeout=600)
+        if res.code != 0:
+            box.outcome = ("error", "activation failed")
+            raise ActivationFailed("Jasna activation failed: %s" % _jasna_failure(res.tail))
 
     remote_in = "/root/in/source" + _safe_ext(input_path)
 
@@ -954,6 +1221,8 @@ def _on_box(box, cfg, job, input_path, result_dir, urls, licence, progress, phas
             phase("scan", 0.15 + 0.85 * last["up"] / 100.0, "Uploading the video (%d%%)" % last["up"])
 
     phase("scan", 0.15, "Uploading the video", False)
+    if not plan.jasna:
+        box.put(transcode_cli_path(), TRANSCODE_CLI_REMOTE)
     box.put(input_path, remote_in, on_line=up_line)
 
     def run_line(line):
@@ -969,14 +1238,23 @@ def _on_box(box, cfg, job, input_path, result_dir, urls, licence, progress, phas
             last["t"], last["msg"] = now, upd["message"]
             phase("decensor", upd.pop("progress"), upd.pop("message"), upd.pop("indeterminate"), **upd)
 
-    phase("decensor", 0.0, "Starting Jasna (the first run prepares the GPU%s)"
-          % (" and may download the model" if plan.op != "upscale" else ""), True)
-    res = box.run(run_command(remote_in, job.get("preset"), plan), tty=True, prompts=PROMPTS,
+    if plan.jasna:
+        phase("decensor", 0.0, "Starting Jasna (the first run prepares the GPU%s)"
+              % (" and may download the model" if plan.restoring else ""), True)
+        res = box.run(run_command(remote_in, job.get("preset"), plan), tty=True, prompts=PROMPTS,
+                      grace=hireling.ssh.INT_GRACE_S, on_line=run_line)
+        if res.code != 0:
+            box.outcome = ("error", "jasna exited %d" % res.code)
+            raise CloudJobFailed("Jasna failed on the rented machine (exit %d): %s"
+                                 % (res.code, _jasna_failure(res.tail)))
+        return
+    phase("decensor", 0.0, "Starting the transcode (%s)" % encoder, True)
+    res = box.run(transcode_command(remote_in, encoder, plan), tty=True,
                   grace=hireling.ssh.INT_GRACE_S, on_line=run_line)
     if res.code != 0:
-        box.outcome = ("error", "jasna exited %d" % res.code)
-        raise CloudJobFailed("Jasna failed on the rented machine (exit %d): %s"
-                             % (res.code, _jasna_failure(res.tail)))
+        box.outcome = ("error", "transcode exited %d" % res.code)
+        raise CloudJobFailed("The transcode failed on the rented machine (exit %d): %s"
+                             % (res.code, " ".join(res.tail)[-300:] or "no output"))
 
 
 def _fetch_result(box, input_path, result_dir, phase, say, last, suffix="_decensored"):
@@ -985,7 +1263,7 @@ def _fetch_result(box, input_path, result_dir, phase, say, last, suffix="_decens
     res = box.run("test -s %s && stat -c %%s %s" % (REMOTE_OUT, REMOTE_OUT), timeout=60)
     sizes = [t for t in res.tail if t.strip().isdigit()]
     if res.code != 0 or not sizes:
-        raise CloudJobFailed("Jasna finished but produced no output file")
+        raise CloudJobFailed("The cloud job finished but produced no output file")
     remote_size = int(sizes[-1])
     stem = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.splitext(os.path.basename(input_path))[0])[:80] or "scene"
     local = os.path.join(result_dir, "%s%s.mp4" % (stem, suffix))

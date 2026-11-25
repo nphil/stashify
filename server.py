@@ -11,8 +11,9 @@ Endpoints (all JSON; send X-Decensor-Token if WORKER_TOKEN is set):
   GET  /api/jobs/<id>                   -> job
   POST /api/jobs/<id>/replace           -> job         (replace original in place)
   POST /api/jobs/<id>/discard           -> job         (delete the preview)
-  POST /api/decensor with cloud_preset (or cloud:true) + confirm_usd -> a PAID cloud Jasna run on a rented
-       GPU: Decensor, Decensor + upscale or Upscale (`op`, `upscale`, `upscale_height`), optionally steered to
+  POST /api/decensor with cloud_preset (or cloud:true) + confirm_usd -> a PAID cloud run on a rented
+       GPU: Decensor, Decensor + upscale, Upscale or Transcode (`op`, `upscale`, `upscale_height`,
+       `transcode_height`, `transcode_quality`), optionally steered to
        a machine (`offer_id` + `provider`, `hardware`, `gpu`, `cloud_filters`)            (cloud_api.py)
   GET  /api/cloud/{settings,status,offers,quote} and POST /api/cloud/{settings,test}   (cloud_api.py)
 
@@ -789,7 +790,8 @@ _CLOUD_QUALITY = {"close-ups": "fast", "detail": "balanced", "detail-close-ups":
 def job_op(overrides, cloud=None):
     """The dashboard's name for what a job does: decensor | decensor_up | upscale | transcode."""
     if cloud:
-        return {"upscale": "upscale", "decensor+upscale": "decensor_up"}.get(cloud.get("op"), "decensor")
+        return {"upscale": "upscale", "decensor+upscale": "decensor_up",
+                "transcode": "transcode"}.get(cloud.get("op"), "decensor")
     backend = overrides.get("backend") or core.config_from_env().get("backend")
     if backend in ("upscale", "transcode"):
         return backend
@@ -1314,7 +1316,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(status, payload)
             # what the job IS follows the validated plan, whatever else the body carried
             op = payload["op"]
-            overrides = dict(overrides, backend="upscale" if op == "upscale" else "decensor",
+            overrides = dict(overrides, backend=op if op in ("upscale", "transcode") else "decensor",
                              post_upscale=op == "decensor+upscale")
             job = new_job(scene_id, overrides, cloud=payload, title=(meta or {}).get("title"))
             _work.put(("process", job["id"]))

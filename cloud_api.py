@@ -13,6 +13,7 @@ import dataclasses
 import math
 import re
 
+import cloud_caps
 import cloud_jasna
 import hireling
 from hireling import CloudError, redact
@@ -87,7 +88,8 @@ def status(cl):
 # -- market view ------------------------------------------------------------------------ #
 
 # Query parameters that belong to Stashify, not to hireling's market contract.
-OFFER_PARAMS = ("scene", "scene_ids", "preset", "op", "upscale", "upscale_height", "hours")
+OFFER_PARAMS = ("scene", "scene_ids", "preset", "op", "upscale", "upscale_height", "transcode_height",
+                "transcode_quality", "hours")
 
 
 def _rental_estimator(hours, disk_gb):
@@ -103,10 +105,21 @@ def _caps(cl):
             "max_job_hours": cfg.max_job_hours, "month_to_date": round(cl.month_spend_committed(), 2)}
 
 
+def _explain_incompatible(payload, op):
+    """One reason wording for a machine that cannot do `op`: cloud_caps' ("No video encoder",
+    "Needs 10 GB (this has 8)"), in place of the generic search-filter sentence."""
+    for row in payload.get("offers") or ():
+        if row.get("compatible") is False and re.search(
+                r"supported kind of GPU|video memory", row.get("incompatible_reason") or ""):
+            why = cloud_caps.problem(op, row.get("gpu"), row.get("vram_gb"))
+            if why:
+                row["incompatible_reason"] = why
+
+
 def offers(cl, query, meta=None):
     """GET /api/cloud/offers : the whole GPU market behind the enabled providers, with
     hireling's filter / sort / page parameters, every offer marked compatible or not with
-    what Jasna needs (and why not).
+    what the operation needs (and why not).
 
     `meta` is the scene's facts (cloud_jasna.scene_meta) when the query names a scene, or a
     list of them for `scene_ids`. Every offer then carries what THIS job would take and cost on
@@ -119,18 +132,21 @@ def offers(cl, query, meta=None):
         return REFUSED, {"error": "Add your Vast.ai API key in Cloud settings first.", "code": "no_key"}
     cfg = cl.config()
     try:
-        plan = cloud_jasna.plan_from_body({k: query[k] for k in ("op", "upscale", "upscale_height") if k in query})
+        plan = cloud_jasna.plan_from_body({k: query[k] for k in ("op", "upscale", "upscale_height",
+                                                                  "transcode_height", "transcode_quality")
+                                           if k in query})
     except cloud_jasna.PlanError as exc:
         return 400, {"error": str(exc), "code": exc.code}
     metas = [] if meta is None else list(meta) if isinstance(meta, (list, tuple)) else [meta]
-    requirements, estimator, target = cloud_jasna.requirements(cfg), None, None
+    requirements, estimator, target = cloud_jasna.requirements(cfg, op=plan.op), None, None
     if metas:
-        restoring = plan.op != "upscale"
+        restoring = plan.restoring
         preset = query.get("preset") or cloud_jasna.DEFAULT_PRESET
         if restoring and preset not in cloud_jasna.PRESETS:
             return 400, {"error": "Unknown cloud quality preset.", "code": "bad_preset"}
         # one rental per scene: the machine must fit the scene that needs the most disk
-        requirements = max((cloud_jasna.requirements(cfg, m.get("size") or 0, ratio=cloud_jasna.result_ratio(m, plan))
+        requirements = max((cloud_jasna.requirements(cfg, m.get("size") or 0,
+                                                     ratio=cloud_jasna.result_ratio(m, plan), op=plan.op)
                             for m in metas), key=lambda r: r.disk_gb)
         known = all((m.get("duration") or 0) > 0 for m in metas)
         if known:
@@ -156,6 +172,7 @@ def offers(cl, query, meta=None):
         return REFUSED, {"error": redact(exc), "code": "no_key"}
     except CloudError as exc:
         return 502, {"error": redact(exc), "code": "offers_unavailable"}
+    _explain_incompatible(payload, plan.op)
     if payload["errors"] and not payload["offers"]:        # nothing to show and a provider failed: say why
         return 502, {"error": next(iter(payload["errors"].values())), "code": "offers_unavailable",
                      "errors": payload["errors"]}
@@ -195,7 +212,7 @@ def quotes(cl, items, preset, queued_usd=0.0, params=None):
         plan = cloud_jasna.plan_from_body(params)
     except cloud_jasna.PlanError as exc:
         return 400, {"error": str(exc), "code": exc.code}
-    restoring = plan.op != "upscale"
+    restoring = plan.restoring
     if restoring and preset not in cloud_jasna.PRESETS:
         return 400, {"error": "Unknown cloud quality preset.", "code": "bad_preset"}
     preset = preset if restoring else None
@@ -229,7 +246,7 @@ def admit(cl, body, meta, queued_usd, backend):
         plan = cloud_jasna.plan_from_body(body, backend)
     except cloud_jasna.PlanError as exc:
         return 400, {"error": str(exc), "code": exc.code}
-    restoring = plan.op != "upscale"
+    restoring = plan.restoring
     preset = body.get("cloud_preset") if restoring else None
     if restoring and preset not in cloud_jasna.PRESETS:
         return 400, {"error": "Unknown cloud quality preset.", "code": "bad_preset"}

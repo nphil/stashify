@@ -741,8 +741,8 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None,
 
 
 def _run_cloud(cfg, input_path, result_dir, log_cb, status_cb):
-    """A paid cloud Jasna job (cloud_jasna.py) rents a GPU instead of using a runner and runs
-    Decensor, Decensor + upscale or Upscale there, as cfg["cloud"]["plan"] says; on_line is not
+    """A paid cloud job (cloud_jasna.py) rents a GPU instead of using a runner and runs Decensor,
+    Decensor + upscale, Upscale or Transcode there, as cfg["cloud"]["plan"] says; on_line is not
     needed, status_cb carries the stages."""
     import cloud_jasna
     return cloud_jasna.run_decensor(cfg, input_path, result_dir, log_cb=log_cb, status_cb=status_cb,
@@ -763,6 +763,8 @@ def backend_upscale(cfg, input_path, result_dir, on_line=None, log_cb=None, stat
 
 
 def backend_transcode(cfg, input_path, result_dir, on_line=None, log_cb=None, status_cb=None):
+    if cfg.get("cloud"):
+        return _run_cloud(cfg, input_path, result_dir, log_cb, status_cb)
     return _runner_dispatch(cfg, input_path, result_dir, "transcode", on_line=on_line, log_cb=log_cb, status_cb=status_cb)
 
 

@@ -7,5 +7,6 @@ web/shots
 design
 docs
 tests
-winrunner
+winrunner/*
+!winrunner/transcode_cli.py
 unraid

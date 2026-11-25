@@ -20,6 +20,7 @@ from cloudfakes import KEY, LICENCE, UPSCALE, Resp, market, raw_offer   # noqa: 
 import hireling                       # noqa: E402
 from hireling import ssh             # noqa: E402
 from hireling.providers.vast import parse_offer   # noqa: E402
+import cloud_caps                     # noqa: E402
 import cloud_jasna as cj             # noqa: E402
 import core                          # noqa: E402
 import jobprogress                   # noqa: E402
@@ -157,13 +158,13 @@ class PresetTest(unittest.TestCase):
                 self.assertIn("--ltx-large-canvas", args)           # plain LTX standard is not offered
 
     def test_gpu_rules_follow_upstream(self):
-        self.assertTrue(all(g.startswith("RTX") for g in cj.GPUS))   # data-centre cards do not work
-        self.assertEqual(cj.GPUS[:2], ("RTX 5090", "RTX 4090"))       # prefer 5090, then 4090
-        self.assertGreaterEqual(cj.MIN_VRAM_GB, 16)
-        self.assertGreaterEqual(cj.MIN_DRIVER, 580)
-        spec = cj.rent_spec(hireling.settings.Config(), 5_000_000_000)
+        need = cloud_caps.need_for("decensor")
+        self.assertEqual((need.gpu_pattern, need.min_driver), ("^RTX", 580))   # data-centre cards do not work
+        self.assertEqual(need.min_vram_gb, 10)                                  # the README's figure; a 3080 has 10
+        spec = cj.requirements(hireling.settings.Config(), 5_000_000_000)
+        self.assertEqual(spec.gpus, ())                                         # no preference list: any card that can
         self.assertEqual(spec.env, {"NVIDIA_DRIVER_CAPABILITIES": "all"})
-        self.assertEqual((spec.min_vram_gb, spec.min_driver), (16, 580))
+        self.assertEqual((spec.min_vram_gb, spec.min_driver), (10, 580))
         self.assertGreaterEqual(spec.disk_gb, 80 + 15)               # upstream: >= 80 GB, plus the video x3
 
 
@@ -565,7 +566,7 @@ class LifecycleTest(JasnaCase):
 
     def test_a_machine_that_vanishes_after_the_quote_is_also_a_refusal(self):
         cfg = self.cfg()
-        stale = self.cl.best_offer(cj.rent_spec(self.cl.config(), SCENE["size"]))    # what a price check saw ...
+        stale = self.cl.best_offer(cj.requirements(self.cl.config(), SCENE["size"]))    # what a price check saw ...
         self.vast.offers = []                              # ... and the market empties out before the rental
         with mock.patch.object(self.cl, "best_offer", return_value=stale):
             with self.assertRaises(cj.CloudRefused) as cm:
@@ -715,8 +716,8 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(cj.plan_from_body({"op": "decensor"}, "upscale").op, "decensor")        # op beats the backend
 
     def test_other_operations_are_refused(self):
-        for body, backend in (({"op": "transcode"}, None), ({"op": "chain"}, None), ({"op": "UPSCALE"}, None),
-                              ({}, "transcode"), ({}, "command"), ({}, "span")):
+        for body, backend in (({"op": "chain"}, None), ({"op": "UPSCALE"}, None),
+                              ({}, "command"), ({}, "span")):
             self.assertEqual(self.code(body, backend), "bad_op", (body, backend))
 
     def test_the_upscale_settings(self):
@@ -799,8 +800,9 @@ class NarrowTest(cf.CloudCase):
             have = getattr(base, key)
             self.assertEqual(getattr(cj.narrow(base, {key: low}), key), max(have, low), key)
             self.assertEqual(getattr(cj.narrow(base, {key: high}), key), max(have, high), key)
-        self.assertEqual(cj.narrow(base, {"min_vram_gb": 8}).min_vram_gb, cj.MIN_VRAM_GB)      # Jasna's floor stays
-        self.assertEqual(cj.narrow(base, {"min_driver": 1}).min_driver, cj.MIN_DRIVER)
+        need = cloud_caps.need_for("decensor")
+        self.assertEqual(cj.narrow(base, {"min_vram_gb": 8}).min_vram_gb, need.min_vram_gb)    # Jasna's floor stays
+        self.assertEqual(cj.narrow(base, {"min_driver": 1}).min_driver, need.min_driver)
 
     def test_price_limits_only_go_down(self):
         base = self.base()
@@ -850,8 +852,8 @@ class PlanSpecTest(cf.CloudCase):
     def test_the_automatic_choice_is_unchanged(self):
         cfg = self.cl.config()
         spec = cj.plan_spec(cj.Plan(), cfg, 5_000_000_000)
-        self.assertEqual(spec, cj.rent_spec(cfg, 5_000_000_000))
-        self.assertEqual(spec.gpus, cj.GPUS)
+        self.assertEqual(spec, cj.requirements(cfg, 5_000_000_000))
+        self.assertEqual(spec.gpus, ())                                  # every card that can do the job
         self.assertEqual(spec.max_hours, cfg.max_job_hours)
 
     def test_a_chosen_gpu_drops_the_preference_list(self):
@@ -914,7 +916,7 @@ class PlanEstimateTest(cf.CloudCase):
     def test_the_dict_has_everything_a_dashboard_needs(self):
         out = cj.estimate(self.BIG, "detail", self.offer(), 4.6)
         self.assertEqual(set(out), {"hours", "minutes", "breakdown", "est_usd", "assumptions", "setup_min",
-                                    "transfer_min", "processing_min", "total_min", "disk_gb"})
+                                    "transfer_min", "processing_min", "total_min", "disk_gb", "up_min", "down_min"})
         self.assertEqual(out["total_min"], out["minutes"])
         self.assertAlmostEqual(out["setup_min"] + out["transfer_min"] + out["processing_min"], out["total_min"],
                                delta=0.2)
@@ -996,7 +998,7 @@ class PlanQuoteTest(cf.CloudCase):
         for key in ("hours", "minutes", "breakdown", "assumptions", "setup_min", "processing_min", "transfer_min",
                     "total_min"):
             self.assertIn(key, q)
-        self.assertEqual(spec.gpus, cj.GPUS)
+        self.assertEqual(spec.gpus, ())
         self.assertEqual(spec.disk_gb, q["disk_gb"])
         self.assertNotIn(KEY, json.dumps(q))
 
@@ -1185,7 +1187,7 @@ class PlanArgsTest(unittest.TestCase):
     def test_the_file_suffix_follows_core(self):
         for op in cj.OPS:
             plan = cj.plan_from_body(dict(UPSCALE, op=op))
-            self.assertEqual(cj.output_suffix(plan), core.op_suffix("upscale" if op == "upscale" else "decensor"), op)
+            self.assertEqual(cj.output_suffix(plan), core.op_suffix(op if op in ("upscale", "transcode") else "decensor"), op)
 
     def test_the_labels(self):
         self.assertEqual(cj.plan_label(cj.Plan(), "close-ups"), "Sharper close-ups")

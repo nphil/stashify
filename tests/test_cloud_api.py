@@ -231,7 +231,7 @@ class OffersApiTest(cf.CloudCase):
 
     def test_bad_queries_are_a_400(self):
         for query, meta, code in (({"sort": "nope"}, None, "bad_query"), ({"limit": "0"}, None, "bad_query"),
-                                  ({"nope": "1"}, None, "bad_query"), ({"op": "transcode"}, SCENE, "bad_op"),
+                                  ({"nope": "1"}, None, "bad_query"), ({"op": "chain"}, SCENE, "bad_op"),
                                   ({"preset": "normal"}, SCENE, "bad_preset"),
                                   ({"op": "upscale", "upscale": "dlss5"}, SCENE, "bad_upscale"),
                                   ({"op": "upscale", "upscale_height": "720"}, SCENE, "bad_upscale_height")):
@@ -324,7 +324,7 @@ class QuotesApiTest(cf.CloudCase):
         self.assertEqual(payload["op"], "upscale")
 
     def test_a_bad_plan_is_a_400(self):
-        for params, code in (({"op": "transcode"}, "bad_op"), ({"op": "upscale", "upscale": "dlss5"}, "bad_upscale"),
+        for params, code in (({"op": "chain"}, "bad_op"), ({"op": "upscale", "upscale": "dlss5"}, "bad_upscale"),
                              ({"hardware": "turbo"}, "bad_hardware")):
             status, payload = cloud_api.quotes(self.cl, [("5", SCENE)], "detail", params=params)
             self.assertEqual((status, payload["code"]), (400, code), params)
@@ -425,10 +425,10 @@ class AdmitTest(cf.CloudCase):
         for preset in ("normal", "basicvsrpp", "ltx", "ltx-8step", "", None, "Detail"):
             self.assertEqual(self.admit(self.body(cloud_preset=preset))[1]["code"], "bad_preset", preset)
 
-    def test_only_decensor_and_upscale_runs_go_to_the_cloud(self):
-        for backend in ("transcode", "command"):
+    def test_only_the_four_operations_go_to_the_cloud(self):
+        for backend in ("chain", "command"):
             self.assertEqual(self.admit(backend=backend)[1]["code"], "bad_op", backend)
-        self.assertEqual(self.admit(self.body(op="transcode"))[1]["code"], "bad_op")
+        self.assertEqual(self.admit(self.body(op="chain"))[1]["code"], "bad_op")
 
     def test_an_unknown_scene_is_a_404(self):
         self.assertEqual(self.admit(meta=None)[0], 404)
@@ -485,7 +485,7 @@ class AdmitTest(cf.CloudCase):
 
     def test_a_bad_plan_is_a_400_and_asks_the_market_nothing(self):
         self.vast.calls.clear()
-        for plan, code in (({"op": "transcode"}, "bad_op"),
+        for plan, code in (({"op": "chain"}, "bad_op"),
                            ({"op": "decensor+upscale", "upscale": "dlss5"}, "bad_upscale"),
                            ({"op": "decensor+upscale", "upscale_height": 720}, "bad_upscale_height"),
                            ({"hardware": "turbo"}, "bad_hardware"),
@@ -692,8 +692,8 @@ class ServerRoutesTest(cf.CloudCase):
     def test_refused_for_other_presets_and_other_operations(self):
         self.assertEqual(self.submit(cloud_preset="normal")[1]["code"], "bad_preset")
         self.assertEqual(self.submit(cloud_preset="ltx")[1]["code"], "bad_preset")
-        self.assertEqual(self.submit(backend="transcode")[1]["code"], "bad_op")
-        self.assertEqual(self.submit(op="transcode")[1]["code"], "bad_op")
+        self.assertEqual(self.submit(backend="chain")[1]["code"], "bad_op")
+        self.assertEqual(self.submit(op="chain")[1]["code"], "bad_op")
         self.assertNothingQueuedOrRented()
 
     def test_an_unknown_scene_is_refused(self):
@@ -738,7 +738,7 @@ class ServerRoutesTest(cf.CloudCase):
 
     def test_the_offers_route_has_its_own_errors(self):
         self.assertEqual(self.call("GET", "/api/cloud/offers?sort=nope")[1]["code"], "bad_query")
-        self.assertEqual(self.call("GET", "/api/cloud/offers?scene=5&op=transcode")[1]["code"], "bad_op")
+        self.assertEqual(self.call("GET", "/api/cloud/offers?scene=5&op=chain")[1]["code"], "bad_op")
         self.gql_scene = None
         status, body = self.call("GET", "/api/cloud/offers?scene=5")
         self.assertEqual((status, body["code"]), (404, "no_scene"))
