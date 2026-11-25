@@ -69,7 +69,7 @@ export const pct = (j: Job): number => Math.round(Math.min(1, Math.max(0, j.prog
 
 /** the bar sweeps instead of showing a frozen 0% */
 export function isIndeterminate(j: Job): boolean {
-  if (j.paused || (j.state !== 'queued' && j.state !== 'running')) return false;
+  if (j.paused || (j.state !== 'queued' && j.state !== 'running' && j.state !== 'replacing')) return false;
   if (j.indeterminate !== undefined) return j.indeterminate;
   return !(j.progress > 0 || (j.frame != null && j.total_frames));
 }

@@ -1,0 +1,26 @@
+<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stashify mockups</title>
+<style>
+body{margin:0;font:14px system-ui;background:#191724;color:#e0def4;display:flex;flex-direction:column;height:100vh}
+nav{display:flex;flex-wrap:wrap;gap:6px;padding:8px;background:#1f1d2e;border-bottom:1px solid #403d52;align-items:center}
+nav b{margin:0 4px 0 8px;color:#908caa;font-weight:600}
+button{font:inherit;padding:6px 10px;border-radius:999px;border:1px solid #403d52;background:#26233a;color:#e0def4;cursor:pointer}
+button.on{background:#a79bf5;color:#191724;border-color:#a79bf5}
+iframe{flex:1;border:0;width:100%}
+</style>
+<nav>
+<b>Layout</b><span id="c"></span>
+<b>Screen</b><span id="s"></span>
+<b>Theme</b><span id="t"></span>
+</nav>
+<iframe id="f"></iframe>
+<script>
+var C={"A · Tray":"concept-a-tray.html","B · Side panel":"concept-b-inspector.html","C · Steps":"concept-c-stepped.html"};
+var S={"Pick a card":"cloud","Start (scenes picked)":"compose","Quality":"quality","Where":"where","All machines":"browse","Cost detail":"breakdown","Confirm paid run":"confirm","Jobs":"jobs","Review":"review","Cloud settings":"cloudset","Rental browser alone":"standalone"};
+var T={"Dark":"","Light":"light"};
+var st={c:"concept-a-tray.html",s:"cloud",t:""};
+function go(){var q=[];if(st.s)q.push("s="+st.s);if(st.t)q.push("theme="+st.t);document.getElementById("f").src=st.c+(q.length?"?"+q.join("&"):"");}
+function row(id,map,key){var h=document.getElementById(id);Object.keys(map).forEach(function(n){var b=document.createElement("button");b.textContent=n;
+ if(map[n]===st[key])b.className="on";b.onclick=function(){st[key]=map[n];[].forEach.call(h.children,function(x){x.className=""});b.className="on";go();};h.appendChild(b);});}
+row("c",C,"c");row("s",S,"s");row("t",T,"t");go();
+</script>

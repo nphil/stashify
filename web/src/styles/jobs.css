@@ -1,5 +1,5 @@
 /* ---------- jobs ---------- */
-.job { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: var(--lu-space-5); padding: var(--lu-space-5); border-radius: var(--lu-radius-card); background: var(--lu-material-card); border: 1px solid var(--lu-material-edge); }
+.job { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: var(--lu-space-5); padding: var(--lu-inset-card); border-radius: var(--lu-radius-card); background: var(--lu-material-card); border: 1px solid var(--lu-material-edge); }
 .jmedia { display: grid; grid-template-columns: 1fr 1fr; gap: var(--lu-space-2); align-content: start; }
 .jmedia .jv { position: relative; aspect-ratio: 16 / 9; border-radius: var(--lu-radius-control); overflow: hidden; }
 .jmedia .jc { grid-column: 1 / -1; display: flex; justify-content: space-between; color: var(--lu-ink-2); font: 500 var(--lu-type-caption)/1.3 var(--lu-font); }

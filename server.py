@@ -1045,7 +1045,9 @@ def do_replace(job):
     info = job.get("_info")
     if not info:
         raise RuntimeError("Nothing to replace (no preview).")
-    set_job(job_id, state="replacing", progress=0.0, message="Replacing original", indeterminate=False)
+    # fresh clock + no leftovers from the processing run: this phase shows its own steps and elapsed only
+    set_job(job_id, state="replacing", progress=0.0, message="Replacing original", indeterminate=False,
+            started_at=time.time(), eta=None, fps=None, estimate=False)
     cfg = job_config(job)
     core.replace_original(get_stash(), cfg, info, progress=progress_cb(job_id))
     set_job(job_id, state="replaced", progress=1.0, message="Original replaced")

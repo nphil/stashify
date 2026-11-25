@@ -22,6 +22,8 @@
   const idle = $derived(idleSeconds(job, now));
   const stalled = $derived(idle !== null && idle >= STALL_S);
   const eta = $derived(job.eta != null && !job.paused && job.state === 'running' ? job.eta : null);
+  /* the replace phase has no speed or time left: show only how long it has been going */
+  const timed = $derived(job.state !== 'replacing');
   const speed = $derived(job.fps != null && !job.paused ? `${Math.round(job.fps * 10) / 10} fps` : dash);
 </script>
 
@@ -43,8 +45,10 @@
   <div class={['bar thick pbar', indet && 'indeterminate', (job.paused || stalled) && 'is-paused']} role="progressbar" aria-valuemin="0" aria-valuemax="100"
     aria-valuenow={indet ? undefined : percent} aria-valuetext={job.estimate ? `${percent}%, an estimate` : undefined} aria-label={`${title} progress`}><i style:--p={percent / 100}></i></div>
   <dl class="jmeta">
-    <div><dt>Time left{#if eta != null && job.estimate}{' (estimate)'}{/if}</dt><dd class="num">{eta != null ? leftWord(eta) : dash}</dd></div>
-    <div><dt>Speed</dt><dd class="num">{speed}</dd></div>
+    {#if timed}
+      <div><dt>Time left{#if eta != null && job.estimate}{' (estimate)'}{/if}</dt><dd class="num">{eta != null ? leftWord(eta) : dash}</dd></div>
+      <div><dt>Speed</dt><dd class="num">{speed}</dd></div>
+    {/if}
     <div><dt>Running</dt><dd class="num">{job.elapsed != null ? fmtDur(job.elapsed) : dash}</dd></div>
   </dl>
   <p class={['jlive cap', stalled ? 'warn' : 'muted']} role={stalled ? 'alert' : undefined}>

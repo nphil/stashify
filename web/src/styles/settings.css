@@ -22,7 +22,7 @@
 
 /* ---------- states board ---------- */
 .edge { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: var(--lu-space-4); }
-.efr { display: flex; flex-direction: column; gap: var(--lu-space-3); min-width: 0; padding: var(--lu-space-5); border-radius: var(--lu-radius-card); background: var(--lu-material-card); border: 1px solid var(--lu-material-edge); }
+.efr { display: flex; flex-direction: column; gap: var(--lu-space-3); min-width: 0; padding: var(--lu-inset-card); border-radius: var(--lu-radius-card); background: var(--lu-material-card); border: 1px solid var(--lu-material-edge); }
 .skels { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--lu-space-3); }
 .erow { display: flex; align-items: center; gap: var(--lu-space-3); min-height: var(--lu-row); padding: var(--lu-space-2) var(--lu-space-3); border-radius: var(--lu-radius-row); }
 .erow + .erow { border-top: 1px solid var(--lu-material-edge); border-radius: 0; }
@@ -31,7 +31,7 @@
 .eskel { display: flex; flex-direction: column; gap: var(--lu-space-2); padding: var(--lu-space-4); border: 1px solid var(--lu-material-edge); border-radius: var(--lu-radius-row); }
 
 /* ---------- runners page ---------- */
-.rlist { padding: var(--lu-space-2) var(--lu-space-5); }
+.rlist { padding-block: var(--lu-space-2); }
 .runner .gt.mute { opacity: var(--lu-material-disabled-opacity); }
 .ract { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--lu-space-3); }
 .prefer { display: inline-flex; align-items: center; gap: var(--lu-space-2); font: 600 var(--lu-type-label)/1 var(--lu-font); }

@@ -828,12 +828,58 @@ def apply_metadata(stash, new_id, original, trigger_tag_id, done_tag_id):
     stash.update_scene(update)
 
 
-def scan_and_wait(stash, path):
+SCAN_WAIT_MAX_S = 600
+
+
+def scan_and_wait(stash, path, on_progress=None):
+    """Scan `path` in Stash and wait for that job. `on_progress(frac_or_None)` gets Stash's own
+    progress for the scan job (None while Stash has not reported one), so a caller can show it moving."""
     job_id = stash.metadata_scan(paths=[path])
+    deadline = time.time() + SCAN_WAIT_MAX_S
     try:
-        stash.wait_for_job(job_id)
+        while True:
+            job = stash.find_job(job_id) or {}
+            status = str(job.get("status") or "").upper()
+            if status in ("FINISHED", "CANCELLED", "FAILED"):
+                return
+            prog = job.get("progress")
+            if on_progress:
+                on_progress(max(0.0, min(1.0, float(prog))) if isinstance(prog, (int, float)) and prog >= 0 else None)
+            if time.time() > deadline:
+                raise TimeoutError(f"scan job {job_id} still {status or 'unknown'} after {SCAN_WAIT_MAX_S}s")
+            time.sleep(1.0)
     except Exception as exc:  # noqa: BLE001 - scan may still have succeeded
-        log.warning(f"Timed out waiting for scan job; continuing. ({exc})")
+        log.warning(f"Stopped waiting for scan job; continuing. ({exc})")
+
+
+def _move_into_place(src, dst, on_bytes=None):
+    """Move src over dst. Same filesystem = instant rename; otherwise a chunked copy beside dst
+    (so a failure never leaves a half-written original) with `on_bytes(done, total)`, then a rename."""
+    if os.stat(src).st_dev == os.stat(os.path.dirname(dst) or ".").st_dev:
+        os.replace(src, dst)
+        return
+    total = os.path.getsize(src)
+    tmp = dst + ".stashify-part"
+    done = 0
+    try:
+        with open(src, "rb") as fi, open(tmp, "wb") as fo:
+            while True:
+                buf = fi.read(8 * 1024 * 1024)
+                if not buf:
+                    break
+                fo.write(buf)
+                done += len(buf)
+                if on_bytes:
+                    on_bytes(done, total)
+        shutil.copystat(src, tmp)
+        os.replace(tmp, dst)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    os.remove(src)
 
 
 def import_result(stash, cfg, original, cleaned_path, trigger_tag_id, done_tag_id):
@@ -1288,9 +1334,20 @@ def result_facts(stash, scene, review_id, dest):
 def replace_original(stash, cfg, info, progress=None):
     """Overwrite the original file with the decensored one (no backup),
     preserving the original scene's metadata/history, and remove the preview."""
-    def p(frac, msg=None):
+    steps = 5
+
+    def p(frac, msg, step, indeterminate=False):
+        """One honest status: the step's plain name, "Step n of 5", and a bar that is either real
+        (bytes copied, Stash's own scan progress) or marked indeterminate while we only wait."""
         if progress:
-            progress(frac, msg)
+            progress(frac, msg, {"phase": msg, "step": step, "steps": steps, "detail": None, "pass_no": None,
+                                 "passes": None, "estimate": False, "indeterminate": indeterminate})
+
+    def band(lo, hi):
+        def cb(f):          # f = Stash's own scan progress, or None while it has not reported one
+            p(lo if f is None else lo + (hi - lo) * f, scan_msg[0], scan_msg[1], f is None)
+        return cb
+    scan_msg = ["", 0]
 
     orig_path = info["orig_path"]
     dest = info["output_path"]
@@ -1304,7 +1361,7 @@ def replace_original(stash, cfg, info, progress=None):
     except OSError:
         orig_stat = None
 
-    p(0.2, "Removing preview entry")
+    p(0.02, "Removing the preview", 1)
     if review_id:
         try:
             # Delete the DB entry but NOT the file — we are about to move it.
@@ -1319,18 +1376,23 @@ def replace_original(stash, cfg, info, progress=None):
             "preserved."
         )
 
-    p(0.4, "Replacing original file")
-    shutil.move(dest, orig_path)  # overwrite original bytes in place
+    p(0.1, "Copying the new video into place", 2)
+    _move_into_place(dest, orig_path,
+                     lambda done, total: p(0.1 + 0.4 * done / max(total, 1), "Copying the new video into place", 2))
     if orig_stat is not None and hasattr(os, "chown"):
         try:
             os.chown(orig_path, orig_stat.st_uid, orig_stat.st_gid)
         except OSError:
             pass
 
-    p(0.6, "Rescanning original")
-    scan_and_wait(stash, os.path.dirname(orig_path))
+    scan_msg[:] = ["Rescanning in Stash", 3]
+    p(0.5, scan_msg[0], 3, True)
+    scan_and_wait(stash, os.path.dirname(orig_path), band(0.5, 0.75))
     # Clear the now-moved preview file from the output library.
-    scan_and_wait(stash, cfg["outputDir"])
+    scan_msg[:] = ["Clearing the preview from Stash", 3]
+    p(0.75, scan_msg[0], 3, True)
+    scan_and_wait(stash, cfg["outputDir"], band(0.75, 0.9))
+    p(0.9, "Updating tags and details", 4)
 
     # Tag the original with what was done to it (Decensored / Upscaled / both)
     # so dashboards + Stash tag views can filter accordingly.
@@ -1347,7 +1409,8 @@ def replace_original(stash, cfg, info, progress=None):
     except Exception as exc:  # noqa: BLE001 - tagging is best-effort
         log.warning(f"Could not tag original: {exc}")
 
-    p(1.0, "Replaced")
+    p(0.98, "Finishing", 5)
+    p(1.0, "Replaced", 5)
     return info["orig_scene_id"]
 
 

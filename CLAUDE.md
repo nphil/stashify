@@ -61,6 +61,11 @@ ShipLog facts (learned 2026-08-14 by reading its source):
   is `web/src/lib/api/cloudAdapter.ts`. Live updates come from `GET api/events`
   (SSE, `events.py`); behind a proxy it must not buffer (`X-Accel-Buffering: no`
   is sent; Caddy streams it by default).
+- **Lucent card padding rule:** every card/panel has an inner inset of at least
+  `--lu-inset-card` (20px, `web/src/styles/base.css`; `.panel.card` and `.job` apply it).
+  Rows, text and controls sit inside that inset and never touch the card edge;
+  separators may run full width, content may not. New card = use the token, not
+  a literal. Check every new card at 390 and 1440 wide before shipping.
 - Deployment target is the unRAID server `beastnas` (reachable via
   `tailscale ssh root@beastnas`; port-22 SSH is closed, Tailscale SSH is in
   check mode so the user may need to approve a login URL). Containers

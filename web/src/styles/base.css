@@ -1,5 +1,6 @@
 :root, [data-theme] {
   --h-btn: var(--lu-target);
+  --lu-inset-card: var(--lu-space-5); /* minimum inner inset of every card: rows and controls sit inside it, never on the edge */
   --h-chip: calc(var(--lu-target) - var(--lu-space-2));
   --lu-press-wash: color-mix(in srgb, var(--lu-ink) 8%, transparent);
   --lu-hover-wash: var(--lu-material-hover-wash);
@@ -166,7 +167,7 @@ html[data-shot] *, html[data-shot] *::before, html[data-shot] *::after { animati
 
 /* ---------- surfaces (Lucent classes + app panels) ---------- */
 .panel { background: var(--lu-material-overlay); border: 1px solid var(--lu-material-edge); border-radius: var(--lu-radius-sheet); box-shadow: var(--lu-shadow-rest); }
-.panel.card { border-radius: var(--lu-radius-card); }
+.panel.card { border-radius: var(--lu-radius-card); padding-inline: var(--lu-inset-card); }
 .pop { background: var(--lu-reading); border: 1px solid var(--lu-material-edge); border-radius: var(--lu-radius-card); box-shadow: var(--lu-shadow-rest); z-index: var(--lu-z-popup); }
 .well { background: var(--lu-material-well); border-radius: var(--lu-radius-row); box-shadow: var(--lu-neumorphic-inset); }
 .sect { padding: var(--lu-space-4) 0; }
