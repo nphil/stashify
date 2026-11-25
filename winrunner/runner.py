@@ -1347,6 +1347,11 @@ def enabled_engines():
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "stashify-winrunner/1.0"
+    # Keep connections open between requests (every response carries its length).
+    # A new connection per poll piled up thousands of lingering closed ones on
+    # Windows, and new connects that collided with them were dropped.
+    protocol_version = "HTTP/1.1"
+    timeout = 90                     # an idle kept-open connection is closed after this
 
     def log_message(self, fmt, *args):
         logging.debug("%s - %s", self.address_string(), fmt % args)
@@ -1368,6 +1373,8 @@ class Handler(BaseHTTPRequestHandler):
     def _body(self):
         n = int(self.headers.get("Content-Length", "0") or 0)
         if n <= 0 or n > MAX_BODY:
+            if n > MAX_BODY:
+                self.close_connection = True   # unread body: this connection can't be reused
             return {}
         try:
             return json.loads(self.rfile.read(n) or b"{}")

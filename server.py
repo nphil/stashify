@@ -210,6 +210,14 @@ def _runner_queue_eta(name):
     return int(max(etas)) if all(e is not None for e in etas) else None
 
 
+# A runner's last good answer, held briefly. The NAS drops a share of connections to
+# a healthy PC; without this every dropped probe blanked the runner card (it flapped
+# between full details, "offline" and a false "token mismatch") and its GPU meters.
+STICKY_SECS = 20
+_last_probe = {}                # url -> (time, row)
+_last_gpu = {}                  # url -> (time, gpu dict)
+
+
 def probe_runner(r):
     """Live status for one runner (for the dashboard list)."""
     import requests
@@ -234,17 +242,16 @@ def probe_runner(r):
         out["gpu"], out["vram_gb"] = _runner_gpu_facts(out["name"], label)
         out["qualities"] = _runner_qualities(out["ops"], out["engines"])
         out["queue_eta_s"] = _runner_queue_eta(out["name"])
-    except Exception:  # noqa: BLE001 - maybe reachable but token-gated
-        try:
-            p = requests.get(url + "/ping", timeout=3).json()
-            if p.get("stashify"):
-                out.update(online=True, node=p.get("node"), kind=p.get("kind"),
-                           ops=p.get("ops") or r.get("ops"),
-                           engines=p.get("engines") or r.get("engines"), note="token mismatch")
-        except Exception:  # noqa: BLE001
-            if can_wake:
-                out.update(asleep=True, note="asleep - wakes when a job needs it",
-                           wake_eta_s=wake_eta())
+        _last_probe[url] = (time.time(), dict(out))
+    except PermissionError:      # reachable, and it really did refuse our token
+        out.update(online=True, note="token mismatch")
+    except Exception:  # noqa: BLE001 - no answer this time
+        held = _last_probe.get(url)
+        if held and time.time() - held[0] < STICKY_SECS:
+            return dict(held[1])
+        if can_wake:
+            out.update(asleep=True, note="asleep - wakes when a job needs it",
+                       wake_eta_s=wake_eta())
     return out
 
 
@@ -503,7 +510,7 @@ def _read_runner_gpu(url, token):
     """One runner's /gpu (flat {util,mem_used,mem_total,temp,power}), or None if unreachable."""
     import requests
     try:
-        r = requests.get(url + "/gpu", headers={"X-Runner-Token": token, "X-Lada-Token": token}, timeout=3)
+        r = core.http().get(url + "/gpu", headers={"X-Runner-Token": token, "X-Lada-Token": token}, timeout=3)
         if r.ok:
             d = r.json()
             if isinstance(d, dict) and d.get("util") is not None:
@@ -558,6 +565,12 @@ def gpu_poller():
                             gpus[t["url"]] = fut.result()
                         except Exception:  # noqa: BLE001
                             gpus[t["url"]] = None
+            now = time.time()
+            for u_, g_ in list(gpus.items()):
+                if g_ is not None:
+                    _last_gpu[u_] = (now, g_)
+                elif u_ in _last_gpu and now - _last_gpu[u_][0] < STICKY_SECS:
+                    gpus[u_] = _last_gpu[u_][1]
             rows = [{"name": t["name"], "url": t["url"], "online": gpus.get(t["url"]) is not None,
                      "active": t["name"] in active, "gpu": gpus.get(t["url"]) or {}} for t in targets]
             if not rows:                                  # worker-on-GPU-host fallback
@@ -600,7 +613,7 @@ def _preview_runner(info, dest_dir):
     headers = {"X-Runner-Token": tok, "X-Lada-Token": tok}
     for which in ("after", "before"):
         try:
-            r = requests.get("%s/jobs/%s/preview/%s.jpg" % (info["base"], info["rid"], which),
+            r = core.http().get("%s/jobs/%s/preview/%s.jpg" % (info["base"], info["rid"], which),
                              headers=headers, timeout=10)
         except Exception:  # noqa: BLE001
             return
@@ -625,7 +638,7 @@ def _mirror_segments(info, jid, dest):
     tok = info.get("token", "")
     headers = {"X-Runner-Token": tok, "X-Lada-Token": tok}
     try:
-        r = requests.get("%s/jobs/%s/segments" % (info["base"], info["rid"]),
+        r = core.http().get("%s/jobs/%s/segments" % (info["base"], info["rid"]),
                          headers=headers, timeout=10)
         if r.status_code != 200:
             return
@@ -641,7 +654,7 @@ def _mirror_segments(info, jid, dest):
         ok = True
         for which in ("before", "after"):
             try:
-                rr = requests.get("%s/jobs/%s/seg/%d/%s.mp4" % (info["base"], info["rid"], n, which),
+                rr = core.http().get("%s/jobs/%s/seg/%d/%s.mp4" % (info["base"], info["rid"], n, which),
                                   headers=headers, timeout=30)
             except Exception:  # noqa: BLE001
                 ok = False
@@ -662,7 +675,7 @@ def _mirror_segments(info, jid, dest):
     samp = os.path.join(dest, "sample.mp4")
     if not os.path.isfile(samp):
         try:
-            rr = requests.get("%s/jobs/%s/sample.mp4" % (info["base"], info["rid"]),
+            rr = core.http().get("%s/jobs/%s/sample.mp4" % (info["base"], info["rid"]),
                               headers=headers, timeout=60)
             if rr.status_code == 200 and rr.content:
                 tmp = samp + ".tmp"

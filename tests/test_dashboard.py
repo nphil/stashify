@@ -289,14 +289,14 @@ class RunnerTest(ServerCase):
         return mock.Mock(json=lambda: body)
 
     def test_a_dropped_connect_is_retried_once_before_the_runner_is_offline(self):
-        with mock.patch.object(requests, "get", side_effect=[requests.ConnectionError("dropped"), self.health()]) as get, \
+        with mock.patch.object(core.http(), "get", side_effect=[requests.ConnectionError("dropped"), self.health()]) as get, \
                 mock.patch.object(core.time, "sleep"):
             h = core.runner_health("http://pc:8720", "t")
         self.assertEqual(h["node"], "pc")
         self.assertEqual(get.call_count, 2)
 
     def test_two_failed_connects_in_a_row_raise(self):
-        with mock.patch.object(requests, "get", side_effect=requests.Timeout("slow")) as get, \
+        with mock.patch.object(core.http(), "get", side_effect=requests.Timeout("slow")) as get, \
                 mock.patch.object(core.time, "sleep"):
             with self.assertRaises(requests.Timeout):
                 core.runner_health("http://pc:8720", "t")
@@ -304,13 +304,13 @@ class RunnerTest(ServerCase):
 
     def test_a_refusal_that_is_not_a_connect_failure_is_not_retried(self):
         bad = mock.Mock(json=mock.Mock(side_effect=ValueError("not json")))
-        with mock.patch.object(requests, "get", return_value=bad) as get:
+        with mock.patch.object(core.http(), "get", return_value=bad) as get:
             with self.assertRaises(ValueError):
                 core.runner_health("http://pc:8720", "t")
         self.assertEqual(get.call_count, 1)
 
     def test_probe_runner_shows_online_after_one_dropped_connect(self):
-        with mock.patch.object(requests, "get", side_effect=[requests.ConnectionError("dropped"), self.health()]), \
+        with mock.patch.object(core.http(), "get", side_effect=[requests.ConnectionError("dropped"), self.health()]), \
                 mock.patch.object(core.time, "sleep"):
             out = server.probe_runner({"name": "pc", "url": "http://pc:8720"})
         self.assertTrue(out["online"])
@@ -320,7 +320,7 @@ class RunnerTest(ServerCase):
     def test_resolve_runner_does_not_give_up_on_one_dropped_connect(self):
         cfg = {"runners": [{"name": "pc", "url": "http://pc:8720", "token": "t", "mac": "aa:bb:cc:dd:ee:ff"}],
                "runnerUrl": "", "runnerWakeSecs": 1}
-        with mock.patch.object(requests, "get", side_effect=[requests.ConnectionError("dropped"), self.health()]), \
+        with mock.patch.object(core.http(), "get", side_effect=[requests.ConnectionError("dropped"), self.health()]), \
                 mock.patch.object(core.time, "sleep"), mock.patch.object(core, "wake_runner") as wake:
             runner = core.resolve_runner(cfg, "decensor", wake=True)
         self.assertEqual(runner["name"], "pc")
@@ -328,7 +328,7 @@ class RunnerTest(ServerCase):
 
     def test_a_sleeping_runner_says_so_and_can_be_woken(self):
         entry = {"name": "pc", "url": "http://pc:8720", "token": "t", "mac": "aa:bb:cc:dd:ee:ff"}
-        with mock.patch.object(requests, "get", side_effect=requests.ConnectionError("asleep")), \
+        with mock.patch.object(core.http(), "get", side_effect=requests.ConnectionError("asleep")), \
                 mock.patch.object(core.time, "sleep"):
             out = server.probe_runner(entry)
         self.assertEqual((out["online"], out["asleep"], out["can_wake"]), (False, True, True))
@@ -348,22 +348,22 @@ class RunnerTest(ServerCase):
     def test_editing_a_runner_keeps_its_token_mac_and_ops(self):
         server.save_store([{"name": "pc", "url": "http://pc:8720", "token": "secret-tok",
                             "mac": "aa:bb:cc:dd:ee:ff", "ops": ["decensor"], "prefer": []}])
-        with mock.patch.object(requests, "get", side_effect=requests.ConnectionError("x")), mock.patch.object(core.time, "sleep"):
+        with mock.patch.object(core.http(), "get", side_effect=requests.ConnectionError("x")), mock.patch.object(core.time, "sleep"):
             status, _ = self.call("POST", "/api/runners", {"name": "Desk PC", "url": "http://pc:8720", "prefer": ["decensor"]})
         self.assertEqual(status, 201)
         (stored,) = server.load_store()
         self.assertEqual((stored["name"], stored["token"], stored["mac"], stored["ops"], stored["prefer"]),
                          ("Desk PC", "secret-tok", "aa:bb:cc:dd:ee:ff", ["decensor"], ["decensor"]))
-        with mock.patch.object(requests, "get", side_effect=requests.ConnectionError("x")), mock.patch.object(core.time, "sleep"):
+        with mock.patch.object(core.http(), "get", side_effect=requests.ConnectionError("x")), mock.patch.object(core.time, "sleep"):
             self.call("POST", "/api/runners", {"url": "http://pc:8720", "token": "new-tok"})
         self.assertEqual(server.load_store()[0]["token"], "new-tok")
 
     def test_the_connection_test_answers_ok_or_an_error(self):
-        with mock.patch.object(requests, "get", return_value=self.health()):
+        with mock.patch.object(core.http(), "get", return_value=self.health()):
             status, payload = self.call("POST", "/api/runners/test", {"url": "http://pc:8720"})
         self.assertEqual((status, payload["ok"], payload["error"], payload["ops"]),
                          (200, True, None, ["decensor", "upscale"]))
-        with mock.patch.object(requests, "get", side_effect=requests.ConnectionError("x")), mock.patch.object(core.time, "sleep"):
+        with mock.patch.object(core.http(), "get", side_effect=requests.ConnectionError("x")), mock.patch.object(core.time, "sleep"):
             status, payload = self.call("POST", "/api/runners/test", {"url": "http://nope:1"})
         self.assertEqual((status, payload["ok"]), (200, False))
         self.assertTrue(payload["error"])

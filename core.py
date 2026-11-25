@@ -372,6 +372,28 @@ def backend_command(cfg, input_path, result_dir, on_line=None, log_cb=None, stat
     return newest_video(result_dir)
 
 
+_http = None
+
+
+def http():
+    """The one keep-alive HTTP session for every call to a runner. Opening a new
+    connection per poll left thousands of just-closed connections lingering on the
+    Windows PC (8,700 seen during one job); a new connection that happened to reuse
+    one of those port numbers was silently ignored, which is the "dropped connect"
+    that made runners flap. Reused connections never hit that."""
+    global _http
+    if _http is None:
+        import requests
+        if not hasattr(requests, "Session"):     # the tests' stand-in for requests
+            _http = requests
+            return _http
+        from requests.adapters import HTTPAdapter
+        s = requests.Session()
+        s.mount("http://", HTTPAdapter(pool_connections=16, pool_maxsize=8))
+        _http = s
+    return _http
+
+
 def runner_health(url, token="", timeout=(2, 4), retry_delay=0.25):
     """A runner's /health as a dict. One quick retry on a connection-level failure: the
     network drops a share of TCP connects to a perfectly healthy PC, and a single dropped
@@ -383,7 +405,10 @@ def runner_health(url, token="", timeout=(2, 4), retry_delay=0.25):
     headers = {"X-Runner-Token": token, "X-Lada-Token": token}
     for attempt in (0, 1):
         try:
-            return requests.get(url.rstrip("/") + "/health", headers=headers, timeout=timeout).json()
+            resp = http().get(url.rstrip("/") + "/health", headers=headers, timeout=timeout)
+            if resp.status_code in (401, 403):
+                raise PermissionError("runner refused the token")
+            return resp.json()
         except (requests.ConnectionError, requests.Timeout):
             if attempt:
                 raise
@@ -534,7 +559,7 @@ def _poll_json(url, headers, timeout=(4, 20), retry_delay=0.25):
 
     for attempt in (0, 1):
         try:
-            return requests.get(url, headers=headers, timeout=timeout).json()
+            return http().get(url, headers=headers, timeout=timeout).json()
         except (requests.ConnectionError, requests.Timeout):
             if attempt:
                 raise
@@ -598,13 +623,13 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None,
 
     def _post(action):
         try:
-            r = requests.post(f"{base}/jobs/{rid}/{action}", headers=headers, timeout=10)
+            r = http().post(f"{base}/jobs/{rid}/{action}", headers=headers, timeout=10)
             return r.ok
         except Exception:  # noqa: BLE001
             return False
 
     try:
-        r = requests.post(base + "/run", headers=headers, json=payload, timeout=30)
+        r = http().post(base + "/run", headers=headers, json=payload, timeout=30)
         r.raise_for_status()
         rid = r.json()["id"]
     except Exception as exc:  # noqa: BLE001

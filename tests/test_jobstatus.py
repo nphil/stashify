@@ -198,13 +198,13 @@ class PollTest(unittest.TestCase):
         return mock.Mock(json=lambda: body)
 
     def test_one_dropped_connect_is_retried_quietly(self):
-        with mock.patch.object(requests, "get", side_effect=[requests.ConnectionError("x"), self.reply({"state": "running"})]) as get, \
+        with mock.patch.object(core.http(), "get", side_effect=[requests.ConnectionError("x"), self.reply({"state": "running"})]) as get, \
                 mock.patch.object(core.time, "sleep"):
             self.assertEqual(core._poll_json("http://pc/jobs/1", {}), {"state": "running"})
         self.assertEqual(get.call_count, 2)
 
     def test_two_in_a_row_raise(self):
-        with mock.patch.object(requests, "get", side_effect=requests.Timeout("slow")) as get, \
+        with mock.patch.object(core.http(), "get", side_effect=requests.Timeout("slow")) as get, \
                 mock.patch.object(core.time, "sleep"):
             with self.assertRaises(requests.Timeout):
                 core._poll_json("http://pc/jobs/1", {})
@@ -234,8 +234,8 @@ class PollTest(unittest.TestCase):
                 mock.patch.object(core.os, "makedirs"), \
                 mock.patch.object(core.os, "chmod"), \
                 mock.patch.object(core.time, "sleep"), \
-                mock.patch.object(requests, "post", return_value=mock.Mock(json=lambda: {"id": "r1"}, raise_for_status=lambda: None)), \
-                mock.patch.object(requests, "get", side_effect=get):
+                mock.patch.object(core.http(), "post", return_value=mock.Mock(json=lambda: {"id": "r1"}, raise_for_status=lambda: None)), \
+                mock.patch.object(core.http(), "get", side_effect=get):
             core._runner_dispatch({"runnerScratch": out_dir}, "/in.mp4", out_dir, "decensor",
                                   status_cb=seen.append)
         return warnings, seen

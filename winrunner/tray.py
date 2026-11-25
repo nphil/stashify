@@ -15,7 +15,8 @@ import json
 import html
 import webbrowser
 import subprocess
-import urllib.request
+import threading
+import http.client
 
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QPoint
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QBrush
@@ -46,10 +47,28 @@ BASE = "http://localhost:%s" % CFG.get("port", 8712)
 TOKEN = CFG.get("token", "")
 
 
+_conn = None
+_conn_lock = threading.Lock()   # the poller thread and the pause button share it
+
+
 def api(path, method="GET"):
-    req = urllib.request.Request(BASE + path, data=(b"" if method == "POST" else None),
-                                 headers={"X-Runner-Token": TOKEN}, method=method)
-    return json.loads(urllib.request.urlopen(req, timeout=5).read() or b"{}")
+    """One kept-open connection to the runner: a new connection every poll left
+    thousands of closed ones lingering in Windows."""
+    global _conn
+    with _conn_lock:
+        for attempt in (0, 1):
+            try:
+                if _conn is None:
+                    _conn = http.client.HTTPConnection("127.0.0.1", int(CFG.get("port", 8712)), timeout=5)
+                _conn.request(method, path, body=(b"" if method == "POST" else None),
+                              headers={"X-Runner-Token": TOKEN})
+                return json.loads(_conn.getresponse().read() or b"{}")
+            except Exception:  # noqa: BLE001 - stale or refused: reconnect once
+                if _conn is not None:
+                    _conn.close()
+                _conn = None
+                if attempt:
+                    raise
 
 
 # --------------------------------------------------------------------------- #
