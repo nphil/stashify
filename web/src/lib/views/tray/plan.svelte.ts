@@ -50,7 +50,26 @@ class Plan {
   runner: Runner | undefined = $derived(runners.resolve(options.where));
   home: Est = $derived(homeFor(selection.info, options.op, options.q, this.runner));
   /** the first runner, shown as the "run it at home instead" alternative */
-  alt: Est = $derived(homeFor(selection.info, options.op, options.q, runners.fallback));
+  alt: Est & { runner?: Runner; off?: string } = $derived(this.#alt());
+  #lastAlt: (Est & { runner?: Runner; off?: string }) | null = null;
+  /** Best home runner that can do the op: online first, then one that can be woken, then any unpaused one that lists the op (shown with why it is away).
+   *  While the runner list or scene info is still loading, keep the last good answer so the link does not flicker. */
+  #alt(): Est & { runner?: Runner; off?: string } {
+    const none = { ok: false, why: null, min: 0 };
+    if (!runners.list.length || !selection.info) return this.#lastAlt ?? none;
+    const key = options.op === 'decensor_up' ? 'decensor' : options.op;
+    const rank = (r: Runner) => (r.online ? 0 : r.asleep && r.can_wake ? 1 : 2);
+    const capable = runners.list
+      .filter((r) => !r.paused && (!r.ops.length || r.ops.includes(key)))
+      .sort((a, b) => rank(a) - rank(b) || Number(!!b.prefer?.length) - Number(!!a.prefer?.length));
+    const r = capable[0];
+    if (!r) return (this.#lastAlt = none);
+    const h = homeQuote(selection.info, options.op, options.q, r);
+    if (!h.ok) return this.#lastAlt ?? none;
+    const off = r.online ? undefined : r.asleep ? (r.can_wake ? `${r.name} asleep, wakes it` : `${r.name} asleep`) : `${r.name} offline`;
+    const min = h.min + (!r.online && r.asleep && r.can_wake ? (r.wake_eta_s ?? 0) / 60 : 0);
+    return (this.#lastAlt = { ok: true, why: null, min, runner: r, off });
+  }
   canCloud: boolean = $derived(OPS[options.op].cloud);
   /** a price is on its way: show skeletons, never block */
   waiting: boolean = $derived(this.canCloud && (cloud.state === 'idle' || cloud.state === 'loading'));

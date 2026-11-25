@@ -10,6 +10,7 @@
   import { jobs } from '../../stores/jobs.svelte';
   import { nav } from '../../stores/nav.svelte';
   import { options } from '../../stores/options.svelte';
+  import { runners } from '../../stores/runners.svelte';
   import { selection } from '../../stores/selection.svelte';
   import { toast } from '../../stores/toast.svelte';
   import { ui, type Overlay } from '../../stores/ui.svelte';
@@ -210,7 +211,7 @@
     {#if cloudNow}
       {#if plan.alt.ok}
         <button type="button" class="linkbtn" onclick={() => (options.where = null)}>
-          <Icon name="monitor" small />Run it at home: {fmtMin(plan.alt.min)} · Free<Icon name="chevR" small />
+          <Icon name="monitor" small />Run it at home: {fmtMin(plan.alt.min)} · Free{plan.alt.off ? ` · ${plan.alt.off}` : plan.alt.runner && runners.list.length > 1 ? ` · on ${plan.alt.runner.name}` : ''}<Icon name="chevR" small />
         </button>
       {/if}
     {:else if plan.waiting}
