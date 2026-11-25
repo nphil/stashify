@@ -11,7 +11,9 @@ Endpoints (all JSON; send X-Decensor-Token if WORKER_TOKEN is set):
   GET  /api/jobs/<id>                   -> job
   POST /api/jobs/<id>/replace           -> job         (replace original in place)
   POST /api/jobs/<id>/discard           -> job         (delete the preview)
-  POST /api/decensor with cloud_preset + confirm_usd -> a PAID cloud Jasna run (cloud_api.py)
+  POST /api/decensor with cloud_preset (or cloud:true) + confirm_usd -> a PAID cloud Jasna run on a rented
+       GPU: Decensor, Decensor + upscale or Upscale (`op`, `upscale`, `upscale_height`), optionally steered to
+       a machine (`offer_id` + `provider`, `hardware`, `gpu`, `cloud_filters`)            (cloud_api.py)
   GET  /api/cloud/{settings,status,offers,quote} and POST /api/cloud/{settings,test}   (cloud_api.py)
 
 Jobs run one at a time on a single worker thread so they don't contend for the
@@ -642,7 +644,9 @@ def new_job(scene_id, overrides, cloud=None):
     }
     if cloud:      # a paid cloud Jasna job: the private record, plus what the dashboard may show
         job.update({"_cloud": cloud, "cloud": True, "cloud_est": cloud["est_usd"], "cloud_usd": 0.0,
-                    "cloud_cap": cloud["cap"], "cloud_label": cloud["label"]})
+                    "cloud_cap": cloud["cap"], "cloud_label": cloud["label"], "cloud_op": cloud.get("op"),
+                    "cloud_gpu": cloud.get("gpu"), "cloud_offer_id": cloud.get("offer_id"),
+                    "cloud_provider": cloud.get("provider"), "cloud_hardware": cloud.get("hardware")})
     with _jobs_lock:
         _jobs[job_id] = job
     return job
@@ -927,7 +931,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/cloud/status":
             return self._send(*cloud_api.status(cl))
         if path == "/api/cloud/offers":
-            return self._send(*cloud_api.offers(cl, query))
+            meta = None
+            if query.get("scene"):         # cost the market for this scene (and the operation asked for)
+                try:
+                    (meta,) = cloud_api.scene_metas(stash_gql, [query["scene"]])
+                except Exception as exc:  # noqa: BLE001
+                    return self._send(502, {"error": "stash: " + cloud_jasna.redact(exc)})
+                if meta is None:
+                    return self._send(404, {"error": "Scene not found in Stash.", "code": "no_scene"})
+            return self._send(*cloud_api.offers(cl, query, meta))
         if path == "/api/cloud/quote":
             ids = [i.strip() for i in query.get("scenes", "").split(",") if i.strip()][:20]
             try:
@@ -935,7 +947,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 return self._send(502, {"error": "stash: " + cloud_jasna.redact(exc)})
             return self._send(*cloud_api.quotes(cl, list(zip(ids, metas)), query.get("preset", ""),
-                                                queued_cloud_usd()))
+                                                queued_cloud_usd(), query))
         return self._send(404, {"error": "not found"})
 
     def cloud_post(self, path):
@@ -958,6 +970,10 @@ class Handler(BaseHTTPRequestHandler):
             status, payload = cloud_api.admit(cloud_jasna.cloud(), body, meta, queued_cloud_usd(), backend)
             if status != 202:
                 return self._send(status, payload)
+            # what the job IS follows the validated plan, whatever else the body carried
+            op = payload["op"]
+            overrides = dict(overrides, backend="upscale" if op == "upscale" else "decensor",
+                             post_upscale=op == "decensor+upscale")
             job = new_job(scene_id, overrides, cloud=payload)
             _work.put(("process", job["id"]))
         return self._send(202, public(job))
@@ -1159,7 +1175,7 @@ class Handler(BaseHTTPRequestHandler):
             if not scene_id:
                 return self._send(400, {"error": "scene_id required"})
             overrides = {k: body[k] for k in OVERRIDES if k in body}
-            if body.get("cloud_preset"):
+            if body.get("cloud_preset") or cloud_jasna.truthy(body.get("cloud")):
                 return self.submit_cloud(str(scene_id), body, overrides)
             job = new_job(str(scene_id), overrides)
             _work.put(("process", job["id"]))
