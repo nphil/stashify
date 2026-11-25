@@ -69,9 +69,11 @@ function homeBody(scene: Scene): SubmitBody {
 /** The body for one scene on a rented machine. `confirm_usd` is this scene's share of what the person agreed to. */
 function cloudBody(scene: Scene, c: CloudChoice, share: number): SubmitBody {
   const { op, q } = options;
-  const body: SubmitBody = { scene_id: scene.id, backend: op === 'upscale' ? 'upscale' : 'decensor', cloud: true, offer_id: c.offerId, ...(c.providerId ? { provider: c.providerId } : {}), confirm_usd: r2(c.confirmUsd * share) };
+  const backend = op === 'upscale' || op === 'transcode' ? op : 'decensor';
+  const body: SubmitBody = { scene_id: scene.id, backend, cloud: true, offer_id: c.offerId, ...(c.providerId ? { provider: c.providerId } : {}), confirm_usd: r2(c.confirmUsd * share) };
   if (op === 'decensor_up') body.post_upscale = true;
-  if (op !== 'upscale') body.cloud_preset = CLOUD_PRESET[q];
+  if (op === 'transcode' && options.size !== 'keep') body.transcode_height = options.size;
+  if (op === 'decensor' || op === 'decensor_up') body.cloud_preset = CLOUD_PRESET[q];
   return body;
 }
 
@@ -86,7 +88,6 @@ export async function startRun(cloud?: CloudChoice): Promise<RunResult> {
   const scenes = selection.list;
   if (!scenes.length) return { ok: false, code: 'empty', message: 'Pick a scene first' };
   if (options.cloud && !cloud) return { ok: false, code: 'confirm_required', message: 'Confirm the price first' };
-  if (cloud && options.op === 'transcode') return { ok: false, code: 'not_for_cloud', message: 'Transcode runs at home only' };
 
   const total = sceneInfo(scenes).eff;
   const made: Job[] = [];

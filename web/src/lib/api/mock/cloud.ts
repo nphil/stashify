@@ -121,7 +121,7 @@ const PROVIDER_LIST = [
 /* ---------- the job and its price (the mockup's maths) ---------- */
 
 interface Job { op: OpId; q: QualityId; eff: number; gb: number; n: number; info: SceneInfo; ids: string[] }
-const OP_FROM_WIRE: Readonly<Record<string, OpId>> = { decensor: 'decensor', 'decensor+upscale': 'decensor_up', upscale: 'upscale' };
+const OP_FROM_WIRE: Readonly<Record<string, OpId>> = { decensor: 'decensor', 'decensor+upscale': 'decensor_up', upscale: 'upscale', transcode: 'transcode' };
 const Q_FROM_PRESET: Readonly<Record<string, QualityId>> = { 'close-ups': 'fast', detail: 'balanced', 'detail-close-ups': 'high' };
 const TYPICAL: Scene = BASE_SCENES[0];
 
@@ -259,7 +259,7 @@ function presetsOf(pool: readonly Entry[], job: Job): Record<string, unknown>[] 
 /* ---------- the endpoint ---------- */
 
 const ALLOWED = new Set([
-  'sort', 'limit', 'offset', 'scene', 'preset', 'op', 'upscale', 'upscale_height', 'hours',
+  'sort', 'limit', 'offset', 'scene', 'preset', 'op', 'upscale', 'upscale_height', 'transcode_height', 'hours',
   'gpus', 'gpu', 'num_gpus', 'max_gpus', 'min_vram_gb', 'max_vram_gb', 'min_cpu_cores', 'min_ram_gb', 'min_disk_gb', 'min_inet_down',
   'min_inet_up', 'min_reliability', 'min_driver', 'min_cuda', 'min_open_ports', 'min_duration_hours', 'datacenter_only', 'verified',
   'prefer', 'countries', 'provider', 'offer_id', 'rental_type', 'max_price', 'max_bw_cost',

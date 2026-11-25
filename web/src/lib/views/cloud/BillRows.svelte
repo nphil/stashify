@@ -14,8 +14,8 @@
   <span>Data transfer<span class="why">{fee ? `${gbf(gbTotal)} × ${fee}` : `No transfer fee at ${offer.provider}`}</span></span><span class="v">{usd(quote.transfer)}</span>
   {#if gbTotal > 0}
     <div class="sub">
-      <span>Upload · your video</span><span>{gbf(quote.gbUp)}</span>
-      <span>Download · the result</span><span>{gbf(quote.gbDown)}</span>
+      <span>Upload · your video</span><span>{gbf(quote.gbUp)}{quote.upMin !== undefined ? ` · ${fmtMin(quote.upMin)}` : ''}</span>
+      <span>Download · the result</span><span>{gbf(quote.gbDown)}{quote.downMin !== undefined ? ` · ${fmtMin(quote.downMin)}` : ''}</span>
       <span>Machine setup · models</span><span>{gbf(quote.gbModels)}</span>
     </div>
   {/if}

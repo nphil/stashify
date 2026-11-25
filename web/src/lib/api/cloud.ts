@@ -3,15 +3,17 @@
    the two exceptions are asked of it politely: `scene_ids` (several scenes as one job) and `rented`. */
 import { ApiError, get, type Query } from './client';
 import { adaptOffers, adaptQuote, countriesOf, type QuoteReply } from './cloudAdapter';
-import type { Caps, OfferFilters, OfferQuery, OffersResult, OpId, QualityId } from './types';
+import type { Caps, OfferFilters, OfferQuery, OffersResult, OpId, QualityId, SizeId } from './types';
 
 /** rows per request (the server allows 200) */
 export const PAGE = 100;
 
-/** the server's names for the tray's three cloud operations */
-const OP_WIRE: Readonly<Record<OpId, string | null>> = { decensor: 'decensor', decensor_up: 'decensor+upscale', upscale: 'upscale', transcode: null };
+/** the server's names for the tray's four operations (all of them run on a rented GPU) */
+const OP_WIRE: Readonly<Record<OpId, string>> = { decensor: 'decensor', decensor_up: 'decensor+upscale', upscale: 'upscale', transcode: 'transcode' };
 /** the server prices by preset; High and Max are the same preset there */
 const PRESET_WIRE: Readonly<Record<QualityId, string>> = { fast: 'close-ups', balanced: 'detail', high: 'detail-close-ups', max: 'detail-close-ups' };
+/** only a restoration has a quality preset; an upscale or a transcode has none */
+const HAS_PRESET: Readonly<Record<OpId, boolean>> = { decensor: true, decensor_up: true, upscale: false, transcode: false };
 
 export interface MarketQuery extends OfferQuery {
   /** picker: the server's own defaults and the owner's limits; browser: every filter shown, limits as can't-run rows; lookup: one machine */
@@ -37,9 +39,10 @@ const NO_LIMITS: Query = { max_price: 1000, max_bw_cost: 'any' };
 function jobParams(q: OfferQuery): Query {
   const op = OP_WIRE[q.op];
   const ids = q.scenes;
-  if (op === null || ids.length === 0 || (ids.length > 1 && perSceneOnly)) return {};
+  if (ids.length === 0 || (ids.length > 1 && perSceneOnly)) return {};
   const p: Query = { op };
-  if (q.op !== 'upscale') p.preset = PRESET_WIRE[q.quality];
+  if (HAS_PRESET[q.op]) p.preset = PRESET_WIRE[q.quality];
+  if (q.op === 'transcode' && q.size !== 'keep') p.transcode_height = q.size;
   if (ids.length === 1) p.scene = ids[0];
   else p.scene_ids = ids;
   return p;
@@ -100,6 +103,8 @@ export interface QuoteRequest {
   providerId?: string;
   /** GB of the job's own video, to tell the upload from setup and models */
   sceneGb: number;
+  /** transcode: the output size */
+  size: SizeId;
 }
 
 /** What this machine will cost for these scenes, and whether the server would accept the run (its refusal comes with the code). */
@@ -107,7 +112,8 @@ export async function fetchQuote(r: QuoteRequest, signal?: AbortSignal): Promise
   const query: Query = {
     scenes: r.scenes,
     op: OP_WIRE[r.op],
-    preset: r.op === 'upscale' ? null : PRESET_WIRE[r.quality],
+    preset: HAS_PRESET[r.op] ? PRESET_WIRE[r.quality] : null,
+    transcode_height: r.op === 'transcode' && r.size !== 'keep' ? r.size : null,
     offer_id: r.offerId,
     provider: r.providerId,
   };

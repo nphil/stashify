@@ -154,6 +154,10 @@ function adaptEstimate(raw: unknown, ctx: Ctx): Quote | null {
   if (run !== null) q.runMin = run;
   const setup = firstNum(e.setup_min);
   if (setup !== null) q.setupMin = setup;
+  const up = firstNum(e.up_min);
+  if (up !== null) q.upMin = up;
+  const down = firstNum(e.down_min);
+  if (down !== null) q.downMin = down;
   return q;
 }
 
@@ -161,7 +165,7 @@ function sumQuotes(qs: readonly Quote[], totalUsd: number | null): Quote | null 
   if (qs.length === 0) return null;
   if (qs.length === 1 && totalUsd === null) return qs[0];
   const out: Quote = { minutes: 0, hours: 0, compute: 0, transfer: 0, storage: 0, total: 0, max: 0, gbUp: 0, gbDown: 0, gbModels: 0, diskGb: 0, notes: [] };
-  let run = 0, setup = 0, hasRun = false, hasSetup = false;
+  let run = 0, setup = 0, up = 0, down = 0, hasRun = false, hasSetup = false, hasUp = false, hasDown = false;
   for (const q of qs) {
     out.minutes += q.minutes; out.hours += q.hours;
     out.compute += q.compute; out.transfer += q.transfer; out.storage += q.storage; out.total += q.total;
@@ -169,6 +173,8 @@ function sumQuotes(qs: readonly Quote[], totalUsd: number | null): Quote | null 
     out.diskGb = Math.max(out.diskGb, q.diskGb);
     if (q.runMin !== undefined) { run += q.runMin; hasRun = true; }
     if (q.setupMin !== undefined) { setup += q.setupMin; hasSetup = true; }
+    if (q.upMin !== undefined) { up += q.upMin; hasUp = true; }
+    if (q.downMin !== undefined) { down += q.downMin; hasDown = true; }
     for (const n of q.notes) if (!out.notes.includes(n)) out.notes.push(n);
   }
   out.compute = r2(out.compute); out.transfer = r2(out.transfer); out.storage = r2(out.storage);
@@ -176,6 +182,8 @@ function sumQuotes(qs: readonly Quote[], totalUsd: number | null): Quote | null 
   out.max = r2(out.total * 1.25);
   if (hasRun) out.runMin = run;
   if (hasSetup) out.setupMin = setup;
+  if (hasUp) out.upMin = up;
+  if (hasDown) out.downMin = down;
   return out;
 }
 

@@ -8,7 +8,7 @@ export const OPS: Record<OpId, OpDef> = {
   decensor: { id: 'decensor', name: 'Decensor', hint: 'Restore the pixelated areas', icon: 'wand', cloud: true },
   decensor_up: { id: 'decensor_up', name: 'Decensor + upscale', hint: 'Restore, then 2× bigger', icon: 'sparkles', cloud: true },
   upscale: { id: 'upscale', name: 'Upscale', hint: '2× bigger and sharper', icon: 'expand', cloud: true },
-  transcode: { id: 'transcode', name: 'Transcode', hint: 'Smaller file, same look', icon: 'shrink', cloud: false },
+  transcode: { id: 'transcode', name: 'Transcode', hint: 'Smaller file, same look', icon: 'shrink', cloud: true },
 };
 export const OP_ORDER: readonly OpId[] = ['decensor', 'decensor_up', 'upscale', 'transcode'];
 

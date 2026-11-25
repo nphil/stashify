@@ -48,7 +48,7 @@
       if (!p) return;
       checking = true;
       fresh = null;
-      fetchQuote({ scenes: selection.ids, op: options.op, quality: options.q, offerId: p.offer.id, providerId: p.offer.providerId, sceneGb: selection.info.gb }, ctl.signal).then(
+      fetchQuote({ scenes: selection.ids, op: options.op, quality: options.q, size: options.size, offerId: p.offer.id, providerId: p.offer.providerId, sceneGb: selection.info.gb }, ctl.signal).then(
         (r) => {
           if (ctl.signal.aborted) return;
           fresh = r;

@@ -83,12 +83,12 @@ class Plan {
       (this.knobs.detect ? Number(options.detect !== 'fast') : 0),
   );
   /** changes whenever the thing being priced changes */
-  jobKey: string = $derived(`${options.op}|${options.q}|${selection.ids.join(',')}`);
+  jobKey: string = $derived(`${options.op}|${options.q}|${options.size}|${selection.ids.join(',')}`);
 
   /** why this choice cannot run (a problem the person can fix), or null */
   why: string | null = $derived.by(() => {
     if (options.cloud) {
-      if (!this.canCloud) return 'Transcode runs at home only';
+      /* every operation can run on a rented GPU; a machine that cannot do this one is listed with its reason */
       if (this.waiting) return null;
       if (cloud.blocked) return cloud.blocked;
       if (cloud.state === 'error') return cloud.error ?? 'Could not get a price';
