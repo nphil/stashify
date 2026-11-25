@@ -651,8 +651,11 @@ class VastApi:
                       body={"ssh_key": public_key}, idempotent=False, tries=3)
 
     def balance(self):
+        """What is left to spend. Vast keeps prepaid money in `credit`; its `balance`
+        field read 0 on a freshly topped-up account (checked 2026-11-24), so credit
+        is the number to show."""
         data = self._request("GET", "/api/v0/users/current")
-        return _num(data.get("balance", data.get("credit")), None)
+        return _num(data.get("credit", data.get("balance")), None)
 
 
 # --------------------------------------------------------------------------- #

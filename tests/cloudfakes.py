@@ -198,7 +198,9 @@ class FakeVast:
         return Resp(200, {"success": True})
 
     def _user(self, body, params):
-        return Resp(200, {"id": 1, "email": "owner@example.invalid", "balance": self.balance})
+        # the real response carries both; only `credit` holds the prepaid money
+        return Resp(200, {"id": 1, "email": "owner@example.invalid",
+                          "balance": 0, "credit": self.balance})
 
 
 class FakeTransport(cloud_ssh.Transport):
