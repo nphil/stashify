@@ -5,7 +5,7 @@
   import PageHead from '../../ui/PageHead.svelte';
   import Skeleton from '../../ui/Skeleton.svelte';
   import { fmtMin } from '../../util/format';
-  import { FINISHED_WORD, isFresh, jobTitle, whatLine, whereLine } from './jobInfo';
+  import { FINISHED_WORD, isFresh, jobTitle, plainError, whatLine, whereLine } from './jobInfo';
   import JobCard from './JobCard.svelte';
   import LogView from './LogView.svelte';
 
@@ -95,11 +95,11 @@
                 <span class={['gt sm', w?.tone === 'ok' && 'pos', w?.tone === 'bad' && 'bad', w?.tone === 'off' && 'mute']}><Icon name={w?.icon ?? 'check'} /></span>
                 <div class="col grow">
                   <b class="ell">{jobTitle(job)}</b>
-                  <span class="cap muted ell">{w?.word ?? job.state}{job.state === 'error' ? ` · ${job.error || job.message || 'Failed'}` : w?.sub ? ` · ${w.sub}` : ''}</span>
+                  <span class={['cap', job.state === 'error' ? 'bad' : 'muted']}>{w?.word ?? job.state}{job.state === 'error' ? ` · ${plainError(job).plain}` : w?.sub ? ` · ${w.sub}` : ''}</span>
                 </div>
                 <button type="button" class="iconbtn sm" aria-label={`Dismiss ${jobTitle(job)}`} onclick={() => jobs.dismiss(job.id)}><Icon name="x" small /></button>
               </div>
-              {#if job.state === 'error'}<div class="jlogw"><LogView id={job.id} active={false} startOpen /></div>{/if}
+              {#if job.state === 'error'}<div class="jlogw"><LogView id={job.id} active={false} startOpen={false} raw={plainError(job).raw} /></div>{/if}
             </li>
           {/each}
         </ul>

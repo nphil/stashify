@@ -132,11 +132,69 @@ export function reviewLine(j: Job): string {
   return parts.join(' \u00b7 ');
 }
 
+/* ---------- status ---------- */
+/** no sign of life for this long and the card says so (the runner prints often, even while it loads) */
+export const STALL_S = 120;
+
+/** "about 1 h 39 min", "less than a minute" (the label says "left") */
+export function leftWord(eta: number): string {
+  return eta < 60 ? 'less than a minute' : `about ${fmtMin(eta / 60)}`;
+}
+
+/** "3 s", "2 min 10 s", "1 h 05 min" */
+export function agoWord(s: number): string {
+  s = Math.max(0, Math.round(s));
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ${String(s % 60).padStart(2, '0')} s`;
+  return fmtMin(s / 60);
+}
+
+/** The title of the status block: what it is doing now, in plain words. */
+export function phaseTitle(j: Job): string {
+  return j.phase?.trim() || j.message?.trim() || (j.state === 'queued' ? 'Waiting its turn' : 'Working');
+}
+
+/** "Pass 1 of 2 · Step 2 of 4 · encode": where it is, when the runner knows. */
+export function stepLine(j: Job): string {
+  const parts: string[] = [];
+  if (j.passes && j.passes > 1 && j.pass_no) parts.push(`Pass ${j.pass_no} of ${j.passes}`);
+  if (j.steps && j.steps > 1 && j.step) parts.push(`Step ${j.step} of ${j.steps}`);
+  if (j.detail) parts.push(j.detail);
+  return parts.join(' \u00b7 ');
+}
+
+/** The dots: the steps when there are some, else the passes. */
+export function stepDots(j: Job): { n: number; at: number; label: string } | null {
+  if (j.steps && j.steps > 1 && j.steps <= 8 && j.step) return { n: j.steps, at: j.step, label: `Step ${j.step} of ${j.steps}` };
+  if (j.passes && j.passes > 1 && j.passes <= 8 && j.pass_no) return { n: j.passes, at: j.pass_no, label: `Pass ${j.pass_no} of ${j.passes}` };
+  return null;
+}
+
+/** Seconds since the job last gave a sign of life, or null when that is not tracked (queued, paused, rented, finishing). */
+export function idleSeconds(j: Job, now: number): number | null {
+  if (j.idle_s == null || j.paused || j.state !== 'running') return null;
+  return j.idle_s + Math.max(0, now - (j.rx ?? now)) / 1000;
+}
+
+/** A failure in plain words; the raw line goes under Details. */
+export function plainError(j: Job): { plain: string; raw: string } {
+  const raw = (j.error || j.message || '').trim();
+  const what = /upscal/i.test(`${j.stage ?? ''} ${raw}`) ? 'upscale' : /transcod/i.test(raw) ? 'conversion' : 'decensor';
+  let plain: string;
+  if (/ConnectTimeout|ConnectionError|Max retries|refused|unreachable|timed out|Connection (aborted|reset)/i.test(raw)) plain = 'Could not reach the PC that runs the job. Check that it is on and the runner is running.';
+  else if (/watchdog|no output for/i.test(raw)) plain = 'The job stopped producing output, so it was stopped.';
+  else if (/no output produced|produced no output/i.test(raw)) plain = 'It finished without producing a video.';
+  else if (/exited (-?\d+)/i.test(raw)) plain = `The ${what} step stopped unexpectedly (code ${/exited (-?\d+)/i.exec(raw)?.[1]}).`;
+  else if (/not found|No such file/i.test(raw)) plain = 'The video file could not be found.';
+  else if (!raw) plain = 'Something went wrong.';
+  else plain = raw.length > 140 ? `${raw.slice(0, 139)}\u2026` : raw;
+  return { plain, raw };
+}
+
 /* ---------- log ---------- */
-const RE_NUM = /\d[\d.,:]*/g;
-const RE_BAR = /\|[#\s.\u2581-\u2589]*\|/g;
-/** Lines that differ only by numbers (or a progress bar) share a key, so they merge into one. */
-export const logNorm = (s: string): string => s.replace(RE_BAR, '|').replace(RE_NUM, '#');
+const RE_BAR_LINE = /\d{1,3}\s*%\s*\|/;
+/** A progress-bar line (the server flags them; this covers a server that does not). */
+export const isLiveLine = (l: { level: string; text: string; live?: boolean }): boolean => l.live ?? (l.level === 'proc' && RE_BAR_LINE.test(l.text));
 
 /* ---------- placeholder art ---------- */
 /** the mockup's seeded "mosaic" heights */

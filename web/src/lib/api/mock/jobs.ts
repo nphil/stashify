@@ -3,6 +3,7 @@
 import type { Job, JobLog, JobLogLine, JobSegment, OpId, QualityId, SubmitBody } from '../types';
 import { fail, route } from './router';
 import { BASE_SCENES, sceneTitle } from './scenes';
+import { ltxFrame, ltxScene } from './ltxScript';
 import { BUDGET } from './shared';
 
 const GB = 1024 ** 3;
@@ -49,10 +50,15 @@ interface Sim {
   gpu: Job['gpu_stats'];
   /** seeded running jobs stand still at their mockup numbers unless the page has `?live=1` */
   freeze: boolean;
+  /** the scripted LTX job (`?job=ltx`): its fields come from the script, not from a rate */
+  script: boolean;
 }
 
 const params = new URLSearchParams(location.search);
-const SEED = params.get('job') !== '0';
+const SEED = params.get('job') !== '0' && params.get('job') !== 'ltx';
+const SCRIPT = params.get('job') === 'ltx';
+/** `?job=ltx&at=<moment>` holds one moment of the script */
+const HOLD = params.get('at');
 const T0 = Date.now();
 const sims: Sim[] = [];
 let counter = 0;
@@ -85,7 +91,7 @@ function baseJob(sceneId: string, op: OpId, quality: QualityId, state: Job['stat
 function makeSim(job: Job, over: Partial<Sim>): Sim {
   const s: Sim = {
     job, cloud: false, t0: Date.now(), p0: 0, ref: null, rate: 0, fps: 0, pre: [0, 0], post: [0, 0],
-    usd0: 0, usdRate: 0, queuedAt: Date.now(), settleAt: null, gpu: null, freeze: false, ...over,
+    usd0: 0, usdRate: 0, queuedAt: Date.now(), settleAt: null, gpu: null, freeze: false, script: false, ...over,
   };
   sims.push(s);
   return s;
@@ -151,6 +157,12 @@ function advance(now: number): void {
       else if (!sims.some((o) => !o.cloud && o.job.state === 'running')) startHome(s, now);
     }
     if (j.state !== 'running') continue;
+    if (s.script) {
+      const f = HOLD ? ltxScene(HOLD) : ltxFrame((now - s.t0) / 1000);
+      if (f) Object.assign(j, f, { frame: null, gpu_stats: s.gpu });
+      else finish(s);
+      continue;
+    }
 
     const at = s.freeze ? T0 : now;
     const p = progressOf(s, at);
@@ -185,6 +197,22 @@ function advance(now: number): void {
 }
 
 const LIVE = params.get('live') === '1';
+
+function seedScript(): void {
+  const t = Date.now();
+  const secs = Math.floor(t / 1000);
+  if (HOLD === 'error') {
+    const bad = baseJob('6', 'decensor_up', 'high', 'error');
+    Object.assign(bad, { runner: `${HOME} · RTX 3080`, stage: 'decensor', message: 'decensor exited 1', error: 'decensor exited 1', created: secs - 3000, elapsed: 2400, passes: 2, pass_no: 1 });
+    makeSim(bad, { t0: t - 2400_000 });
+    return;
+  }
+  const job = baseJob('6', 'decensor_up', 'high', 'running');
+  Object.assign(job, { runner: `${HOME} · RTX 3080`, preview: false, created: secs - 60 });
+  const gpu = { util: 96, mem_used: 9120, mem_total: 10240, temp: 70, power: 301 };
+  makeSim(job, { t0: t, ref: t, gpu, script: true });
+  advance(t);
+}
 
 function seed(): void {
   const t = T0;
@@ -232,6 +260,7 @@ function seed(): void {
   advance(t);
 }
 if (SEED) seed();
+if (SCRIPT) seedScript();
 
 /* ---------- log ---------- */
 function logFor(s: Sim, now: number, after: number): JobLog {
@@ -244,9 +273,13 @@ function logFor(s: Sim, now: number, after: number): JobLog {
     const seq = i + 1;
     const t = Math.floor((s.t0 + (i / 1.5) * 1000) / 1000);
     if (i % 5 === 4) lines.push({ seq, t, level: 'event', text: EVENTS[Math.floor(i / 5) % EVENTS.length] });
-    else lines.push({ seq, t, level: 'proc', text: `frame ${Math.min(total, Math.round(((i + 1) / Math.max(n, 1)) * (j.frame ?? total)))}/${total}  ${s.fps || 24} fps` });
+    else {
+      const done = Math.min(total, Math.round(((i + 1) / Math.max(n, 1)) * (j.frame ?? Math.round(j.progress * total))));
+      lines.push({ seq, t, level: 'proc', live: true, text: `decensor: ${total ? Math.round((100 * done) / total) : 0}%| |Processed: (${done}f) | Speed: ${s.fps || 24} f/s` });
+    }
   }
-  return { cursor: n, lines: lines.slice(-200) };
+  if (j.state === 'error' && after < n) lines.push({ seq: n + 1, t: Math.floor((s.t0 + el * 1000) / 1000), level: 'error', text: j.error ?? 'failed' });
+  return { cursor: j.state === 'error' ? n + 1 : n, lines: lines.slice(-200) };
 }
 
 /* ---------- routes ---------- */

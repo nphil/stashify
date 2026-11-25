@@ -64,6 +64,23 @@ export interface Job {
   /** seconds */
   eta?: number | null;
   elapsed?: number | null;
+  /** the one live status: what it is doing in plain words, and where it is in its steps and passes */
+  phase?: string | null;
+  step?: number | null;
+  steps?: number | null;
+  /** short, e.g. "encode" or "3.2 of 8.1 GB" */
+  detail?: string | null;
+  /** pass 1 of 2 (decensor, then upscale); only sent for a job with more than one */
+  pass_no?: number | null;
+  passes?: number | null;
+  /** the progress or the time left is a guess (a pass that has not run yet, a clock-based bar) */
+  estimate?: boolean;
+  /** epoch seconds of the job's last sign of life */
+  updated_at?: number | null;
+  /** seconds since that; only while it runs locally (the server's clock, so no skew) */
+  idle_s?: number | null;
+  /** client clock (ms) when this snapshot arrived: idle_s keeps counting from it between updates */
+  rx?: number;
   log_cursor?: number;
   gpu_stats?: GpuStats | null;
   preview?: boolean;
@@ -90,7 +107,8 @@ export interface Job {
 /** proposed: what a finished job produced (heights in pixels, bytes, duration in seconds) */
 export interface JobResult { from_height?: number; to_height?: number; from_bytes?: number; to_bytes?: number; duration?: number }
 export type LogLevel = 'event' | 'info' | 'warn' | 'error' | 'proc';
-export interface JobLogLine { seq: number; t: number | string; level: LogLevel; text: string }
+/** `live` marks a progress-bar line: the server keeps only the newest one */
+export interface JobLogLine { seq: number; t: number | string; level: LogLevel; text: string; live?: boolean }
 export interface JobLog { cursor: number; lines: JobLogLine[] }
 
 /* ---------- runners ---------- */

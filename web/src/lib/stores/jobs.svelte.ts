@@ -47,7 +47,8 @@ class Jobs {
 
   /** accepts the server order (oldest first) */
   set(list: Job[]): void {
-    this.all = list.map((j) => adaptJob(j)).reverse();
+    const rx = Date.now();
+    this.all = list.map((j) => ({ ...adaptJob(j), rx })).reverse();
     this.loaded = true;
     this.error = null;
   }
@@ -56,7 +57,7 @@ class Jobs {
 
   /** a job just created by a submit: show it at once */
   add(job: Job): void {
-    this.all = [adaptJob(job), ...this.all.filter((j) => j.id !== job.id)];
+    this.all = [{ ...adaptJob(job), rx: Date.now() }, ...this.all.filter((j) => j.id !== job.id)];
   }
 
   async act(id: string, action: JobAction): Promise<Job | null> {

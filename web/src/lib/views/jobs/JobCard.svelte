@@ -3,10 +3,11 @@
   import type { Job } from '../../api/types';
   import Icon from '../../ui/Icon.svelte';
   import Status from '../../ui/Status.svelte';
-  import { fmtMin, gbf } from '../../util/format';
-  import { CLOUD_STEPS, costLine, dash, etaWord, fmtN, gbOf, isIndeterminate, jobTitle, opIcon, pct, runWord, stepIndex, whatLine, whereLine } from './jobInfo';
+  import { gbf } from '../../util/format';
+  import { CLOUD_STEPS, costLine, dash, fmtN, gbOf, jobTitle, opIcon, runWord, stepIndex, whatLine, whereLine } from './jobInfo';
   import LogView from './LogView.svelte';
   import MediaPair from './MediaPair.svelte';
+  import StatusBlock from './StatusBlock.svelte';
 
   /* One running, starting or settling job. The card is keyed by job id and only its numbers change,
      so a poll never rebuilds it (the open log and the playing clips stay put). */
@@ -15,13 +16,10 @@
   let acting = $state(false);
   const title = $derived(jobTitle(job));
   const word = $derived(runWord(job, fresh));
-  const percent = $derived(pct(job));
-  const indet = $derived(isIndeterminate(job));
   const live = $derived(job.state === 'running');
   const gpu = $derived(job.gpu_stats);
   const step = $derived(stepIndex(job));
   const cost = $derived(costLine(job));
-  const right = $derived(fresh && job.eta != null ? `about ${fmtMin(job.eta / 60)}` : etaWord(job));
   const showStats = $derived(live && !fresh);
   const canCancel = $derived(job.state === 'queued' || job.state === 'running');
 
@@ -53,9 +51,7 @@
         {/each}
       </ol>
     {/if}
-    <div class="jprog"><b class="num">{percent}%</b><span class="muted num">{right}</span></div>
-    <div class={['bar thick pbar', indet && 'indeterminate', job.paused && 'is-paused']} role="progressbar" aria-valuemin="0" aria-valuemax="100"
-      aria-valuenow={indet ? undefined : percent} aria-label={`${title} progress`}><i style:--p={percent / 100}></i></div>
+    <StatusBlock {job} {title} />
     {#if job.cloud}
       <div class="jcost">
         <div class="col"><b class="num">{cost.spent}</b><span class="cap muted">so far{cost.of ? `, of about ${cost.of}` : ''}</span></div>
@@ -66,7 +62,6 @@
     {#if showStats}
       <dl class="jstats">
         <div><dt>Frame</dt><dd class="num">{job.frame != null && job.total_frames ? `${fmtN(job.frame)} / ${fmtN(job.total_frames)}` : dash}</dd></div>
-        <div><dt>Speed</dt><dd class="num">{job.fps != null ? `${Math.round(job.fps * 10) / 10} fps` : dash}</dd></div>
         <div><dt>GPU</dt><dd class="num">{gpu?.util != null ? `${Math.round(gpu.util)}%` : dash}</dd></div>
         <div><dt>Video memory</dt><dd class="num">{gpu?.mem_used != null && gpu.mem_total != null ? `${gbOf(gpu.mem_used)} / ${gbOf(gpu.mem_total)} GB` : dash}</dd></div>
         {#if !job.cloud}

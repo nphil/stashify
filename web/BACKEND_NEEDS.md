@@ -37,7 +37,7 @@ Without it the app polls (jobs 1.5 s, GPU meters 3 s, runners 5 s, cloud status 
 | `gpus` | list of `{name,url,online,active,gpu:{util,mem_used,mem_total,temp,power}}` | `GET api/gpus` |
 | `runners` | runner list | `GET api/runners` |
 | `cloud` | cloud status object | `GET api/cloud/status` |
-| `log` | `{job_id, cursor, lines:[{seq,t,level,text}]}`, batched ≤ 4 per second per running job | `GET api/jobs/<id>/log?after=` |
+| `log` | `{job_id, cursor, lines:[{seq,t,level,text[,live]}]}`, batched ≤ 4 per second per running job | `GET api/jobs/<id>/log?after=` |
 | `ping` | anything (ignored) | keep-alive |
 
 Send each snapshot event once when a client connects, then on change.
@@ -67,9 +67,11 @@ Send each snapshot event once when a client connects, then on change.
 - `offers`: the app reads the real `offers_payload` shape (adapter in `src/lib/api/cloudAdapter.ts`). Wanted, all optional: a per-quality quote or at least `runMin` on every quote (the quality rows show "~" estimates until then), `estimate.detail`, `rented` and `hide_incompatible` query params, per-op runner `speed`.
 - A paid run's `confirm_usd` is checked server-side; the UI sends one total (see Jobs above).
 
+**One live status per job (served, 2026-11).** `GET api/jobs` and the `jobs` event carry, per job: `phase` (plain words, e.g. "Restoring in high detail"), `step`/`steps` (the four LTX steps), `detail`, `pass_no`/`passes` (only when more than one, e.g. decensor then upscale), `estimate` (progress or time left is a guess), `progress` (0-1, never goes backwards), `eta`, `fps`, `updated_at` (epoch s) and `idle_s` (seconds since the last sign of life, on the server's clock; only for a running local job, so its absence means "do not show a stall hint"). The card shows "No update for ..." from `STALL_S` (120 s). A log line with `live: true` is a progress bar: the server keeps only the newest one, and the Details view pins it as one line. All of it is optional: an older server shows `message` as the title and no stall hint.
+
 ## 4. Mock mode (no backend needed)
 
-`?mock=1` (or `VITE_MOCK=1` at build time) swaps every `api/...` call for fixtures in `src/lib/api/mock/`. Extra switches: `?s=<screen>` (compose, quality, where, cloud, breakdown, browse, details, sortmenu, filters, confirm, jobs, review, replace, runners, cloudset, edge), `?theme=dark|light|<theme id>`, `?prov=2`, `?ts=2` (200% text), `?job=0`, `?lat=<ms>`, `?scenes=<n>`, `?offers=<n>`, `?shot=1` (hides the mock bar, no animation). The mock chunk is a separate file that real-mode pages never download.
+`?mock=1` (or `VITE_MOCK=1` at build time) swaps every `api/...` call for fixtures in `src/lib/api/mock/`. Extra switches: `?s=<screen>` (compose, quality, where, cloud, breakdown, browse, details, sortmenu, filters, confirm, jobs, review, replace, runners, cloudset, edge), `?theme=dark|light|<theme id>`, `?prov=2`, `?ts=2` (200% text), `?job=0`, `?job=ltx` (one scripted LTX decensor + upscale job walking every phase in about two minutes; add `&at=copy|scan|load|ltx1..ltx4|upscale-load|upscale|saving|stalled|error` to hold one moment), `?lat=<ms>`, `?scenes=<n>`, `?offers=<n>`, `?shot=1` (hides the mock bar, no animation). The mock chunk is a separate file that real-mode pages never download.
 
 ## 5. Cloud picker and browser: what they send and what is missing
 
