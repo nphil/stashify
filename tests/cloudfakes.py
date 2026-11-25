@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 
+os.environ.setdefault("STASHIFY_RUNNER_STREAM", "0")     # no background /events readers in tests that fake the network
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)

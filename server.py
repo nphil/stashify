@@ -41,6 +41,7 @@ import core
 import events
 import cloud_api
 import cloud_jasna
+import runner_stream
 
 logging.basicConfig(
     level=logging.INFO,
@@ -218,6 +219,12 @@ _last_probe = {}                # url -> (time, row)
 _last_gpu = {}                  # url -> (time, gpu dict)
 
 
+def _stream_state(url):
+    """"live" (updates are pushed), "reconnecting", "unsupported" (an older runner: polled), ..."""
+    lk = runner_stream.peek(url)
+    return lk.state() if lk is not None else None
+
+
 def probe_runner(r):
     """Live status for one runner (for the dashboard list)."""
     import requests
@@ -229,7 +236,7 @@ def probe_runner(r):
            "prefer": r.get("prefer") or [], "source": r.get("_source", "manual"),
            "online": False, "busy": None, "node": None, "kind": None, "note": None,
            "asleep": False, "can_wake": can_wake, "wake_eta_s": None, "queue_eta_s": None,
-           "gpu": None, "vram_gb": None, "qualities": None}
+           "gpu": None, "vram_gb": None, "qualities": None, "stream": None}
     if not url:
         return out
     tok = r.get("token") or os.environ.get("WORKER_TOKEN", "")
@@ -242,13 +249,16 @@ def probe_runner(r):
         out["gpu"], out["vram_gb"] = _runner_gpu_facts(out["name"], label)
         out["qualities"] = _runner_qualities(out["ops"], out["engines"])
         out["queue_eta_s"] = _runner_queue_eta(out["name"])
+        out["stream"] = _stream_state(url)
         _last_probe[url] = (time.time(), dict(out))
     except PermissionError:      # reachable, and it really did refuse our token
         out.update(online=True, note="token mismatch")
     except Exception:  # noqa: BLE001 - no answer this time
         held = _last_probe.get(url)
         if held and time.time() - held[0] < STICKY_SECS:
-            return dict(held[1])
+            row = dict(held[1])
+            row["stream"] = _stream_state(url)
+            return row
         if can_wake:
             out.update(asleep=True, note="asleep - wakes when a job needs it",
                        wake_eta_s=wake_eta())
@@ -506,17 +516,26 @@ def _gpu_targets():
     return targets
 
 
+def _gpu_row(d):
+    return {"util": _numf(d.get("util")), "mem_used": _numf(d.get("mem_used")),
+            "mem_total": _numf(d.get("mem_total")), "temp": _numf(d.get("temp")),
+            "power": _numf(d.get("power"))}
+
+
 def _read_runner_gpu(url, token):
-    """One runner's /gpu (flat {util,mem_used,mem_total,temp,power}), or None if unreachable."""
+    """One runner's GPU (flat {util,mem_used,mem_total,temp,power}), or None if unreachable. From
+    the runner's pushed /events stream while that is live (no request); else its /gpu."""
     import requests
+    lk = runner_stream.ensure(url, token)
+    d = lk.live_gpu() if lk is not None else None
+    if isinstance(d, dict) and d.get("util") is not None:
+        return _gpu_row(d)
     try:
         r = core.http().get(url + "/gpu", headers={"X-Runner-Token": token, "X-Lada-Token": token}, timeout=3)
         if r.ok:
             d = r.json()
             if isinstance(d, dict) and d.get("util") is not None:
-                return {"util": _numf(d.get("util")), "mem_used": _numf(d.get("mem_used")),
-                        "mem_total": _numf(d.get("mem_total")), "temp": _numf(d.get("temp")),
-                        "power": _numf(d.get("power"))}
+                return _gpu_row(d)
     except Exception:  # noqa: BLE001
         pass
     return None

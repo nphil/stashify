@@ -24,6 +24,7 @@ import subprocess
 from urllib.parse import urlparse
 
 import jobprogress
+import runner_stream
 
 
 # --------------------------------------------------------------------------- #
@@ -400,6 +401,11 @@ def runner_health(url, token="", timeout=(2, 4), retry_delay=0.25):
     connect must not read as "offline" (the dashboard flapped, and a sleeping-runner wake
     packet was sent to an awake machine). Anything that is not a connection failure (a
     token refusal, a page that is not JSON) raises at once. Raises the last error."""
+    lk = runner_stream.ensure(url, token)
+    if lk is not None:
+        h = lk.live_health()               # pushed by the runner over /events: no request
+        if h is not None:
+            return h
     import requests
 
     headers = {"X-Runner-Token": token, "X-Lada-Token": token}
@@ -647,20 +653,32 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None,
                      rid=rid, base=base, token=token)
     cursor = 0
     failures = 0                      # polls in a row that failed even after the quick retry
+    lk = runner_stream.ensure(base, token)   # the runner's pushed state; None when streaming is off
     try:
         while True:
             check_cancel()
+            seen = lk.events if lk is not None else 0
+            live = lk.job_and_lines(rid, cursor) if lk is not None else None
+            if live is not None:
+                # The runner is pushing this job's state and log: no request needed. When the stream
+                # is not live (an older runner, a drop) this is None and the polling below runs as before.
+                jb, lg = live[0], {"lines": live[1], "cursor": live[2]}
+                failures = 0
+            else:
+                try:
+                    jb = _poll_json(f"{base}/jobs/{rid}", headers)
+                except Exception as exc:  # noqa: BLE001 - transient: the job's state is not touched, keep polling
+                    failures += 1
+                    if failures == 3 or failures % 15 == 0:
+                        log.warning(f"Runner poll failing ({failures} in a row): {exc}")
+                    time.sleep(2)
+                    continue
+                failures = 0
+                try:
+                    lg = _poll_json(f"{base}/jobs/{rid}/log?after={cursor}", headers)
+                except Exception:  # noqa: BLE001
+                    lg = {}
             try:
-                jb = _poll_json(f"{base}/jobs/{rid}", headers)
-            except Exception as exc:  # noqa: BLE001 - transient: the job's state is not touched, keep polling
-                failures += 1
-                if failures == 3 or failures % 15 == 0:
-                    log.warning(f"Runner poll failing ({failures} in a row): {exc}")
-                time.sleep(2)
-                continue
-            failures = 0
-            try:
-                lg = _poll_json(f"{base}/jobs/{rid}/log?after={cursor}", headers)
                 for ln in lg.get("lines", []):
                     text = ln.get("text", "")
                     # When we mirror the runner's structured status directly (status_cb),
@@ -705,7 +723,11 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None,
                 raise RuntimeError("Lada runner: " + str(jb.get("error") or jb.get("message") or "failed"))
             if state == "cancelled":
                 raise Cancelled("cancelled on lada runner")
-            time.sleep(2)
+            if live is not None:
+                time.sleep(0.25)             # at most ~4 rounds a second, however chatty the stream
+                lk.wait(1.75, since=seen)    # ...and a push from the runner wakes this at once
+            else:
+                time.sleep(2)
 
         produced = newest_video(sub)
         dest = os.path.join(result_dir, os.path.basename(produced))

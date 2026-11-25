@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(ROOT, "winrunner"))
 
 _scratch = tempfile.mkdtemp(prefix="stashify-jobstatus-")
 atexit.register(shutil.rmtree, _scratch, ignore_errors=True)
+os.environ.setdefault("STASHIFY_RUNNER_STREAM", "0")   # the poll tests fake the network: no /events readers
 os.environ["LOCALAPPDATA"] = _scratch          # the runner writes its log under here when imported
 
 import core                          # noqa: E402
