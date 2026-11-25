@@ -1345,6 +1345,116 @@ def enabled_engines():
     return eng
 
 
+# >>> event stream (this block is identical in lada_runner.py; tests/test_runner_stream.py keeps them in step) >>>
+EVENT_TICK = 0.25            # how often the stream looks for changes (so at most ~4 job/log events a second)
+EVENT_PING = 15              # a comment line this often when nothing else was sent: a dead link is noticed
+EVENT_GPU_EVERY = 1.0        # GPU meters at most once a second, and only when a value changed
+EVENT_LOG_BATCH = 200        # log lines per frame; the rest follow on the next tick
+EVENT_WRITE_TIMEOUT = 20     # a reader that takes nothing for this long is dropped (it reconnects and resyncs)
+
+
+def sse_frame(event, data, eid):
+    """One Server-Sent Events frame: id, event name and one line of JSON."""
+    return ("id: %d\nevent: %s\ndata: %s\n\n" % (eid, event, json.dumps(data, separators=(",", ":")))).encode()
+
+
+def stream_events(write, health, gpu, jobs, log_since, stop=None, tick=EVENT_TICK,
+                  ping=EVENT_PING, gpu_every=EVENT_GPU_EVERY):
+    """Push this runner's state to ONE client until write() raises OSError (client gone) or `stop`
+    is set. A new client first gets everything (health, gpu, every job, buffered log lines); after
+    that only what changed: `health`, `gpu`, `job` (the GET /jobs/<id> dict), `log` ({id, cursor,
+    lines}). Each client has its own thread and its own cursors and compares against what IT last
+    saw, so a slow reader only ever delays itself: when it catches up it is sent the current
+    state, not a backlog. Nothing here touches job work."""
+    eid = 0
+    last_write = last_gpu = 0.0
+    sent = {}                              # "health" / "gpu" / job id -> JSON last sent
+    cursors = {}                           # job id -> highest log seq sent
+
+    def emit(event, data):
+        nonlocal eid, last_write
+        eid += 1
+        write(sse_frame(event, data, eid))
+        last_write = time.monotonic()
+
+    def changed(key, event, data):
+        text = json.dumps(data, sort_keys=True)
+        if sent.get(key) != text:
+            sent[key] = text
+            emit(event, data)
+
+    def safe(fn, *a):
+        try:
+            return fn(*a)
+        except OSError:
+            raise
+        except Exception:  # noqa: BLE001 - one bad snapshot must not end the stream
+            logging.debug("event stream: snapshot failed", exc_info=True)
+            return None
+
+    write(b"retry: 3000\n\n")
+    last_write = time.monotonic()
+    while stop is None or not stop.is_set():
+        now = time.monotonic()
+        h = safe(health)
+        if h is not None:
+            changed("health", "health", h)
+        if now - last_gpu >= gpu_every:
+            last_gpu = now
+            g = safe(gpu)
+            if g is not None:
+                changed("gpu", "gpu", g)
+        js = safe(jobs) or []
+        live = set()
+        for j in js:
+            jid = j["id"]
+            live.add(jid)
+            # lines before state: a client that sees "done" has already been sent every line
+            if j.get("log_cursor", 0) > cursors.get(jid, 0):
+                cur, lines = safe(log_since, jid, cursors.get(jid, 0)) or (0, [])
+                lines = lines[:EVENT_LOG_BATCH]
+                if lines:
+                    cursors[jid] = lines[-1]["seq"]
+                    emit("log", {"id": jid, "cursor": cursors[jid], "lines": lines})
+            changed(jid, "job", j)
+        for gone in [k for k in sent if k not in live and k not in ("health", "gpu")]:
+            sent.pop(gone, None)
+            cursors.pop(gone, None)
+        if time.monotonic() - last_write >= ping:
+            write(b": ping\n\n")
+            last_write = time.monotonic()
+        if stop is not None:
+            stop.wait(tick)
+        else:
+            time.sleep(tick)
+# <<< event stream <<<
+
+
+def health_payload():
+    return {
+        "ok": True, "node": CFG["node_name"], "kind": "windows", "events": True,
+        "ops": enabled_ops(), "engines": enabled_engines(),
+        "encoders": {"ai": resolve_lane_encoder("ai"),
+                     "transcode": resolve_lane_encoder("transcode")},
+        "lanes": {n: {"busy": l.busy(), "paused": l.paused, "gpu": l.gpu_label,
+                      "job": l.running_id} for n, l in LANES.items()},
+        "paused": _node["paused"], "busy": any(l.busy() for l in LANES.values())}
+
+
+def _jobs_public():
+    with _jobs_lock:
+        return [public(j) for j in _jobs.values()]
+
+
+def _gpu_nvidia():
+    with _gpu_lock:
+        return dict(_gpu["nvidia"])
+
+
+def log_since_cursor(jid, after):
+    return log_cursor(jid), log_since(jid, after)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "stashify-winrunner/1.0"
     # Keep connections open between requests (every response carries its length).
@@ -1396,6 +1506,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _events(self):
+        """GET /events: one long-lived Server-Sent Events stream (see stream_events). No
+        Content-Length: the response ends when either side closes the connection."""
+        self.close_connection = True
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        def write(b):
+            self.wfile.write(b)
+            self.wfile.flush()
+        try:
+            self.connection.settimeout(EVENT_WRITE_TIMEOUT)
+            stream_events(write, health_payload, _gpu_nvidia, _jobs_public, log_since_cursor)
+        except OSError:
+            pass                                   # the client went away
+
     def do_GET(self):
         raw = self.path.split("?", 1)[0].rstrip("/")
         if raw in ("", "/"):
@@ -1404,21 +1533,15 @@ class Handler(BaseHTTPRequestHandler):
         if raw == "/ping":            # unauth discovery beacon (no sensitive data)
             return self._send(200, {"stashify": True, "node": CFG["node_name"],
                                     "kind": "windows", "ops": enabled_ops(),
-                                    "engines": enabled_engines()})
+                                    "engines": enabled_engines(), "events": True})
         if not self._authed():
             return self._send(401, {"error": "bad token"})
+        if raw == "/events":
+            return self._events()
         if raw == "/health":
-            return self._send(200, {
-                "ok": True, "node": CFG["node_name"], "kind": "windows",
-                "ops": enabled_ops(), "engines": enabled_engines(),
-                "encoders": {"ai": resolve_lane_encoder("ai"),
-                             "transcode": resolve_lane_encoder("transcode")},
-                "lanes": {n: {"busy": l.busy(), "paused": l.paused, "gpu": l.gpu_label,
-                              "job": l.running_id} for n, l in LANES.items()},
-                "paused": _node["paused"], "busy": any(l.busy() for l in LANES.values())})
+            return self._send(200, health_payload())
         if raw == "/gpu":
-            with _gpu_lock:
-                return self._send(200, dict(_gpu["nvidia"]))
+            return self._send(200, _gpu_nvidia())
         if raw == "/stats":
             return self._send(200, {"gpus": gpu_snapshot(),
                                     "lanes": {n: {"busy": l.busy(), "paused": l.paused,
