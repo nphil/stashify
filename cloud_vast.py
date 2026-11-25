@@ -745,7 +745,10 @@ def _parse_offer(raw):
         vram_gb=_num(raw.get("gpu_ram"), 0.0) / 1000.0,
         reliability=_num(raw.get("reliability2", raw.get("reliability")), 1.0),
         driver=_driver_major(raw.get("driver_version")), cuda=_num(raw.get("cuda_max_good"), 0.0),
-        inet_down=_num(raw.get("inet_down"), 0.0), datacenter=bool(raw.get("datacenter")))
+        inet_down=_num(raw.get("inet_down"), 0.0),
+        # Vast marks data-centre machines with hosting_type 1; its offers carry no
+        # "datacenter" field (that name only exists as a search filter).
+        datacenter=(_num(raw.get("hosting_type"), 0) == 1 or bool(raw.get("datacenter"))))
 
 
 def _acceptable(o, spec):

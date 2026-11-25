@@ -60,9 +60,10 @@ class Resp:
 
 def raw_offer(oid, gpu="RTX 4090", price=0.40, vram_mb=24564, driver="580.95.05",
               reliability=0.99, inet_down=900.0, datacenter=True):
+    # mirrors a real offer: no "datacenter" key, data-centre hosts have hosting_type 1
     return {"id": oid, "gpu_name": gpu, "dph_total": price, "gpu_ram": vram_mb,
             "driver_version": driver, "reliability2": reliability, "inet_down": inet_down,
-            "datacenter": datacenter, "cuda_max_good": 12.9}
+            "hosting_type": 1 if datacenter else 0, "cuda_max_good": 12.9}
 
 
 class FakeVast:
