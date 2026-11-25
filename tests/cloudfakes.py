@@ -29,3 +29,18 @@ class CloudCase(ht.CloudCase):
     prefix = cloud_jasna.LABEL_PREFIX
     keys = {"vast_api_key": KEY, "jasna_license": LICENCE}
     settings_kw = {"secrets": cloud_jasna.SECRET_FIELDS, "env_names": cloud_jasna.ENV_NAMES}
+
+
+# One of each kind of machine: the fastest card, the cheapest card, a plain community 4090 and the
+# most reliable datacenter host.
+MARKET = [(11, "RTX 5090", 0.90, {"vram_mb": 32607, "reliability": 0.99, "inet_down": 2000.0}),
+          (12, "RTX 4090", 0.40, {"reliability": 0.985, "datacenter": False}),
+          (13, "RTX 3090", 0.22, {"vram_mb": 24576, "reliability": 0.981, "datacenter": False,
+                                  "inet_down": 500.0}),
+          (14, "RTX 4090", 0.55, {"reliability": 0.999})]
+UPSCALE = {"op": "decensor+upscale", "upscale": "span", "upscale_height": 2160}   # a plan body
+
+
+def market(extra=()):
+    """Raw Vast offers for MARKET (plus extra (id, gpu, price, more) rows), ready for FakeVast.offers."""
+    return [raw_offer(oid, gpu, price, **more) for oid, gpu, price, more in list(MARKET) + list(extra)]

@@ -15,6 +15,7 @@ Exactly three presets exist. Never offered: Normal/BasicVSR++, plain LTX, --ltx-
 """
 
 import dataclasses
+import json
 import math
 import os
 import re
@@ -111,6 +112,19 @@ FIRST_RUN_PREP_MIN = 4.0      # Jasna prepares for the GPU on the first LTX run
 HOME_UPLINK_MBPS = 80         # assumed home-to-cloud speed (10 MB/s); documented guess
 DEFAULT_DOWN_MBPS = 300
 
+# The three kinds of paid run. "decensor+upscale" runs Jasna's own upscaler after the mosaic
+# restoration; "upscale" only upscales (it asks for no restoration beyond Jasna's default).
+OPS = ("decensor", "decensor+upscale", "upscale")
+UPSCALE_MODELS = ("span", "realplksr", "rtx-super-res")     # Jasna's others need more than a rented RTX box has
+UPSCALE_HEIGHTS = (1080, 1440, 2160)                        # the output heights Jasna accepts
+DEFAULT_UPSCALE, DEFAULT_UPSCALE_HEIGHT = "span", 2160
+DEFAULT_PRESET = "detail"     # what the market browser costs a scene with when none was named
+# Upscale-step GPU minutes per minute of video on an RTX 5090 at a 1080p output. NOT measured on a
+# rented Linux machine yet: generous guesses, listed as an assumption on every estimate that uses them.
+UPSCALE_MIN_PER_MIN = {"span": 0.35, "realplksr": 0.9, "rtx-super-res": 0.5}
+PASS_THROUGH_SHARE = 0.25     # an upscale-only run still scans every frame: this share of a restoration pass
+APT_GB = 0.2                  # what apt downloads to install Jasna
+
 
 class CloudRefused(CloudError):
     """The job may not start (no key/licence, over a spend cap, no machine...)."""
@@ -194,21 +208,179 @@ def scene_meta(scene):
             "height": int(f.get("height") or 0), "width": int(f.get("width") or 0)}
 
 
-# -- estimate / quote ------------------------------------------------------------- #
+# -- what to run, and on which machine ------------------------------------------------ #
 
-def _transfer_min(gb, mbps):
-    return gb * 8000.0 / max(mbps, 1.0) / 60.0
+class PlanError(ValueError):
+    """The request asks for something Stashify will not run (an operation, model, height,
+    machine or filter it does not know). `code` is the machine-readable reason; str(exc) is
+    safe to show a user."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
 
 
-def requirements(cfg, size_bytes=0, environ=None):
+@dataclasses.dataclass(frozen=True)
+class Plan:
+    """What one paid run does and where: the operation, the upscale settings and how the
+    machine is chosen. The default is the plain, automatic Decensor."""
+    op: str = "decensor"          # decensor | decensor+upscale | upscale
+    upscale: str = ""             # Jasna's upscale model (only for ops that upscale)
+    upscale_height: int = 0       # output height in pixels (same)
+    offer_id: str = ""            # pin ONE machine: nothing else is rented in its place
+    provider: str = ""            # ... the provider that machine is on (ids are per provider)
+    gpu: str = ""                 # or: only this GPU model (another machine of it is fine)
+    hardware: str = ""            # or: the machine a hardware choice (cheapest, fastest...) means right now
+    filters: dict = dataclasses.field(default_factory=dict)   # extra search filters; they only tighten
+
+    @property
+    def chosen(self):
+        """True when ONE specific machine was picked (by id, or by a hardware choice)."""
+        return bool(self.offer_id or self.hardware)
+
+    @property
+    def steered(self):
+        """True when the owner narrowed the machine choice at all."""
+        return bool(self.offer_id or self.hardware or self.gpu or self.filters)
+
+    def as_dict(self):
+        """The request fields that make this plan again (plan_from_body(plan.as_dict()) == plan)."""
+        return {"op": self.op, "upscale": self.upscale, "upscale_height": self.upscale_height,
+                "offer_id": self.offer_id, "provider": self.provider, "gpu": self.gpu,
+                "hardware": self.hardware, "cloud_filters": dict(self.filters)}
+
+
+_GPU_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.+/-]{0,39}$")
+_OFFER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+_MODEL_NAMES = {"span": "SPAN", "realplksr": "RealPLKSR", "rtx-super-res": "RTX Super Resolution"}
+_BAD_OP = "Cloud GPUs run Decensor, Decensor + upscale or Upscale only."
+
+
+def truthy(value):
+    """A request flag: JSON true / 1, or the usual query-string spellings."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return value == 1
+
+
+def plan_from_body(body, backend=None):
+    """Validate the "what and where" part of a request (the POST /api/decensor body, or the
+    quote's query string) into a Plan. `backend` ('decensor' | 'lada' | 'upscale' | ...) names
+    the operation when the request does not (`op`, else `post_upscale` on a Decensor).
+    Raises PlanError."""
+    body = body or {}
+    op = str(body.get("op") or "").strip().replace(" ", "+")     # a query string turns '+' into ' '
+    if not op:
+        if backend == "upscale":
+            op = "upscale"
+        elif backend in (None, "", "decensor", "lada"):
+            op = "decensor+upscale" if truthy(body.get("post_upscale")) else "decensor"
+        else:
+            raise PlanError("bad_op", _BAD_OP)
+    if op not in OPS:
+        raise PlanError("bad_op", _BAD_OP)
+    upscale, height = "", 0
+    if op != "decensor":
+        upscale = str(body.get("upscale") or DEFAULT_UPSCALE).strip().lower()
+        if upscale not in UPSCALE_MODELS:
+            raise PlanError("bad_upscale", "Cloud upscaling uses one of: %s." % ", ".join(UPSCALE_MODELS))
+        raw = body.get("upscale_height")
+        try:
+            height = DEFAULT_UPSCALE_HEIGHT if raw in (None, "") else int(float(raw))
+        except (TypeError, ValueError):
+            height = 0
+        if height not in UPSCALE_HEIGHTS:
+            raise PlanError("bad_upscale_height", "The upscale height must be one of: %s."
+                            % ", ".join(str(h) for h in UPSCALE_HEIGHTS))
+    offer_id = body.get("offer_id")
+    offer_id = "" if offer_id in (None, "") else str(offer_id).strip()
+    if offer_id and not _OFFER_ID.match(offer_id):
+        raise PlanError("bad_offer", "That is not a machine id.")
+    provider = str(body.get("provider") or "").strip().lower()
+    if provider and provider not in hireling.REGISTRY:
+        raise PlanError("bad_provider", "That GPU provider is not known.")
+    gpu = str(body.get("gpu") or "").strip()
+    if gpu and not _GPU_NAME.match(gpu):
+        raise PlanError("bad_gpu", "That is not a GPU name.")
+    hardware = str(body.get("hardware") or "").strip()
+    if hardware and hardware not in hireling.PRESET_IDS:
+        raise PlanError("bad_hardware", "The hardware choice must be one of: %s." % ", ".join(hireling.PRESET_IDS))
+    if hardware and offer_id:
+        raise PlanError("bad_hardware", "Pick a machine or a hardware choice, not both.")
+    filters = body.get("cloud_filters")
+    if isinstance(filters, str):
+        try:
+            filters = json.loads(filters) if filters.strip() else {}
+        except ValueError:
+            raise PlanError("bad_filters", "cloud_filters must be a JSON object.") from None
+    filters = {} if filters is None else filters
+    if not isinstance(filters, dict):
+        raise PlanError("bad_filters", "cloud_filters must be an object.")
+    try:
+        hireling.RentSpec.from_dict(filters, allowed=hireling.FILTER_FIELDS)
+    except ValueError as exc:
+        raise PlanError("bad_filters", str(exc)) from None
+    return Plan(op, upscale, height, offer_id, provider, gpu, hardware, dict(filters))
+
+
+def plan_label(plan, preset_key=None):
+    """The words the dashboard shows for a run: the quality preset, plus what it upscales to."""
+    if plan.op == "upscale":
+        return "Upscale to %dp \u00b7 %s" % (plan.upscale_height, _MODEL_NAMES[plan.upscale])
+    label = PRESETS[preset_key]["label"]
+    if plan.op == "decensor+upscale":
+        label += " + upscale to %dp" % plan.upscale_height
+    return label
+
+
+# Filters the owner adds can only TIGHTEN what Jasna and the caps require, never loosen it.
+_RAISE = ("min_vram_gb", "min_driver", "min_cuda", "min_inet_down", "min_inet_up", "min_reliability",
+          "min_open_ports", "min_cpu_cores", "min_ram_gb", "min_disk_gb", "min_duration_hours")
+_LOWER = ("max_price", "max_bw_cost")                      # None = no limit
+_KEEP = ("num_gpus", "max_gpus", "verified", "rental_type")   # Stashify's own choice; a filter cannot change it
+
+
+def narrow(base, filters):
+    """`base` (what Jasna and the owner's caps require) with the owner's extra search filters
+    applied. A filter only ever tightens: minimums take the larger value, price limits the
+    smaller, "datacenter only" can be switched on but never off, and the GPU count, the
+    verified-host rule and the rental type stay as `base` has them. `base` has no GPU list;
+    the filters' own `gpus` / `gpu` / `countries` / `provider` / `offer_id` just restrict."""
+    if not filters:
+        return base
+    spec = hireling.RentSpec.from_dict(filters, base=base, allowed=hireling.FILTER_FIELDS)
+    for key in filters:
+        want, have = getattr(spec, key), getattr(base, key)
+        if key in _RAISE:
+            setattr(spec, key, max(want, have))
+        elif key in _LOWER:
+            if want is None or (have is not None and have <= want):
+                setattr(spec, key, have)
+        elif key == "max_vram_gb":
+            if want and have:
+                setattr(spec, key, min(want, have))
+            else:
+                setattr(spec, key, want or have)
+        elif key == "datacenter_only":
+            setattr(spec, key, bool(have or want))
+        elif key in _KEEP:
+            setattr(spec, key, have)
+    return spec.validate()
+
+
+def disk_needed(size_bytes, ratio=1.0):
+    """GB of rental disk: upstream's 80 GB for Jasna and its models, plus the source, a
+    working copy and the result (`ratio` times the source when it is upscaled)."""
+    return 80 + int(math.ceil((2.0 + ratio) * size_bytes / 1e9))
+
+
+def requirements(cfg, size_bytes=0, environ=None, ratio=1.0):
     """What Jasna needs from ANY machine, plus the owner's limits, as data: it marks offers
-    compatible or not in the market browser and is the base of every rental. Disk follows
-    upstream (>= 80 GB) plus room for the video and the result."""
+    compatible or not in the market browser and is the base of every rental."""
     env = os.environ if environ is None else environ
-    gb = size_bytes / 1e9
     return hireling.RentSpec(
         gpu_pattern=r"^RTX", min_vram_gb=MIN_VRAM_GB, max_price=cfg.max_price,
-        disk_gb=max(int(cfg.disk_gb), 80 + int(math.ceil(3 * gb))),
+        disk_gb=max(int(cfg.disk_gb), disk_needed(size_bytes, ratio)),
         image=env.get("JASNA_CLOUD_IMAGE") or env.get("VAST_IMAGE") or IMAGE,
         env={"NVIDIA_DRIVER_CAPABILITIES": "all"},
         min_reliability=cfg.min_reliability, datacenter_only=cfg.datacenter_only,
@@ -221,45 +393,161 @@ def rent_spec(cfg, size_bytes=0, environ=None):
     return dataclasses.replace(requirements(cfg, size_bytes, environ), gpus=GPUS)
 
 
-def estimate(scene, preset_key, offer, release_gb=RELEASE_GB_FALLBACK):
-    """Minutes and dollars for one scene on one offer. An ESTIMATE: upstream's speed table
-    is for 1080p; taller video is scaled linearly and everything is padded by SAFETY."""
-    p = PRESETS[preset_key]
+def result_ratio(scene, plan):
+    """How many times more pixels the result has than the source (1.0 when nothing is upscaled)."""
+    if not plan.upscale:
+        return 1.0
+    return max(1.0, (plan.upscale_height / float(scene.get("height") or 1080)) ** 2)
+
+
+def plan_spec(plan, cfg, size_bytes=0, environ=None, ratio=1.0):
+    """The RentSpec a plan searches and rents with. Nothing steered: the automatic RTX
+    preference order. Otherwise the requirements narrowed to what the owner asked for (a
+    hardware choice looks at every compatible machine, so it never uses the preference list)."""
+    if not plan.steered:
+        return dataclasses.replace(requirements(cfg, size_bytes, environ, ratio), gpus=GPUS)
+    chosen = dict(plan.filters)
+    for key, value in (("gpu", plan.gpu), ("offer_id", plan.offer_id), ("provider", plan.provider)):
+        if value:
+            chosen[key] = value
+    return narrow(requirements(cfg, size_bytes, environ, ratio), chosen)
+
+
+# -- estimate / quote ------------------------------------------------------------- #
+
+def _transfer_min(gb, mbps):
+    return gb * 8000.0 / max(mbps, 1.0) / 60.0
+
+
+@dataclasses.dataclass(frozen=True)
+class JobCost(hireling.JobEstimate):
+    """hireling's JobEstimate (hours, the compute / storage / bandwidth breakdown, the
+    assumptions) plus Stashify's minutes and a price rounded UP to the cent: the number a
+    user confirms. The market browser and the quote use this one class, so they agree."""
+    setup_min: float = 0.0
+    transfer_min: float = 0.0
+    processing_min: float = 0.0
+    disk_gb: int = 0
+
+    @property
+    def est_usd(self):
+        return math.ceil(round(self.cost.total * 100.0, 6)) / 100.0
+
+    def as_dict(self):
+        out = super().as_dict()
+        out.update(est_usd=self.est_usd, setup_min=round(self.setup_min, 1),
+                   transfer_min=round(self.transfer_min, 1), processing_min=round(self.processing_min, 1),
+                   total_min=out["minutes"], disk_gb=self.disk_gb)
+        return out
+
+
+def estimate_job(scene, preset_key, offer, release_gb=RELEASE_GB_FALLBACK, plan=None, disk_gb=None):
+    """What one scene costs on one offer, in time and money (a JobCost). An ESTIMATE:
+    upstream's speed table is for 1080p with mosaics throughout; taller video is scaled
+    linearly and everything is padded by SAFETY. The runtime cap, not this number, guards the
+    money. disk_gb is the rental disk (default: what the plan needs for this scene)."""
+    plan = plan or Plan()
+    restoring = plan.op != "upscale"
+    minutes = (scene.get("duration") or 0) / 60.0
     base = BASE_MIN_PER_MIN.get(offer.gpu, max(BASE_MIN_PER_MIN.values()))
-    slow = TIER_SLOWDOWN[p["model"]] * (LARGE_CANVAS_SLOWDOWN if p["large_canvas"] else 1.0)
     res = max(1.0, (scene.get("height") or 1080) / 1080.0)
-    processing = scene["duration"] / 60.0 * base * slow * res * SAFETY
+    if restoring:
+        p = PRESETS[preset_key]
+        slow = TIER_SLOWDOWN[p["model"]] * (LARGE_CANVAS_SLOWDOWN if p["large_canvas"] else 1.0)
+        model_gb = MODEL_DOWNLOAD_GB[p["model"]]
+    else:
+        slow, model_gb = PASS_THROUGH_SHARE, 0.0
+    processing = minutes * base * slow * res * SAFETY
+    if plan.upscale:
+        processing += (minutes * UPSCALE_MIN_PER_MIN[plan.upscale] * (plan.upscale_height / 1080.0) ** 2
+                       * base / BASE_MIN_PER_MIN["RTX 5090"] * SAFETY)
+    size_gb = (scene.get("size") or 0) / 1e9
+    ratio = result_ratio(scene, plan)
+    result_gb = size_gb * ratio
     down = max((offer.inet_down or DEFAULT_DOWN_MBPS) * 0.7, 100.0)
-    model = _transfer_min(MODEL_DOWNLOAD_GB[p["model"]], down)
-    install = INSTALL_FIXED_MIN + _transfer_min(release_gb, min(down, 800.0))
-    transfer = 2 * _transfer_min((scene.get("size") or 0) / 1e9, HOME_UPLINK_MBPS)  # up + result down
-    setup = BOOT_MIN + install + ACTIVATE_MIN + model + FIRST_RUN_PREP_MIN
+    setup = (BOOT_MIN + INSTALL_FIXED_MIN + _transfer_min(release_gb, min(down, 800.0)) + ACTIVATE_MIN
+             + _transfer_min(model_gb, down) + FIRST_RUN_PREP_MIN)
+    transfer = _transfer_min(size_gb, HOME_UPLINK_MBPS) + _transfer_min(result_gb, HOME_UPLINK_MBPS)
     total = setup + transfer + processing
-    return {"setup_min": round(setup, 1), "transfer_min": round(transfer, 1),
-            "processing_min": round(processing, 1), "total_min": round(total, 1),
-            "est_usd": math.ceil(total / 60.0 * offer.price * 100.0) / 100.0}
+    hours = total / 60.0
+    disk = disk_needed(scene.get("size") or 0, ratio) if disk_gb is None else disk_gb
+    cost = hireling.estimate_cost(offer, hours, disk_gb=disk, gb_down=size_gb + release_gb + model_gb + APT_GB,
+                                  gb_up=result_gb)
+    notes = ["GPU time follows Jasna's published speeds for %s, padded by %d%%."
+             % (offer.gpu or "this GPU", round((SAFETY - 1.0) * 100))]
+    if not restoring:
+        notes.append("No mosaic restoration is wanted, but Jasna still scans every frame "
+                     "(counted as %d%% of a full restoration pass)." % round(PASS_THROUGH_SHARE * 100))
+    if plan.upscale:
+        notes.append("Upscaling time is a rough guess: it has not been measured on rented machines yet.")
+    notes.append("Uploading from home is assumed to run at %.0f MB/s." % (HOME_UPLINK_MBPS / 8.0))
+    return JobCost(hours=hours, cost=cost, assumptions=tuple(notes), setup_min=setup,
+                   transfer_min=transfer, processing_min=processing, disk_gb=disk)
 
 
-def build_quote(cl, scene, preset_key, queued_usd=0.0, release_gb=None):
-    """Everything the dashboard shows before a paid run, and the server's refusal rules
-    (the SAME function decides both, so the UI can't drift from the enforcement).
+def estimate(scene, preset_key, offer, release_gb=RELEASE_GB_FALLBACK, plan=None, disk_gb=None):
+    """estimate_job as a plain dict (setup_min, transfer_min, processing_min, total_min, est_usd,
+    hours, minutes, breakdown, assumptions, disk_gb)."""
+    return estimate_job(scene, preset_key, offer, release_gb, plan, disk_gb).as_dict()
 
-    queued_usd: estimates of cloud jobs already queued but not started."""
-    if preset_key not in PRESETS:
+
+def make_estimator(cfg, scene, preset_key, plan=None, release_gb=None):
+    """callable(offer) -> JobCost for hireling's market browser: the same numbers a quote
+    shows, so a machine's listed price is what the user is later asked to confirm."""
+    plan = plan or Plan()
+    rel = cached_release_gb() if release_gb is None else release_gb
+    disk = requirements(cfg, scene.get("size") or 0, ratio=result_ratio(scene, plan)).disk_gb
+    return lambda offer: estimate_job(scene, preset_key, offer, rel, plan, disk)
+
+
+_BRIEF = ("provider", "id", "gpu", "num_gpus", "vram_gb", "price_per_hour", "reliability", "datacenter",
+          "host_type", "location", "country", "inet_down", "inet_up", "storage_per_gb_hr",
+          "bw_up_per_gb", "bw_down_per_gb")
+
+
+def offer_brief(offer):
+    """The machine a quote is for, in a few fields."""
+    row = offer.as_dict()
+    return {key: row[key] for key in _BRIEF}
+
+
+def pick_hardware(cl, spec, estimator, hardware, fresh=False):
+    """The machine a hardware choice (cheapest / fastest / best_value / most_reliable) means
+    right now, among every machine `spec` accepts, or None."""
+    listed = cl.offers(spec, estimator=estimator, limit=1, cached=not fresh)
+    if listed.errors and not listed.pool:
+        raise CloudError(next(iter(listed.errors.values())))
+    return next((p.offer for p in hireling.resolve_presets(listed.pool, listed.estimates)
+                 if p.id == hardware), None)
+
+
+def quote_with_spec(cl, scene, preset_key, plan=None, queued_usd=0.0, release_gb=None, fresh=False):
+    """Everything the dashboard shows before a paid run, and the server's refusal rules (the
+    SAME function decides both, so the UI can't drift from the enforcement). Returns
+    (quote, spec): the RentSpec a job for this quote rents with, None when refused.
+
+    queued_usd: estimates of cloud jobs already queued but not started.
+    fresh: look the market up again instead of reusing a result up to two minutes old
+    (admission and the run itself do, so what is rented is what was priced)."""
+    plan = plan or Plan()
+    restoring = plan.op != "upscale"
+    if restoring and preset_key not in PRESETS:
         raise ValueError("unknown cloud preset %r" % (preset_key,))
     cfg = cl.config()
     committed = cl.month_spend_committed()
-    out = {"preset": preset_key, "label": PRESETS[preset_key]["label"], "estimate": True,
+    out = {"op": plan.op, "preset": preset_key if restoring else None,
+           "label": plan_label(plan, preset_key), "estimate": True,
            "scene_id": scene.get("id"), "title": scene.get("title"),
            "job_cap": cfg.job_cap, "month_cap": cfg.month_cap, "max_price": cfg.max_price,
-           "month_to_date": round(committed, 2),
+           "max_job_hours": cfg.max_job_hours, "month_to_date": round(committed, 2),
            "month_remaining": round(max(0.0, cfg.month_cap - committed - queued_usd), 2),
-           "est_usd": None, "refusal": None}
+           "est_usd": None, "refusal": None, "plan": plan.as_dict(),
+           "machine": "chosen" if plan.chosen else "auto"}
 
     def refuse(code, message):
         out["refusal"] = {"code": code, "message": message}
         out["ok"] = False
-        return out
+        return out, None
 
     if not cl.enabled_providers():
         return refuse("no_key", "Add your Vast.ai API key in Cloud settings first.")
@@ -268,24 +556,52 @@ def build_quote(cl, scene, preset_key, queued_usd=0.0, release_gb=None):
     if not (scene.get("duration") or 0) > 0:
         return refuse("no_duration", "Stash does not know this video's length, so the cost "
                                      "cannot be estimated.")
+    height = scene.get("height") or 0
+    if plan.upscale and 0 < height >= plan.upscale_height:
+        return refuse("upscale_not_needed", "This video is already %dp, so upscaling it to %dp would "
+                      "add nothing. Pick a larger size." % (height, plan.upscale_height))
+    spec = plan_spec(plan, cfg, scene.get("size") or 0, ratio=result_ratio(scene, plan))
+    rel = cached_release_gb() if release_gb is None else release_gb
     try:
-        offer = cl.best_offer(rent_spec(cfg, scene.get("size") or 0))
+        if plan.hardware and not plan.offer_id:
+            offer = pick_hardware(cl, spec, make_estimator(cfg, scene, preset_key, plan, rel),
+                                  plan.hardware, fresh)
+            if offer is not None:
+                spec = dataclasses.replace(spec, offer_id=str(offer.id), provider=offer.provider)
+        else:
+            offer = cl.best_offer(spec, cached=not fresh)
     except hireling.QuotaError:
         return refuse("search_quota", "Vast's search quota for today is used up. Try tomorrow.")
     except CloudError as exc:
         return refuse("offers_unavailable", "Could not look up GPU prices: %s" % redact(exc))
     if offer is None:
+        if plan.offer_id:
+            return refuse("offer_gone", "The machine you picked is no longer available at this price. "
+                                        "Nothing was rented; pick another.")
+        if plan.hardware:
+            return refuse("no_offer", "No machine fits that hardware choice right now.")
+        if plan.steered:
+            return refuse("no_offer", "No machine matches your choices under $%.2f/hour right now." % cfg.max_price)
         return refuse("no_offer", "No suitable GPU is available under $%.2f/hour right now." % cfg.max_price)
-    est = estimate(scene, preset_key, offer, cached_release_gb() if release_gb is None else release_gb)
-    out.update(est, gpu=offer.gpu, price_per_hour=round(offer.price, 3), ok=True)
-    if est["est_usd"] > cfg.job_cap:
+    est = estimate_job(scene, preset_key, offer, rel, plan, spec.disk_gb)
+    out.update(est.as_dict(), gpu=offer.gpu, price_per_hour=round(offer.price, 3), ok=True,
+               offer=offer_brief(offer))
+    if est.est_usd > cfg.job_cap:
         return refuse("over_job_cap", "Estimated $%.2f is more than your per-job cap of $%.2f."
-                      % (est["est_usd"], cfg.job_cap))
-    if committed + queued_usd + est["est_usd"] > cfg.month_cap:
+                      % (est.est_usd, cfg.job_cap))
+    if est.hours > cfg.max_job_hours:
+        return refuse("over_job_hours", "Estimated at about %.1f hours, which is longer than the %.1f hour "
+                      "limit on one rental. Nothing was rented." % (est.hours, cfg.max_job_hours))
+    if committed + queued_usd + est.est_usd > cfg.month_cap:
         return refuse("over_month_cap", "Estimated $%.2f would take this month past your $%.2f cap "
-                      "($%.2f already spent or queued)." % (est["est_usd"], cfg.month_cap,
+                      "($%.2f already spent or queued)." % (est.est_usd, cfg.month_cap,
                                                               committed + queued_usd))
-    return out
+    return out, spec
+
+
+def build_quote(cl, scene, preset_key, queued_usd=0.0, release_gb=None, plan=None):
+    """quote_with_spec without the spec: what the dashboard shows before a paid run."""
+    return quote_with_spec(cl, scene, preset_key, plan, queued_usd, release_gb)[0]
 
 
 def price_changed(confirmed_usd, est_usd):
@@ -346,8 +662,24 @@ def activation_script():
     ]) + "\n"
 
 
-def run_command(remote_in, preset_key):
-    args = " ".join(shlex.quote(a) for a in preset_args(preset_key))
+def job_args(preset_key, plan=None):
+    """Jasna's options for a plan, after --input/--output. Upscale-only runs name no
+    restoration preset and skip the long BasicVSR++ compile (nothing is restored beyond Jasna's
+    default); the upscale step is Jasna's own, run after any restoration."""
+    plan = plan or Plan()
+    args = ["--no-compile-basicvsrpp"] if plan.op == "upscale" else list(preset_args(preset_key))
+    if plan.upscale:
+        args += ["--upscale", plan.upscale, "--upscale-height", str(plan.upscale_height)]
+    return args
+
+
+def output_suffix(plan):
+    """The file-name suffix core.op_suffix gives what this operation produces."""
+    return "_upscaled" if plan.op == "upscale" else "_decensored"
+
+
+def run_command(remote_in, preset_key, plan=None):
+    args = " ".join(shlex.quote(a) for a in job_args(preset_key, plan))
     return ("export XDG_CONFIG_HOME=%s; cd %s && ./jasna --input %s --output %s %s --log-level info"
             % (CONFIG_HOME, JASNA_DIR_GLOB, shlex.quote(remote_in), REMOTE_OUT, args))
 
@@ -445,15 +777,17 @@ def _after_stop(cl, job, rented):
 
 def run_decensor(cfg, input_path, result_dir, *, on_line=None, log_cb=None, status_cb=None,
                  cl=None, stamp=None, check_cancel=None, release_fn=None):
-    """Run one scene through cloud Jasna. Returns the produced file inside result_dir.
+    """Run one scene through cloud Jasna (Decensor, Decensor + upscale or Upscale). Returns
+    the produced file inside result_dir.
 
-    cfg["cloud"] = {preset, scene, est_usd, confirm_usd, job_id}. check_cancel(): raises
+    cfg["cloud"] = {preset, scene, plan, est_usd, confirm_usd, job_id}. check_cancel(): raises
     (or returns true) when the user cancels. stamp(**fields): live job fields
-    (runner/spent). Raises CloudRefused / CloudJobFailed / cloud_vast errors; every one
+    (runner/spent). Raises CloudRefused / CloudJobFailed / hireling errors; every one
     of them has already destroyed the rented box."""
     cl = cl or cloud()
     job = cfg["cloud"]
-    preset_key, scene = job["preset"], job["scene"]
+    preset_key, scene = job.get("preset"), job["scene"]
+    plan = plan_from_body(job.get("plan"))
     say = log_cb or (lambda _line: None)
 
     def phase(stage, progress, message, indeterminate=False, **extra):
@@ -461,8 +795,9 @@ def run_decensor(cfg, input_path, result_dir, *, on_line=None, log_cb=None, stat
             status_cb(dict({"stage": stage, "progress": progress, "message": message,
                             "indeterminate": indeterminate}, **extra))
 
-    # 1. Re-check everything: the state may have changed since the user confirmed.
-    quote = build_quote(cl, scene, preset_key)
+    # 1. Re-check everything: the state may have changed since the user confirmed. The market
+    # is looked up again, so what is rented is what is priced here.
+    quote, spec = quote_with_spec(cl, scene, preset_key, plan, fresh=True)
     if quote.get("refusal"):
         raise CloudRefused(quote["refusal"]["code"], quote["refusal"]["message"])
     if price_changed(float(job.get("confirm_usd") or 0), quote["est_usd"]):
@@ -476,7 +811,6 @@ def run_decensor(cfg, input_path, result_dir, *, on_line=None, log_cb=None, stat
     phase("copy", 0.0, "Looking up the latest Jasna release", True)
     rel = (release_fn or release_assets)()
     urls = [a["url"] for a in rel["assets"]]
-    spec = rent_spec(cl.config(), scene.get("size") or 0)
 
     progress = RunProgress()
     last = {"up": -1, "down": -1, "t": -1e9, "msg": None}
@@ -484,8 +818,9 @@ def run_decensor(cfg, input_path, result_dir, *, on_line=None, log_cb=None, stat
 
     def tick(box):
         if stamp:
-            stamp(runner="Vast.ai · %s" % box.gpu, engine="jasna", cloud=True,
-                  cloud_usd=round(box.spent_total(), 2), cloud_cap=round(box.cap, 2))
+            stamp(runner="%s \u00b7 %s" % (cl.provider(box.provider).display_name, box.gpu), engine="jasna",
+                  cloud=True, cloud_usd=round(box.spent_total(), 2), cloud_cap=round(box.cap, 2),
+                  cloud_gpu=box.gpu, cloud_offer_id=str(box.offer.id), cloud_provider=box.provider)
 
     def on_offer(n, offer):
         rented.append(offer.id)
@@ -510,24 +845,27 @@ def run_decensor(cfg, input_path, result_dir, *, on_line=None, log_cb=None, stat
             raise hireling.VerifyFailed("this machine's NVENC video encoder does not work")
 
     meta = {"job_id": job.get("job_id"), "scene_id": scene.get("id"), "scene": scene.get("title"),
-            "preset": preset_key}
+            "preset": preset_key, "op": plan.op}
     try:
         with cl.rent(spec, cancel=check_cancel, verify=verify, meta=meta, on_tick=tick,
                      on_offer=on_offer) as box:
             tick(box)
             say("[cloud] machine ready: %s, $%.2f/hour, spend cap $%.2f" % (box.gpu, box.dph, box.cap))
-            _on_box(box, cfg, job, input_path, result_dir, urls, licence, progress, phase, say, last)
-            produced = _fetch_result(box, input_path, result_dir, phase, say, last)
+            _on_box(box, cfg, job, input_path, result_dir, urls, licence, progress, phase, say, last, plan)
+            produced = _fetch_result(box, input_path, result_dir, phase, say, last, output_suffix(plan))
             say("[cloud] finished: spent $%.2f (estimate was $%.2f)" % (box.spent_total(), quote["est_usd"]))
             return produced
     except hireling.NoOffers:
+        if plan.offer_id:
+            raise CloudRefused("offer_gone", "The machine you picked is no longer available. Nothing was "
+                               "rented; submit again to pick another.") from None
         raise CloudRefused("no_offer", "No suitable GPU is available under $%.2f/hour right now. "
                            "Nothing was rented." % cl.config().max_price) from None
     except (hireling.SpendCapReached, hireling.LifetimeExceeded) as exc:
         raise CloudJobFailed("Stopped: %s. %s" % (exc, _after_stop(cl, job, bool(rented)))) from None
 
 
-def _on_box(box, cfg, job, input_path, result_dir, urls, licence, progress, phase, say, last):
+def _on_box(box, cfg, job, input_path, result_dir, urls, licence, progress, phase, say, last, plan):
     """Activate, upload, run jasna. Any failure raises (and rent() destroys the box)."""
     def log_remote(line):
         say("[cloud] " + line)
@@ -563,8 +901,9 @@ def _on_box(box, cfg, job, input_path, result_dir, urls, licence, progress, phas
             last["t"], last["msg"] = now, upd["message"]
             phase("decensor", upd.pop("progress"), upd.pop("message"), upd.pop("indeterminate"), **upd)
 
-    phase("decensor", 0.0, "Starting Jasna (the first run prepares the GPU and may download the model)", True)
-    res = box.run(run_command(remote_in, job["preset"]), tty=True, prompts=PROMPTS,
+    phase("decensor", 0.0, "Starting Jasna (the first run prepares the GPU%s)"
+          % (" and may download the model" if plan.op != "upscale" else ""), True)
+    res = box.run(run_command(remote_in, job.get("preset"), plan), tty=True, prompts=PROMPTS,
                   grace=hireling.ssh.INT_GRACE_S, on_line=run_line)
     if res.code != 0:
         box.outcome = ("error", "jasna exited %d" % res.code)
@@ -572,7 +911,7 @@ def _on_box(box, cfg, job, input_path, result_dir, urls, licence, progress, phas
                              % (res.code, _jasna_failure(res.tail)))
 
 
-def _fetch_result(box, input_path, result_dir, phase, say, last):
+def _fetch_result(box, input_path, result_dir, phase, say, last, suffix="_decensored"):
     """Download the finished file. Only reached after a clean Jasna exit, so a partial
     result is never kept."""
     res = box.run("test -s %s && stat -c %%s %s" % (REMOTE_OUT, REMOTE_OUT), timeout=60)
@@ -581,7 +920,7 @@ def _fetch_result(box, input_path, result_dir, phase, say, last):
         raise CloudJobFailed("Jasna finished but produced no output file")
     remote_size = int(sizes[-1])
     stem = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.splitext(os.path.basename(input_path))[0])[:80] or "scene"
-    local = os.path.join(result_dir, "%s_decensored.mp4" % stem)
+    local = os.path.join(result_dir, "%s%s.mp4" % (stem, suffix))
 
     def down_line(line):
         m = _RE_RSYNC_PCT.search(line)

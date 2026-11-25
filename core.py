@@ -700,18 +700,25 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None,
         shutil.rmtree(sub, ignore_errors=True)
 
 
+def _run_cloud(cfg, input_path, result_dir, log_cb, status_cb):
+    """A paid cloud Jasna job (cloud_jasna.py) rents a GPU instead of using a runner and runs
+    Decensor, Decensor + upscale or Upscale there, as cfg["cloud"]["plan"] says; on_line is not
+    needed, status_cb carries the stages."""
+    import cloud_jasna
+    return cloud_jasna.run_decensor(cfg, input_path, result_dir, log_cb=log_cb, status_cb=status_cb,
+                                    stamp=stamp_job, check_cancel=check_cancel)
+
+
 def backend_decensor(cfg, input_path, result_dir, on_line=None, log_cb=None, status_cb=None):
     if cfg.get("cloud"):
-        # Paid cloud Jasna (cloud_jasna.py) rents a GPU instead of using a runner; on_line is
-        # not needed there, status_cb carries the stages.
-        import cloud_jasna
-        return cloud_jasna.run_decensor(cfg, input_path, result_dir, log_cb=log_cb, status_cb=status_cb,
-                                        stamp=stamp_job, check_cancel=check_cancel)
+        return _run_cloud(cfg, input_path, result_dir, log_cb, status_cb)
     op = "decensor+upscale" if cfg.get("postUpscale") else "decensor"
     return _runner_dispatch(cfg, input_path, result_dir, op, on_line=on_line, log_cb=log_cb, status_cb=status_cb)
 
 
 def backend_upscale(cfg, input_path, result_dir, on_line=None, log_cb=None, status_cb=None):
+    if cfg.get("cloud"):
+        return _run_cloud(cfg, input_path, result_dir, log_cb, status_cb)
     return _runner_dispatch(cfg, input_path, result_dir, "upscale", on_line=on_line, log_cb=log_cb, status_cb=status_cb)
 
 

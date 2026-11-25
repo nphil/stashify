@@ -3,17 +3,20 @@ lifecycle, progress parsing, release lookup. Fake Vast + scripted fake machine: 
 is rented and no real time passes."""
 
 import base64
+import dataclasses
 import json
+import math
 import os
 import re
 import sys
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import cloudfakes as cf              # noqa: E402
-from cloudfakes import KEY, LICENCE, Resp, raw_offer   # noqa: E402
+from cloudfakes import KEY, LICENCE, UPSCALE, Resp, market, raw_offer   # noqa: E402
 import hireling                       # noqa: E402
 from hireling import ssh             # noqa: E402
 from hireling.providers.vast import parse_offer   # noqa: E402
@@ -560,12 +563,23 @@ class LifecycleTest(JasnaCase):
         self.assertEqual(self.ledger(), [])
 
     def test_a_machine_that_vanishes_after_the_quote_is_also_a_refusal(self):
+        cfg = self.cfg()
+        stale = self.cl.best_offer(cj.rent_spec(self.cl.config(), SCENE["size"]))    # what a price check saw ...
+        self.vast.offers = []                              # ... and the market empties out before the rental
+        with mock.patch.object(self.cl, "best_offer", return_value=stale):
+            with self.assertRaises(cj.CloudRefused) as cm:
+                self.run_job(cfg)
+        self.assertEqual(cm.exception.code, "no_offer")
+        self.assertIn("Nothing was rented", str(cm.exception))
+        self.assertNothingRented()
+        self.assertEqual(self.ledger(), [])
+
+    def test_the_run_looks_the_market_up_again_instead_of_trusting_the_cached_quote(self):
         cfg = self.cfg()                                   # this lookup is now cached ...
         self.vast.offers = []                              # ... and the market empties out
         with self.assertRaises(cj.CloudRefused) as cm:
             self.run_job(cfg)
         self.assertEqual(cm.exception.code, "no_offer")
-        self.assertIn("Nothing was rented", str(cm.exception))
         self.assertNothingRented()
         self.assertEqual(self.ledger(), [])
 
@@ -668,6 +682,631 @@ class ReleaseTest(unittest.TestCase):
                                                                 "duration": 61.5, "size": 123}]})
         self.assertEqual((m["id"], m["title"], m["duration"], m["size"], m["height"]), ("7", "clip.mkv", 61.5, 123, 1080))
         self.assertEqual(cj.scene_meta({"id": "8", "title": "T", "files": []})["duration"], 0)
+
+
+class PlanTest(unittest.TestCase):
+    """What a request may ask for, checked before anything is searched or rented."""
+
+    def code(self, body, backend=None):
+        with self.assertRaises(cj.PlanError) as cm:
+            cj.plan_from_body(body, backend)
+        return cm.exception.code
+
+    def test_the_default_is_the_plain_automatic_decensor(self):
+        plan = cj.plan_from_body({})
+        self.assertEqual((plan.op, plan.upscale, plan.upscale_height), ("decensor", "", 0))
+        self.assertEqual((plan.offer_id, plan.provider, plan.gpu, plan.hardware, plan.filters), ("", "", "", "", {}))
+        self.assertFalse(plan.chosen)
+        self.assertFalse(plan.steered)
+        self.assertEqual(cj.plan_from_body(None), plan)
+        self.assertEqual(cj.plan_from_body({}, "lada"), plan)
+        self.assertEqual(cj.plan_from_body({}, "decensor"), plan)
+
+    def test_the_operation_comes_from_op_then_the_backend_then_post_upscale(self):
+        self.assertEqual(cj.plan_from_body({"op": "upscale"}).op, "upscale")
+        self.assertEqual(cj.plan_from_body({}, "upscale").op, "upscale")
+        self.assertEqual(cj.plan_from_body({"post_upscale": True}).op, "decensor+upscale")
+        self.assertEqual(cj.plan_from_body({"post_upscale": "true"}).op, "decensor+upscale")
+        self.assertEqual(cj.plan_from_body({"post_upscale": "false"}).op, "decensor")
+        self.assertEqual(cj.plan_from_body({"post_upscale": 0}).op, "decensor")
+        self.assertEqual(cj.plan_from_body({"op": "decensor+upscale"}).op, "decensor+upscale")
+        self.assertEqual(cj.plan_from_body({"op": "decensor upscale"}).op, "decensor+upscale")   # a query string's '+'
+        self.assertEqual(cj.plan_from_body({"op": "decensor"}, "upscale").op, "decensor")        # op beats the backend
+
+    def test_other_operations_are_refused(self):
+        for body, backend in (({"op": "transcode"}, None), ({"op": "chain"}, None), ({"op": "UPSCALE"}, None),
+                              ({}, "transcode"), ({}, "command"), ({}, "span")):
+            self.assertEqual(self.code(body, backend), "bad_op", (body, backend))
+
+    def test_the_upscale_settings(self):
+        plan = cj.plan_from_body({"op": "upscale"})
+        self.assertEqual((plan.upscale, plan.upscale_height), ("span", 2160))                  # the defaults
+        plan = cj.plan_from_body({"op": "upscale", "upscale": "rtx-super-res", "upscale_height": "1440"})
+        self.assertEqual((plan.upscale, plan.upscale_height), ("rtx-super-res", 1440))
+        self.assertEqual(cj.plan_from_body(dict(UPSCALE, upscale="RealPLKSR")).upscale, "realplksr")
+        for model in ("dlss5", "topaz", "none", "span; rm -rf /"):
+            self.assertEqual(self.code(dict(UPSCALE, upscale=model)), "bad_upscale", model)
+        for height in (720, "tall", True, 1081, -1, 4320):
+            self.assertEqual(self.code(dict(UPSCALE, upscale_height=height)), "bad_upscale_height", height)
+        plain = cj.plan_from_body({"upscale": "bogus", "upscale_height": 7})                  # not upscaling: not looked at
+        self.assertEqual((plain.upscale, plain.upscale_height), ("", 0))
+
+    def test_the_machine_fields(self):
+        plan = cj.plan_from_body({"offer_id": 7001, "provider": "VAST", "gpu": "RTX 4090"})
+        self.assertEqual((plan.offer_id, plan.provider, plan.gpu), ("7001", "vast", "RTX 4090"))
+        self.assertTrue(plan.chosen and plan.steered)
+        for bad in ("1; rm", "a b", "../x", "x" * 65, "-1"):
+            self.assertEqual(self.code({"offer_id": bad}), "bad_offer", bad)
+        self.assertEqual(self.code({"provider": "nope"}), "bad_provider")
+        self.assertEqual(self.code({"gpu": "RTX;4090"}), "bad_gpu")
+        self.assertEqual(self.code({"hardware": "nope"}), "bad_hardware")
+        self.assertEqual(self.code({"hardware": "cheapest", "offer_id": "12"}), "bad_hardware")
+        for hardware in hireling.PRESET_IDS:
+            plan = cj.plan_from_body({"hardware": hardware})
+            self.assertEqual(plan.hardware, hardware)
+            self.assertTrue(plan.chosen)
+        self.assertFalse(cj.plan_from_body({"gpu": "RTX 3090"}).chosen)        # a model is a preference, not a machine
+        self.assertTrue(cj.plan_from_body({"gpu": "RTX 3090"}).steered)
+
+    def test_filters_are_checked_when_they_arrive(self):
+        plan = cj.plan_from_body({"cloud_filters": {"min_vram_gb": 24, "countries": ["DE"]}})
+        self.assertEqual(plan.filters, {"min_vram_gb": 24, "countries": ["DE"]})
+        self.assertTrue(plan.steered)
+        self.assertEqual(cj.plan_from_body({"cloud_filters": '{"min_vram_gb": 24}'}).filters, {"min_vram_gb": 24})
+        self.assertEqual(cj.plan_from_body({"cloud_filters": ""}).filters, {})
+        self.assertEqual(cj.plan_from_body({"cloud_filters": None}).filters, {})
+        for bad in ("{nope", "[1]", 7, ["min_vram_gb"], {"nope": 1}, {"min_vram_gb": "lots"}, {"disk_gb": 500},
+                    {"max_price": -3}):
+            self.assertEqual(self.code({"cloud_filters": bad}), "bad_filters", bad)
+        with self.assertRaises(cj.PlanError) as cm:
+            cj.plan_from_body({"cloud_filters": {"nope": 1}})
+        self.assertIn("nope", str(cm.exception))
+
+    def test_a_plan_makes_itself_again(self):
+        plan = cj.plan_from_body(dict(UPSCALE, offer_id="12", provider="vast", gpu="RTX 4090",
+                                      cloud_filters={"min_vram_gb": 24}))
+        self.assertEqual(cj.plan_from_body(plan.as_dict()), plan)
+        self.assertEqual(plan.as_dict()["cloud_filters"], {"min_vram_gb": 24})
+        hardware = cj.plan_from_body({"hardware": "fastest"})
+        self.assertEqual(cj.plan_from_body(hardware.as_dict()), hardware)
+        self.assertEqual(cj.plan_from_body(cj.Plan().as_dict()), cj.Plan())
+
+    def test_flags(self):
+        for value in (True, 1, "1", "true", "TRUE", " yes ", "on"):
+            self.assertTrue(cj.truthy(value), value)
+        for value in (False, 0, None, "", "0", "false", "no", "off", "maybe", 2, [], {}):
+            self.assertFalse(cj.truthy(value), value)
+
+
+class NarrowTest(cf.CloudCase):
+    """The owner's own search filters can only tighten what Jasna and the caps require."""
+
+    def base(self, **settings):
+        if settings:
+            self.settings.update(settings)
+        return cj.requirements(self.cl.config())
+
+    def test_no_filters_changes_nothing(self):
+        base = self.base()
+        self.assertIs(cj.narrow(base, {}), base)
+        self.assertIs(cj.narrow(base, None), base)
+
+    def test_minimums_only_go_up(self):
+        base = self.base()
+        for key, low, high in (("min_vram_gb", 8, 24), ("min_driver", 570, 590), ("min_inet_down", 100, 500),
+                               ("min_reliability", 0.9, 0.995), ("min_cpu_cores", 0, 8)):
+            have = getattr(base, key)
+            self.assertEqual(getattr(cj.narrow(base, {key: low}), key), max(have, low), key)
+            self.assertEqual(getattr(cj.narrow(base, {key: high}), key), max(have, high), key)
+        self.assertEqual(cj.narrow(base, {"min_vram_gb": 8}).min_vram_gb, cj.MIN_VRAM_GB)      # Jasna's floor stays
+        self.assertEqual(cj.narrow(base, {"min_driver": 1}).min_driver, cj.MIN_DRIVER)
+
+    def test_price_limits_only_go_down(self):
+        base = self.base()
+        self.assertEqual(cj.narrow(base, {"max_price": 5}).max_price, 1.0)                    # the owner's cap holds
+        self.assertEqual(cj.narrow(base, {"max_price": 0.5}).max_price, 0.5)
+        self.assertEqual(cj.narrow(base, {"max_bw_cost": 1}).max_bw_cost, 0.02)
+        self.assertEqual(cj.narrow(base, {"max_bw_cost": 0.01}).max_bw_cost, 0.01)
+
+    def test_datacenter_only_can_be_switched_on_but_not_off(self):
+        self.assertTrue(cj.narrow(self.base(), {"datacenter_only": True}).datacenter_only)
+        self.assertFalse(cj.narrow(self.base(), {"datacenter_only": False}).datacenter_only)
+        self.assertTrue(cj.narrow(self.base(datacenter_only=True), {"datacenter_only": False}).datacenter_only)
+
+    def test_the_vram_ceiling_takes_the_smaller_limit(self):
+        base = self.base()
+        self.assertEqual(cj.narrow(base, {"max_vram_gb": 24}).max_vram_gb, 24)
+
+    def test_what_stashify_decides_stays(self):
+        base = self.base()
+        spec = cj.narrow(base, {"num_gpus": 4, "max_gpus": 8, "verified": False})
+        self.assertEqual((spec.num_gpus, spec.max_gpus, spec.verified), (base.num_gpus, base.max_gpus, base.verified))
+
+    def test_restrictions_apply(self):
+        base = self.base()
+        spec = cj.narrow(base, {"gpu": "RTX 3090", "countries": ["de", "us"], "provider": "vast",
+                                "offer_id": "12", "prefer": "community"})
+        self.assertEqual((spec.gpu, spec.countries, spec.provider, spec.offer_id, spec.prefer),
+                         ("RTX 3090", ("DE", "US"), "vast", "12", "community"))
+        self.assertEqual(cj.narrow(base, {"gpus": ["RTX 3090", "RTX 4090"]}).gpus, ("RTX 3090", "RTX 4090"))
+
+    def test_the_rental_itself_is_never_touched(self):
+        base = self.base()
+        before = dataclasses.replace(base)
+        spec = cj.narrow(base, {"min_vram_gb": 24, "gpu": "RTX 4090"})
+        self.assertEqual(base, before)                                                         # no side effects
+        for key in ("disk_gb", "image", "env", "gpu_pattern", "max_hours", "boot_timeout"):
+            self.assertEqual(getattr(spec, key), getattr(base, key), key)
+
+    def test_a_bad_filter_raises(self):
+        with self.assertRaises(ValueError):
+            cj.narrow(self.base(), {"nope": 1})
+        with self.assertRaises(ValueError):
+            cj.narrow(self.base(), {"min_vram_gb": "lots"})
+
+
+class PlanSpecTest(cf.CloudCase):
+    def test_the_automatic_choice_is_unchanged(self):
+        cfg = self.cl.config()
+        spec = cj.plan_spec(cj.Plan(), cfg, 5_000_000_000)
+        self.assertEqual(spec, cj.rent_spec(cfg, 5_000_000_000))
+        self.assertEqual(spec.gpus, cj.GPUS)
+        self.assertEqual(spec.max_hours, cfg.max_job_hours)
+
+    def test_a_chosen_gpu_drops_the_preference_list(self):
+        cfg = self.cl.config()
+        spec = cj.plan_spec(cj.Plan(gpu="RTX 3090"), cfg)
+        self.assertEqual((spec.gpus, spec.gpu_names()), ((), ("RTX 3090",)))
+        spec = cj.plan_spec(cj.Plan(hardware="fastest"), cfg)
+        self.assertEqual(spec.gpus, ())                                  # the whole compatible market
+        self.assertEqual(spec.gpu_pattern, "^RTX")
+        spec = cj.plan_spec(cj.Plan(offer_id="12", provider="vast"), cfg)
+        self.assertEqual((spec.offer_id, spec.provider), ("12", "vast"))
+
+    def test_the_disk_grows_with_the_result(self):
+        cfg = self.cl.config()
+        self.assertEqual(cj.disk_needed(10_000_000_000), 110)             # 80 + the video three times over
+        self.assertEqual(cj.disk_needed(10_000_000_000, ratio=4.0), 140)  # ... and a result four times bigger
+        self.assertEqual(cj.plan_spec(cj.Plan(), cfg, 10_000_000_000).disk_gb, 110)
+        self.assertEqual(cj.plan_spec(cj.Plan(), cfg, 10_000_000_000, ratio=4.0).disk_gb, 140)
+        self.assertEqual(cj.plan_spec(cj.Plan(), cfg, 1_000_000).disk_gb, cfg.disk_gb)   # a small video: the setting's floor
+        self.assertEqual(cj.requirements(cfg, 0).disk_gb, max(cfg.disk_gb, 80))
+
+    def test_the_result_is_as_many_times_bigger_as_the_pixels(self):
+        up = cj.plan_from_body(dict(UPSCALE, upscale_height=2160))
+        self.assertEqual(cj.result_ratio(dict(SCENE, height=1080), up), 4.0)
+        self.assertEqual(cj.result_ratio(dict(SCENE, height=720), up), 9.0)
+        self.assertEqual(cj.result_ratio(dict(SCENE, height=0), up), 4.0)     # unknown height: taken as 1080p
+        self.assertEqual(cj.result_ratio(dict(SCENE, height=2160), up), 1.0)
+        self.assertEqual(cj.result_ratio(SCENE, cj.Plan()), 1.0)
+
+
+class PlanEstimateTest(cf.CloudCase):
+    """What a run costs: the old Decensor numbers, the new ones for upscaling, and the breakdown."""
+    BIG = dict(SCENE, size=2_000_000_000, height=720)        # a 10 minute 720p clip of 2 GB
+
+    def offer(self, gpu="RTX 4090", price=0.40, **more):
+        return parse_offer(raw_offer(1, gpu, price, **more))
+
+    def test_the_breakdown_counts_the_disk_and_the_traffic(self):
+        offer = self.offer(storage_cost=0.72, inet_up_cost=0.01, inet_down_cost=0.004)   # $0.001 per GB-hour
+        est = cj.estimate_job(self.BIG, "detail", offer, 4.6)
+        b = est.as_dict()["breakdown"]
+        self.assertEqual(est.disk_gb, 86)
+        self.assertAlmostEqual(b["storage"], 86 * 0.001 * est.hours, places=3)
+        self.assertAlmostEqual(b["compute"], 0.40 * est.hours, places=3)
+        self.assertAlmostEqual(b["gb_down"], 2.0 + 4.6 + 28 + 0.2, places=2)     # video + Jasna + model + apt
+        self.assertAlmostEqual(b["gb_up"], 2.0, places=2)                         # the result, same size
+        self.assertAlmostEqual(b["bw_down"], b["gb_down"] * 0.004, places=3)
+        self.assertAlmostEqual(b["bw_up"], b["gb_up"] * 0.01, places=3)
+        self.assertAlmostEqual(b["total"], b["compute"] + b["storage"] + b["bandwidth"], places=3)
+        self.assertGreaterEqual(est.est_usd, b["total"])                         # rounded UP to the cent
+        self.assertLess(est.est_usd - b["total"], 0.01 + 1e-9)
+
+    def test_unreported_prices_count_as_zero_and_say_so(self):
+        est = cj.estimate_job(self.BIG, "detail", self.offer(), 4.6)
+        b = est.as_dict()["breakdown"]
+        self.assertEqual((b["storage"], b["bandwidth"]), (0.0, 0.0))
+        self.assertTrue(b["notes"])
+        self.assertEqual(est.est_usd, math.ceil(round(b["total"] * 100, 6)) / 100)
+
+    def test_the_dict_has_everything_a_dashboard_needs(self):
+        out = cj.estimate(self.BIG, "detail", self.offer(), 4.6)
+        self.assertEqual(set(out), {"hours", "minutes", "breakdown", "est_usd", "assumptions", "setup_min",
+                                    "transfer_min", "processing_min", "total_min", "disk_gb"})
+        self.assertEqual(out["total_min"], out["minutes"])
+        self.assertAlmostEqual(out["setup_min"] + out["transfer_min"] + out["processing_min"], out["total_min"],
+                               delta=0.2)
+        self.assertTrue(all(isinstance(a, str) for a in out["assumptions"]))
+        json.dumps(out)                                                         # plain data
+
+    def test_decensoring_does_not_mention_upscaling(self):
+        out = cj.estimate(self.BIG, "detail", self.offer(), 4.6)
+        self.assertFalse(any("Upscal" in a or "upscal" in a for a in out["assumptions"]))
+
+    def test_upscaling_adds_time_a_bigger_download_and_a_bigger_disk(self):
+        plain = cj.estimate_job(self.BIG, "detail", self.offer(), 4.6)
+        both = cj.estimate_job(self.BIG, "detail", self.offer(), 4.6, cj.plan_from_body(UPSCALE))
+        self.assertAlmostEqual(plain.processing_min, 45.0, places=1)
+        self.assertAlmostEqual(both.processing_min, 45.0 + 25.2, places=1)    # 10 min x 0.35 x 4 x 1.5 x 1.2
+        self.assertGreater(both.transfer_min, plain.transfer_min)             # the result is 9x the pixels
+        self.assertEqual((plain.disk_gb, both.disk_gb), (86, 80 + 22))        # 80 + (2 + 9 x ...) ceil'd
+        self.assertAlmostEqual(both.as_dict()["breakdown"]["gb_up"], 18.0, places=1)
+        self.assertGreater(both.est_usd, plain.est_usd)
+        self.assertTrue(any("rough guess" in a for a in both.assumptions))
+
+    def test_the_models_are_ranked_by_how_heavy_they_are(self):
+        mins = {m: cj.estimate_job(self.BIG, "detail", self.offer(), 4.6,
+                                   cj.plan_from_body(dict(UPSCALE, upscale=m))).processing_min
+                for m in cj.UPSCALE_MODELS}
+        self.assertLess(mins["span"], mins["rtx-super-res"])
+        self.assertLess(mins["rtx-super-res"], mins["realplksr"])
+
+    def test_a_taller_target_costs_more(self):
+        by = {h: cj.estimate_job(self.BIG, "detail", self.offer(), 4.6,
+                                 cj.plan_from_body(dict(UPSCALE, upscale_height=h))).est_usd
+              for h in cj.UPSCALE_HEIGHTS}
+        self.assertLess(by[1080], by[1440])
+        self.assertLess(by[1440], by[2160])
+
+    def test_upscaling_alone_skips_the_restoration_model(self):
+        up = cj.plan_from_body({"op": "upscale", "upscale": "rtx-super-res", "upscale_height": 1440})
+        alone = cj.estimate_job(self.BIG, None, self.offer(), 4.6, up)
+        both = cj.estimate_job(self.BIG, "detail", self.offer(), 4.6, cj.plan_from_body(
+            {"op": "decensor+upscale", "upscale": "rtx-super-res", "upscale_height": 1440}))
+        self.assertAlmostEqual(alone.processing_min, 4.5 + 16.0, delta=0.1)   # a pass-through share + the upscaler
+        self.assertLess(alone.est_usd, both.est_usd)
+        self.assertLess(alone.setup_min, both.setup_min)                      # no 28 GB model to download
+        self.assertAlmostEqual(alone.as_dict()["breakdown"]["gb_down"], 2.0 + 4.6 + 0.2, places=2)
+        self.assertTrue(any("scans every frame" in a for a in alone.assumptions))
+
+    def test_a_restoring_run_needs_its_preset(self):
+        with self.assertRaises(KeyError):
+            cj.estimate_job(self.BIG, None, self.offer(), 4.6)
+
+    def test_the_estimator_gives_the_quotes_numbers(self):
+        offer = self.offer(storage_cost=0.72, inet_up_cost=0.01, inet_down_cost=0.004)
+        cfg = self.cl.config()
+        plan = cj.plan_from_body(UPSCALE)
+        disk = cj.requirements(cfg, self.BIG["size"], ratio=cj.result_ratio(self.BIG, plan)).disk_gb
+        est = cj.make_estimator(cfg, self.BIG, "detail", plan, 4.6)(offer)
+        self.assertEqual(est.as_dict(), cj.estimate_job(self.BIG, "detail", offer, 4.6, plan, disk).as_dict())
+        self.assertEqual(est.disk_gb, 102)
+
+
+class PlanQuoteTest(cf.CloudCase):
+    """The same function the server refuses with, asked about the new operations and machine choices."""
+
+    def quote(self, plan=None, preset="detail", scene=None, **kw):
+        return cj.quote_with_spec(self.cl, scene or SCENE, preset, plan, release_gb=4.6, **kw)
+
+    def market(self, extra=()):
+        self.vast.offers = market(extra)
+
+    def test_a_quote_carries_the_machine_and_the_breakdown(self):
+        q, spec = self.quote()
+        self.assertTrue(q["ok"])
+        self.assertEqual((q["op"], q["machine"], q["preset"]), ("decensor", "auto", "detail"))
+        self.assertEqual(q["plan"], cj.Plan().as_dict())
+        self.assertEqual((q["offer"]["provider"], q["offer"]["gpu"], q["offer"]["price_per_hour"]),
+                         ("vast", "RTX 4090", 0.4))
+        self.assertEqual(set(q["offer"]), set(cj._BRIEF))
+        self.assertEqual((q["max_job_hours"], q["disk_gb"]), (3.0, 100))    # 100 GB is the settings' floor
+        for key in ("hours", "minutes", "breakdown", "assumptions", "setup_min", "processing_min", "transfer_min",
+                    "total_min"):
+            self.assertIn(key, q)
+        self.assertEqual(spec.gpus, cj.GPUS)
+        self.assertEqual(spec.disk_gb, q["disk_gb"])
+        self.assertNotIn(KEY, json.dumps(q))
+
+    def test_a_refusal_has_no_spec(self):
+        self.vast.offers = []
+        q, spec = self.quote()
+        self.assertEqual(q["refusal"]["code"], "no_offer")
+        self.assertIsNone(spec)
+        self.assertIn("under $1.00/hour", q["refusal"]["message"])
+
+    def test_upscale_quotes_have_their_own_words(self):
+        up = cj.plan_from_body({"op": "upscale", "upscale": "span", "upscale_height": 2160})
+        q, _ = self.quote(up, preset=None)
+        self.assertEqual((q["op"], q["preset"], q["label"]), ("upscale", None, "Upscale to 2160p \u00b7 SPAN"))
+        self.assertTrue(q["ok"])
+        both, _ = self.quote(cj.plan_from_body({"op": "decensor+upscale"}))
+        plain, _ = self.quote()
+        self.assertEqual((both["op"], both["preset"], both["label"]), ("decensor+upscale", "detail",
+                                                                       "High detail + upscale to 2160p"))
+        self.assertGreater(both["est_usd"], plain["est_usd"])
+        self.assertGreater(both["est_usd"], q["est_usd"])                 # upscaling alone is the cheapest
+        with self.assertRaises(ValueError):
+            self.quote(cj.Plan(), preset=None)                            # restoring needs a preset
+
+    def test_upscaling_what_is_already_that_tall_is_refused(self):
+        for height, ok in ((1080, False), (1440, True), (2160, True)):
+            q, _ = self.quote(cj.plan_from_body(dict(UPSCALE, upscale_height=height)))
+            self.assertEqual(q["ok"], ok, height)
+            if not ok:
+                self.assertEqual(q["refusal"]["code"], "upscale_not_needed")
+                self.assertIn("1080p", q["refusal"]["message"])
+        q, _ = self.quote(cj.plan_from_body(dict(UPSCALE, upscale_height=1080)), scene=dict(SCENE, height=720))
+        self.assertTrue(q["ok"])
+        q, _ = self.quote(cj.plan_from_body(dict(UPSCALE, upscale_height=1080)), scene=dict(SCENE, height=0))
+        self.assertTrue(q["ok"])                                          # height unknown: nothing to compare
+
+    def test_a_job_longer_than_the_rental_limit_is_refused(self):
+        self.settings.update({"job_cap": 1000, "month_cap": 10000})
+        long = dict(SCENE, duration=2 * 3600.0)                           # about nine hours of GPU time
+        q, spec = self.quote(scene=long)
+        self.assertEqual(q["refusal"]["code"], "over_job_hours")
+        self.assertIsNone(spec)
+        self.assertGreater(q["hours"], 3.0)
+        self.assertIn("3.0 hour", q["refusal"]["message"])
+        self.settings.update({"max_job_hours": 12})
+        q, spec = self.quote(scene=long)
+        self.assertIsNone(q["refusal"])
+        self.assertEqual(spec.max_hours, 12)                              # the rental may run that long
+
+    def test_the_dollar_cap_is_checked_before_the_hour_limit(self):
+        q, _ = self.quote(scene=dict(SCENE, duration=2 * 3600.0))
+        self.assertEqual(q["refusal"]["code"], "over_job_cap")
+
+    def test_each_hardware_choice_picks_one_machine(self):
+        self.market()
+        for hardware, oid in (("cheapest", 13), ("fastest", 11), ("most_reliable", 14)):
+            q, spec = self.quote(cj.Plan(hardware=hardware))
+            self.assertEqual((q["ok"], q["machine"], q["offer"]["id"]), (True, "chosen", oid), hardware)
+            self.assertEqual((spec.offer_id, spec.provider), (str(oid), "vast"), hardware)
+        q, spec = self.quote(cj.Plan(hardware="best_value"))
+        cost = {o["id"]: cj.estimate_job(SCENE, "detail", parse_offer(o), 4.6).est_usd for o in self.vast.offers}
+        self.assertEqual(q["est_usd"], min(cost.values()))                # the least money for the whole job
+        self.assertEqual(spec.offer_id, str(q["offer"]["id"]))
+
+    def test_the_cheapest_choice_follows_the_market(self):
+        self.market([(15, "RTX 3090", 0.05, {"vram_mb": 24576, "reliability": 0.99})])     # a very cheap card
+        q, _ = self.quote(cj.Plan(hardware="cheapest"))
+        self.assertEqual(q["offer"]["id"], 15)
+
+    def test_a_hardware_choice_with_nothing_to_pick_is_a_refusal(self):
+        self.vast.offers = []
+        q, spec = self.quote(cj.Plan(hardware="fastest"))
+        self.assertEqual(q["refusal"]["code"], "no_offer")
+        self.assertIn("hardware", q["refusal"]["message"])
+        self.assertIsNone(spec)
+
+    def test_a_picked_machine_is_that_machine_or_nothing(self):
+        self.market()
+        plan = cj.Plan(offer_id="14", provider="vast")
+        q, spec = self.quote(plan)
+        self.assertEqual((q["offer"]["id"], q["price_per_hour"], q["machine"]), (14, 0.55, "chosen"))
+        self.assertEqual((spec.offer_id, spec.provider), ("14", "vast"))
+        self.vast.offers = [o for o in self.vast.offers if o["id"] != 14]
+        q, spec = self.quote(plan, fresh=True)                            # the run looks again
+        self.assertEqual(q["refusal"]["code"], "offer_gone")
+        self.assertIn("Nothing was rented", q["refusal"]["message"])
+        self.assertIsNone(spec)
+        self.assertEqual(self.vast.count("PUT", "/asks/"), 0)
+
+    def test_a_picked_machine_over_the_price_cap_is_gone_too(self):
+        self.market([(17, "RTX 4090", 1.50, {})])
+        q, _ = self.quote(cj.Plan(offer_id="17"))
+        self.assertEqual(q["refusal"]["code"], "offer_gone")
+
+    def test_a_picked_machine_that_jasna_cannot_use_is_gone_too(self):
+        self.market([(18, "RTX 4090", 0.30, {"driver": "550.54.14"})])     # driver older than Jasna needs
+        q, _ = self.quote(cj.Plan(offer_id="18"))
+        self.assertEqual(q["refusal"]["code"], "offer_gone")
+
+    def test_a_chosen_gpu_model(self):
+        self.market()
+        q, _ = self.quote(cj.Plan(gpu="RTX 3090"))
+        self.assertEqual((q["offer"]["id"], q["machine"]), (13, "auto"))
+        q, _ = self.quote(cj.Plan(gpu="RTX 4090"))
+        self.assertIn(q["offer"]["id"], (12, 14))
+        self.assertEqual(q["offer"]["gpu"], "RTX 4090")
+
+    def test_filters_tighten_but_never_loosen(self):
+        self.market([(15, "RTX 4090", 0.10, {"reliability": 0.90}), (16, "RTX 4090", 1.50, {})])
+        q, _ = self.quote(cj.Plan(filters={"min_reliability": 0.5, "max_price": 5}))
+        self.assertNotIn(q["offer"]["id"], (15, 16))                      # still reliable and under the owner's cap
+        self.assertGreaterEqual(q["offer"]["reliability"], 0.98)
+        q, _ = self.quote(cj.Plan(filters={"min_reliability": 0.995}))
+        self.assertEqual(q["offer"]["id"], 14)
+        q, _ = self.quote(cj.Plan(filters={"min_vram_gb": 30}))
+        self.assertEqual(q["offer"]["id"], 11)
+
+    def test_filters_nothing_matches(self):
+        self.market()
+        q, spec = self.quote(cj.Plan(filters={"countries": ["DE"]}))
+        self.assertEqual(q["refusal"]["code"], "no_offer")
+        self.assertIn("your choices", q["refusal"]["message"])
+        self.assertIsNone(spec)
+
+    def test_datacenter_only_and_the_bandwidth_ceiling_are_the_owners_settings(self):
+        self.market()
+        self.settings.update({"datacenter_only": True})
+        q, _ = self.quote(cj.Plan(gpu="RTX 4090"))
+        self.assertEqual(q["offer"]["id"], 14)                            # the only datacenter 4090
+        self.assertTrue(q["offer"]["datacenter"])
+        self.settings.update({"datacenter_only": False})
+        self.vast.offers = [raw_offer(21, "RTX 4090", 0.30, inet_up_cost=0.50),     # costs $0.50 per GB uploaded
+                            raw_offer(22, "RTX 4090", 0.45, inet_up_cost=0.005)]
+        self.cl._quote_cache.clear()
+        q, _ = self.quote()
+        self.assertEqual(q["offer"]["id"], 22)                            # 21 is over the default $0.02/GB
+        self.settings.update({"max_bw_cost": 1.0})
+        self.cl._quote_cache.clear()
+        q, _ = self.quote()
+        self.assertEqual(q["offer"]["id"], 21)                            # allowed now, and cheaper
+
+    def test_every_search_after_a_choice_is_one_lookup(self):
+        self.market()
+        self.vast.calls.clear()
+        self.quote(cj.Plan(hardware="fastest"))
+        self.assertEqual(self.vast.count("POST", "/bundles/"), 1)
+
+    def test_a_quote_may_reuse_the_lookup_but_a_run_never_does(self):
+        self.market()
+        self.quote()
+        self.vast.calls.clear()
+        self.quote()
+        self.assertEqual(self.vast.count("POST", "/bundles/"), 0)         # cached for a couple of minutes
+        self.quote(fresh=True)
+        self.assertEqual(self.vast.count("POST", "/bundles/"), 1)
+
+
+class PlanArgsTest(unittest.TestCase):
+    """The exact Jasna options for each operation."""
+
+    def test_job_args(self):
+        self.assertEqual(cj.job_args("detail"), ["--restoration-model-name", "ltx-8step"])
+        self.assertEqual(cj.job_args("detail", cj.Plan()), cj.preset_args("detail"))
+        self.assertEqual(cj.job_args("close-ups", cj.plan_from_body(UPSCALE)),
+                         ["--restoration-model-name", "ltx", "--ltx-large-canvas",
+                          "--upscale", "span", "--upscale-height", "2160"])
+        self.assertEqual(cj.job_args(None, cj.plan_from_body({"op": "upscale", "upscale": "rtx-super-res",
+                                                              "upscale_height": 1440})),
+                         ["--no-compile-basicvsrpp", "--upscale", "rtx-super-res", "--upscale-height", "1440"])
+
+    def test_preset_args_are_not_shared(self):
+        cj.job_args("detail", cj.plan_from_body(UPSCALE))
+        self.assertEqual(cj.preset_args("detail"), ["--restoration-model-name", "ltx-8step"])
+
+    def test_the_command(self):
+        cmd = cj.run_command("/root/in/source.mkv", "detail", cj.plan_from_body(UPSCALE))
+        self.assertIn("./jasna --input /root/in/source.mkv --output %s" % cj.REMOTE_OUT, cmd)
+        self.assertIn("--restoration-model-name ltx-8step --upscale span --upscale-height 2160 --log-level info", cmd)
+        plain = cj.run_command("/root/in/source.mkv", "detail")
+        self.assertNotIn("--upscale", plain)
+        self.assertEqual(plain, cj.run_command("/root/in/source.mkv", "detail", cj.Plan()))
+        alone = cj.run_command("/root/in/source.mkv", None, cj.plan_from_body({"op": "upscale"}))
+        self.assertNotIn("--restoration-model-name", alone)
+        self.assertIn("--no-compile-basicvsrpp --upscale span --upscale-height 2160", alone)
+
+    def test_the_file_suffix_follows_core(self):
+        for op in cj.OPS:
+            plan = cj.plan_from_body(dict(UPSCALE, op=op))
+            self.assertEqual(cj.output_suffix(plan), core.op_suffix("upscale" if op == "upscale" else "decensor"), op)
+
+    def test_the_labels(self):
+        self.assertEqual(cj.plan_label(cj.Plan(), "close-ups"), "Sharper close-ups")
+        self.assertEqual(cj.plan_label(cj.plan_from_body({"op": "decensor+upscale", "upscale": "realplksr",
+                                                          "upscale_height": 1440}), "detail"),
+                         "High detail + upscale to 1440p")
+        self.assertEqual(cj.plan_label(cj.plan_from_body({"op": "upscale", "upscale": "rtx-super-res"}), None),
+                         "Upscale to 2160p \u00b7 RTX Super Resolution")
+
+
+class PlanRunTest(JasnaCase):
+    """Decensor + upscale and Upscale on the rented machine, and which machine gets rented."""
+
+    def cfg_for(self, plan, preset="detail", scene=None):
+        scene = scene or SCENE
+        key = None if plan.op == "upscale" else preset
+        est = cj.build_quote(self.cl, scene, key, plan=plan, release_gb=4.6)["est_usd"]
+        return {"cloud": {"preset": key, "scene": scene, "plan": plan.as_dict(), "est_usd": est,
+                          "confirm_usd": est, "job_id": "job1"}}
+
+    def rented(self):
+        return [re.search(r"/asks/(\d+)/", p).group(1) for m, p, _b in self.vast.calls
+                if m == "PUT" and "/asks/" in p]
+
+    def test_decensor_then_upscale_in_one_run(self):
+        produced = self.run_job(self.cfg_for(cj.plan_from_body(UPSCALE)))
+        (cmd,) = self.world.jasna_cmds
+        self.assertIn("--restoration-model-name ltx-8step", cmd)
+        self.assertIn("--upscale span --upscale-height 2160", cmd)
+        self.assertNotIn("--no-compile-basicvsrpp", cmd)
+        self.assertTrue(produced.endswith("_decensored.mp4"))
+        self.assertClean()
+        (row,) = self.ledger()
+        self.assertEqual((row["status"], row["op"], row["preset"]), ("ok", "decensor+upscale", "detail"))
+        self.assertGreater(row["usd"], 0)
+
+    def test_upscale_alone(self):
+        plan = cj.plan_from_body({"op": "upscale", "upscale": "rtx-super-res", "upscale_height": 1440})
+        produced = self.run_job(self.cfg_for(plan))
+        (cmd,) = self.world.jasna_cmds
+        self.assertIn("--no-compile-basicvsrpp --upscale rtx-super-res --upscale-height 1440", cmd)
+        self.assertNotIn("--restoration-model-name", cmd)
+        self.assertTrue(produced.endswith("_upscaled.mp4"))
+        self.assertEqual(os.path.basename(produced), "My_Scene_1080p__upscaled.mp4")
+        self.assertClean()
+        (row,) = self.ledger()
+        self.assertEqual((row["status"], row["op"], row["preset"]), ("ok", "upscale", None))
+        messages = [s["message"] for s in self.status]
+        self.assertIn("Starting Jasna (the first run prepares the GPU)", messages)       # no model to download
+
+    def test_decensoring_still_says_it_may_download_the_model(self):
+        self.run_job()
+        self.assertIn("Starting Jasna (the first run prepares the GPU and may download the model)",
+                      [s["message"] for s in self.status])
+
+    def test_a_plan_with_no_upscale_runs_plain_jasna(self):
+        self.run_job()
+        (cmd,) = self.world.jasna_cmds
+        self.assertNotIn("--upscale", cmd)
+
+    def test_the_run_names_the_machine_it_rented(self):
+        self.run_job()
+        (rented,) = self.rented()
+        last = self.stamps[-1]
+        self.assertEqual((last["runner"], last["engine"], last["cloud"]), ("Vast.ai \u00b7 RTX 4090", "jasna", True))
+        self.assertEqual((last["cloud_gpu"], last["cloud_provider"], last["cloud_offer_id"]),
+                         ("RTX 4090", "vast", rented))
+        self.assertGreater(last["cloud_cap"], 0)
+
+    def test_a_picked_machine_is_the_one_rented(self):
+        self.vast.offers = market()
+        plan = cj.plan_from_body({"offer_id": "14", "provider": "vast"})
+        self.run_job(self.cfg_for(plan))
+        self.assertEqual(self.rented(), ["14"])
+        self.assertEqual(self.stamps[-1]["cloud_offer_id"], "14")
+        self.assertClean()
+
+    def test_a_chosen_gpu_is_the_one_rented(self):
+        self.vast.offers = market()
+        self.run_job(self.cfg_for(cj.plan_from_body({"gpu": "RTX 3090"})))
+        self.assertEqual(self.rented(), ["13"])
+        self.assertEqual(self.stamps[-1]["cloud_gpu"], "RTX 3090")
+
+    def test_a_picked_machine_that_was_taken_is_never_replaced(self):
+        self.vast.offers = market()
+        cfg = self.cfg_for(cj.plan_from_body({"offer_id": "14", "provider": "vast"}))
+        self.vast.create_modes = ["gone", "ok", "ok"]
+        with self.assertRaises(cj.CloudRefused) as cm:
+            self.run_job(cfg)
+        self.assertEqual(cm.exception.code, "offer_gone")
+        self.assertEqual(self.rented(), ["14"])                            # one try, no other machine
+        self.assertClean()
+        self.assertEqual(self.ledger(), [])
+
+    def test_a_picked_machine_that_vanished_before_the_run_is_a_refusal(self):
+        self.vast.offers = market()
+        cfg = self.cfg_for(cj.plan_from_body({"offer_id": "14", "provider": "vast"}))
+        self.vast.offers = [o for o in self.vast.offers if o["id"] != 14]
+        with self.assertRaises(cj.CloudRefused) as cm:
+            self.run_job(cfg)
+        self.assertEqual(cm.exception.code, "offer_gone")
+        self.assertNothingRented()
+
+    def test_a_run_for_an_upscale_that_is_not_needed_is_refused(self):
+        cfg = self.cfg_for(cj.plan_from_body(UPSCALE))
+        cfg["cloud"]["plan"] = cj.plan_from_body(dict(UPSCALE, upscale_height=1080)).as_dict()
+        with self.assertRaises(cj.CloudRefused) as cm:
+            self.run_job(cfg)
+        self.assertEqual(cm.exception.code, "upscale_not_needed")
+        self.assertNothingRented()
+
+    def test_core_sends_upscale_jobs_to_the_rented_gpu_like_decensor_jobs(self):
+        cloud_cfg = {"cloud": {"preset": None}}
+        for backend in (core.backend_upscale, core.backend_decensor):
+            with mock.patch.object(cj, "run_decensor", return_value="/out/x.mp4") as run, \
+                    mock.patch.object(core, "_runner_dispatch") as dispatch:
+                self.assertEqual(backend(cloud_cfg, "/in/x.mp4", "/out"), "/out/x.mp4")
+            run.assert_called_once()
+            dispatch.assert_not_called()
+        with mock.patch.object(core, "_runner_dispatch", return_value="/r.mp4") as dispatch:
+            self.assertEqual(core.backend_upscale({}, "/in/x.mp4", "/out"), "/r.mp4")
+        self.assertEqual(dispatch.call_args.args[3], "upscale")
 
 
 if __name__ == "__main__":
