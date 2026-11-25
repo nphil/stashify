@@ -237,7 +237,7 @@ class Config:
     gpus: tuple = ("RTX 5090", "RTX 4090", "RTX 3090")
     min_vram_gb: float = 16
     min_reliability: float = 0.98
-    datacenter_only: bool = True       # the video is uploaded there: no hobbyist hosts by default
+    datacenter_only: bool = False      # community hosts allowed; data centres still rank first
     max_job_hours: float = 3.0
     disk_gb: int = 100
     max_bw_cost: float = 0.02      # $/GB internet cost ceiling (bandwidth is billed on top)
@@ -322,7 +322,9 @@ class Settings:
             cfg.gpus = tuple(gpus)
         cfg.min_vram_gb = _num(env.get("VAST_MIN_VRAM_GB"), cfg.min_vram_gb)
         cfg.min_reliability = _num(env.get("VAST_MIN_RELIABILITY"), cfg.min_reliability)
-        cfg.datacenter_only = _env_bool(env, "VAST_DATACENTER_ONLY", cfg.datacenter_only)
+        # dashboard setting (cloud.json), unless the environment pins it
+        cfg.datacenter_only = _env_bool(env, "VAST_DATACENTER_ONLY",
+                                        bool(self._read_file().get("datacenter_only", cfg.datacenter_only)))
         cfg.max_job_hours = _num(env.get("VAST_MAX_JOB_HOURS"), cfg.max_job_hours)
         cfg.disk_gb = int(_num(env.get("VAST_DISK_GB"), cfg.disk_gb))
         cfg.max_bw_cost = _num(env.get("VAST_MAX_BW_COST"), cfg.max_bw_cost)
@@ -340,6 +342,7 @@ class Settings:
         out = {f: self._secret_view(f) for f in SECRET_FIELDS}
         for f in NUMBER_FIELDS:
             out[f] = self.get(f)
+        out["datacenter_only"] = self.config().datacenter_only
         out["env_overrides"] = sorted(f for f in ENV_NAMES if self._env(f) is not None)
         return out
 
@@ -384,6 +387,8 @@ class Settings:
         for field, (_default, hi) in NUMBER_FIELDS.items():
             if field in body and body[field] not in (None, ""):
                 data[field] = self._clean_number(field, body[field], hi)
+        if isinstance(body.get("datacenter_only"), bool):
+            data["datacenter_only"] = body["datacenter_only"]
         self._write_file(data)
         return self.public()
 

@@ -558,6 +558,7 @@
       secretHint(s.vast_api_key, $("cfKey"), $("cfKeyDel"));
       secretHint(s.jasna_license, $("cfLic"), $("cfLicDel"));
       $("cfPrice").value = s.max_price; $("cfJob").value = s.job_cap; $("cfMonth").value = s.month_cap;
+      $("cfDC").checked = !!s.datacenter_only;
       $("cfSpend").textContent = "This month: " + money(st.month_to_date) + " of " + money(s.month_cap) +
         (st.active && st.active.length ? " · " + st.active.length + " machine running now" : "");
       var box = $("cfLedger"); box.innerHTML = "";
@@ -575,7 +576,8 @@
   }
   async function saveCloud(ev) {
     ev.preventDefault();
-    var body = { max_price: +$("cfPrice").value, job_cap: +$("cfJob").value, month_cap: +$("cfMonth").value };
+    var body = { max_price: +$("cfPrice").value, job_cap: +$("cfJob").value, month_cap: +$("cfMonth").value,
+                 datacenter_only: $("cfDC").checked };
     if ($("cfKey").value.trim()) body.vast_api_key = $("cfKey").value.trim();
     if ($("cfLic").value.trim()) body.jasna_license = $("cfLic").value.trim();
     try {
