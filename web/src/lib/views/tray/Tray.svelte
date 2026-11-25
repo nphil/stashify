@@ -49,6 +49,11 @@
     untrack(() => cloud.ensure());
   });
 
+  /* cloud cannot do this op (e.g. Transcode): fall back to home instead of stranding the bar on Cloud */
+  $effect(() => {
+    if (options.cloud && !plan.canCloud) untrack(() => (options.where = null));
+  });
+
   /* keep the layers consistent with what is on screen: no tray, or a different screen size, closes or swaps them */
   $effect(() => {
     const o = ui.overlay;
@@ -207,14 +212,18 @@
 {/snippet}
 
 {#snippet nudge()}
-  {#if plan.canCloud}
-    {#if cloudNow}
-      {#if plan.alt.ok}
-        <button type="button" class="linkbtn" onclick={() => (options.where = null)}>
-          <Icon name="monitor" small />Run it at home: {fmtMin(plan.alt.min)} · Free{plan.alt.off ? ` · ${plan.alt.off}` : plan.alt.runner && runners.list.length > 1 ? ` · on ${plan.alt.runner.name}` : ''}<Icon name="chevR" small />
-        </button>
-      {/if}
-    {:else if plan.waiting}
+  {#if cloudNow}
+    {#if plan.alt.ok}
+      <button type="button" class="linkbtn" onclick={() => (options.where = null)}>
+        <Icon name="monitor" small />Run it at home: {fmtMin(plan.alt.min)} · Free{plan.alt.off ? ` · ${plan.alt.off}` : plan.alt.runner && runners.list.length > 1 ? ` · on ${plan.alt.runner.name}` : ''}<Icon name="chevR" small />
+      </button>
+    {:else}
+      <button type="button" class="linkbtn" onclick={() => (options.where = null)}>
+        <Icon name="monitor" small />Run it at home instead<Icon name="chevR" small />
+      </button>
+    {/if}
+  {:else if plan.canCloud}
+    {#if plan.waiting}
       <Skeleton small width="16ch" />
     {:else if plan.quote}
       <button type="button" class="linkbtn" onclick={() => (options.where = WHERE_CLOUD)}>
