@@ -1,0 +1,11 @@
+# Keep the build context small: the image builds the dashboard itself (node stage in Dockerfile).
+.git
+**/__pycache__
+web/node_modules
+web/dist
+web/shots
+design
+docs
+tests
+winrunner
+unraid

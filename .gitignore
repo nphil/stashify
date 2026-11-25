@@ -15,3 +15,8 @@ docker-compose.override.yml
 winrunner/.venv/
 winrunner/tmp/
 winrunner/*.local.json
+
+# Dashboard build (the Dockerfile's node stage builds web/dist; shots are review screenshots)
+web/dist/
+web/node_modules/
+web/shots/

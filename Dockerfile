@@ -5,6 +5,16 @@
 # container (Dockerfile.lada, the stashify-runner image); this image needs
 # neither CUDA nor ffmpeg. It went
 # from a ~6 GB PyTorch stack to ~150 MB when DeepMosaics/Real-ESRGAN moved out.
+#
+# The dashboard (web/, Svelte 5 + Vite) is built in a throwaway node stage; the final image
+# only receives the static files in web/dist and has no node.
+FROM node:22-alpine AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
+
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1
@@ -20,8 +30,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY core.py worker.py server.py cloud_api.py cloud_jasna.py entrypoint.sh /app/
-COPY webui/ /app/webui/
+COPY core.py worker.py server.py events.py cloud_api.py cloud_jasna.py entrypoint.sh /app/
+COPY --from=web /web/dist /app/web/dist
 RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 # Defaults for the runner-backed pipeline. Override in your compose/template.
