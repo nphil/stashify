@@ -129,6 +129,9 @@ OVERRIDES = {
 # --------------------------------------------------------------------------- #
 
 RUNNERS_STORE = os.environ.get("RUNNERS_STORE", "/config/runners.json")
+# Finished jobs waiting for Replace/Discard, kept on disk: an update or restart of this
+# container used to forget them (the preview stayed in Stash with no way to act on it).
+REVIEW_STORE = os.environ.get("REVIEW_STORE") or os.path.join(os.path.dirname(RUNNERS_STORE), "reviews.json")
 _runners_lock = threading.Lock()
 
 
@@ -932,8 +935,43 @@ def jobs_snapshot():
 def set_job(job_id, **fields):
     with _jobs_lock:
         job = _jobs.get(job_id)
-        if job:
-            job.update(fields)
+        if not job:
+            return
+        before = job.get("state")
+        job.update(fields)
+        changed = "review_ready" in (before, job.get("state")) and before != job.get("state")
+    if changed:
+        save_reviews()
+
+
+def save_reviews():
+    """Write every job awaiting review to REVIEW_STORE (best effort)."""
+    with _jobs_lock:
+        rows = [dict(j) for j in _jobs.values() if j.get("state") == "review_ready"]
+    if not os.path.isdir(os.path.dirname(REVIEW_STORE) or "."):
+        return                               # no config folder (a dev box): nothing to persist to
+    try:
+        tmp = REVIEW_STORE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(rows, fh, default=str)
+        os.replace(tmp, REVIEW_STORE)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(f"Could not save the review list: {exc}")
+
+
+def load_reviews():
+    """Bring back the jobs that were awaiting review when the process last stopped."""
+    try:
+        with open(REVIEW_STORE, encoding="utf-8") as fh:
+            rows = json.load(fh)
+    except Exception:  # noqa: BLE001 - nothing saved yet
+        return 0
+    with _jobs_lock:
+        for j in rows:
+            if isinstance(j, dict) and j.get("id") and j.get("_info"):
+                j.setdefault("_overrides", {})
+                _jobs.setdefault(j["id"], j)
+    return len(rows)
 
 
 # What the card shows besides the number. Always set from a status (a None clears it), so a step or
@@ -1588,6 +1626,7 @@ def main():
         except Exception as exc:  # noqa: BLE001
             logging.warning(f"Could not pre-connect to Stash: {exc}")
 
+    load_reviews()
     threading.Thread(target=worker_loop, daemon=True).start()
     threading.Thread(target=gpu_poller, daemon=True).start()
     threading.Thread(target=preview_poller, daemon=True).start()
