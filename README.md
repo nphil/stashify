@@ -199,7 +199,20 @@ health-checks the candidates, skips offline/paused nodes, and picks an idle one
 (a runner's `prefer` list breaks ties). If a preferred node is busy or off, the
 job just goes to the next capable runner.
 
-Manage the fleet from the dashboard — **⚙ Runners** in the top bar:
+### Dashboard
+
+The coordinator serves a single-page dashboard at its root (`/`): browse and
+search the Stash library, select scenes, pick a quality and where to run
+(a local runner or a rented cloud GPU), watch jobs live, review results, and
+manage runners and cloud limits. It follows the system light/dark setting and
+has 42 selectable palettes. Live updates arrive over one Server-Sent Events
+stream (`GET /api/events`); if a proxy blocks it the page falls back to
+polling. The app lives in `web/` (Svelte 5 + Vite) and is built into the image
+by the Dockerfile; to work on it: `cd web && npm ci && npm run dev` (add
+`?mock=1` to the URL to run it against built-in fixtures with no server).
+`WEBUI_DIR` points the server at a different build folder.
+
+Manage the fleet from the dashboard — the **runner chip** in the top bar:
 
 - **🔎 Discover on network** — scans your /24 on the runner ports (8711/8712,
   override with `DISCOVER_CIDR` / `DISCOVER_PORTS`) for the unauthenticated

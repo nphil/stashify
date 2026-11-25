@@ -51,6 +51,16 @@ ShipLog facts (learned 2026-08-14 by reading its source):
   pushed with Docker media types (`oci-mediatypes=false`) — unRAID's Docker
   tab update checker 404s on bare OCI image manifests and shows Version
   "not available" (fixed 2026-08-14; don't regress this).
+- The dashboard is the Svelte 5 + Vite app in `web/` (Lucent@2, 42 selectable
+  palettes). `server.py` serves `web/dist` (`WEBUI_DIR` overrides it); the old
+  `webui/` is gone. The Dockerfile builds it in a node stage and copies only
+  `web/dist` into the python image, so node never ships. Local build:
+  `cd web && npm ci && npm run build` (`npm run check` first). `web/dist`,
+  `web/node_modules` and `web/shots` are gitignored. `web/BACKEND_NEEDS.md` is
+  the contract with the server; the only place the app adapts to API shapes
+  is `web/src/lib/api/cloudAdapter.ts`. Live updates come from `GET api/events`
+  (SSE, `events.py`); behind a proxy it must not buffer (`X-Accel-Buffering: no`
+  is sent; Caddy streams it by default).
 - Deployment target is the unRAID server `beastnas` (reachable via
   `tailscale ssh root@beastnas`; port-22 SSH is closed, Tailscale SSH is in
   check mode so the user may need to approve a login URL). Containers
