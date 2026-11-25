@@ -1,5 +1,5 @@
 /* Mock server for the runner list, the live GPU meters, discovery, connection tests and wake.
-   Seeded from the mockup: "This PC" (busy, 97%) and "NAS" (asleep, wakes in about 40 s). Changes stay in memory. */
+   Seeded from the mockup: "This PC" (busy, 97%) and "NAS" (asleep, wakes in about 8 s). Changes stay in memory. */
 import type { DiscoveredRunner, GpuMeter, GpuStats, Health, RoutePreview, Runner } from '../types';
 import { fail, route } from './router';
 
@@ -17,14 +17,20 @@ const nas: Runner = {
   name: 'NAS', url: NAS_URL, node: 'p40-nas', kind: 'nas', source: 'manual',
   ops: ['decensor', 'transcode'],
   engines: { decensor: 'lada', transcode: 'ffmpeg' },
-  prefer: null, online: false, asleep: true, can_wake: true, wake_eta_s: 40,
+  prefer: null, online: false, asleep: true, can_wake: true, wake_eta_s: 8,
   gpu: 'Tesla P40', vram_gb: 24, speed: 0.45, qualities: ['fast'], note: 'asleep - wakes when a job needs it',
 };
 
-const store: Runner[] = [pc, nas];
+const garage: Runner = {
+  name: 'desktop-3080', url: 'http://desktop-3080:8712', node: 'desktop-3080', kind: 'desktop', source: 'manual',
+  ops: ['decensor', 'transcode'], engines: { decensor: 'jasna', transcode: 'ffmpeg' },
+  prefer: null, online: false, asleep: false, can_wake: false, gpu: 'RTX 3080', vram_gb: 10, speed: 1, qualities: ['fast', 'balanced'], note: null,
+};
+
+const store: Runner[] = [pc, nas, garage];
 /** runner url -> when its wake finishes (ms) */
 const waking = new Map<string, number>();
-const WAKE_ETA_S = 40;
+const WAKE_ETA_S = 8;
 
 /** A woken runner comes online once its time is up; until then it counts down. */
 function settle(): void {
@@ -82,6 +88,7 @@ route('POST', 'api/runners', ({ body }) => {
     online: true, busy: false, gpu: 'RTX 4070', vram_gb: 12, speed: 1.1, qualities: ['fast', 'balanced', 'high', 'max'],
   };
   if (existing && textOf(body, 'name')) existing.name = textOf(body, 'name');
+  if (textOf(body, 'mac') && !entry.online) Object.assign(entry, { can_wake: true, asleep: true, wake_eta_s: WAKE_ETA_S, note: 'asleep - wakes when a job needs it' });
   entry.prefer = wantsPrefer ? [...entry.ops] : [];
   if (!existing) store.push(entry);
   return entry;
@@ -108,13 +115,12 @@ route('POST', 'api/runners/test', ({ body }) => {
 
 route('POST', 'api/runners/discover', () => DISCOVERED.map((d) => ({ ...d, registered: store.some((r) => r.url === d.url) })));
 
-/** proposed endpoint */
-route('POST', 'api/runners/wake', ({ body }) => {
-  const url = urlOf(body);
-  const r = store.find((x) => x.url === url);
+route('POST', 'api/runners/:name/wake', ({ params }) => {
+  const r = store.find((x) => x.name === decodeURIComponent(params.name) || x.url === params.name);
   if (!r) fail(404, 'no such runner');
   if (r.online) return { ok: true, eta_s: 0 };
-  if (!r.can_wake) fail(409, 'this runner has no wake address (add its MAC address to wake it)');
+  if (!r.can_wake) fail(400, 'this runner has no wake address (add its MAC address to wake it)');
+  const url = r.url;
   if (!waking.has(url)) waking.set(url, Date.now() + WAKE_ETA_S * 1000);
   settle();
   return { ok: true, eta_s: r.wake_eta_s ?? WAKE_ETA_S };

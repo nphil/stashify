@@ -1,7 +1,25 @@
 /* ---------- header pills, library ---------- */
 .pills { display: flex; align-items: center; gap: var(--lu-space-2); }
 .hp .mini { width: 36px; }
+/* a pill that is not up carries its own wake button */
+.hpx { padding-inline-end: var(--lu-space-3); }
+.hpx::after { display: none; }
+.hpn { display: inline-flex; align-items: center; gap: var(--lu-space-2); border: 0; background: transparent; color: inherit; font: inherit; padding: 0; cursor: pointer; }
+.hpn:focus-visible { outline: 2px solid var(--lu-edge-raised); outline-offset: 4px; border-radius: var(--lu-radius-pill); }
+.wk { position: relative; display: inline-grid; place-items: center; width: 26px; height: 26px; padding: 0; flex: none; border-radius: 50%; cursor: pointer;
+  border: 1px solid var(--lu-edge-raised); background-color: var(--lu-glass-raised); background-image: var(--lu-sheen); box-shadow: var(--lu-shadow-pressed); color: var(--lu-accent-text);
+  transition: transform var(--lu-motion-focus) var(--lu-ease), box-shadow var(--lu-motion-focus) var(--lu-ease), background-color var(--lu-motion-label) var(--lu-ease); }
+.wk::after { content: ""; position: absolute; inset: -10px; border-radius: 50%; } /* 46px touch target, the glyph stays 26 */
+.wk:hover:not([aria-disabled="true"]) { background-image: linear-gradient(var(--lu-hover-wash), var(--lu-hover-wash)), var(--lu-sheen); transform: translateY(-1px); }
+.wk:active:not([aria-disabled="true"]) { background-image: linear-gradient(var(--lu-press-wash), var(--lu-press-wash)); transform: none; box-shadow: none; }
+.wk:focus-visible { outline: 2px solid var(--lu-accent-text); outline-offset: 2px; }
+.wk[aria-disabled="true"] { cursor: not-allowed; color: var(--lu-ink-2); background: var(--lu-track-off); border-color: transparent; box-shadow: none; }
+.wk.waking { cursor: progress; animation: wkpulse 1.2s ease-in-out infinite; }
+.wk.failed { color: var(--lu-accent-text); }
+@keyframes wkpulse { 50% { opacity: .45; transform: scale(.92); } }
+@media (prefers-reduced-motion: reduce) { .wk.waking { animation: none; opacity: .6; } }
 html[data-lu-profile="phone"] .hp .nm, html[data-lu-profile="phone"] .hp .wd { display: none; }
+html[data-lu-profile="phone"] .hpx { padding-inline: var(--lu-space-3); }
 ul.plain { list-style: none; margin: var(--lu-space-3) 0 0; padding: 0; display: grid; gap: var(--lu-space-2); }
 ul.plain li { display: flex; align-items: flex-start; gap: var(--lu-space-2); color: var(--lu-ink-2); font: 500 var(--lu-type-label)/1.4 var(--lu-font); }
 ul.plain li .ico { margin-top: 2px; }

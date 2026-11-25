@@ -335,15 +335,15 @@ class RunnerTest(ServerCase):
         self.assertGreater(out["wake_eta_s"], 0)
         server.save_store([entry])
         with mock.patch.object(core, "wake_runner", return_value=True) as wake:
-            status, payload = self.call("POST", "/api/runners/wake", {"url": "http://pc:8720/"})
+            status, payload = self.call("POST", "/api/runners/pc/wake", {})
         self.assertEqual((status, payload["ok"]), (200, True))
         self.assertGreater(payload["eta_s"], 0)
         self.assertEqual(wake.call_args[0][0]["mac"], "aa:bb:cc:dd:ee:ff")
 
-    def test_waking_a_runner_with_no_mac_is_409_and_an_unknown_one_404(self):
+    def test_waking_a_runner_with_no_mac_is_400_and_an_unknown_one_404(self):
         server.save_store([{"name": "pc", "url": "http://pc:8720", "token": "t"}])
-        self.assertEqual(self.call("POST", "/api/runners/wake", {"url": "http://pc:8720"})[0], 409)
-        self.assertEqual(self.call("POST", "/api/runners/wake", {"url": "http://nope:1"})[0], 404)
+        self.assertEqual(self.call("POST", "/api/runners/pc/wake", {})[0], 400)
+        self.assertEqual(self.call("POST", "/api/runners/nope/wake", {})[0], 404)
 
     def test_editing_a_runner_keeps_its_token_mac_and_ops(self):
         server.save_store([{"name": "pc", "url": "http://pc:8720", "token": "secret-tok",

@@ -58,3 +58,5 @@
 .tscroll .ledger { min-width: 460px; }
 .tscroll:focus-visible { outline: none; background: var(--lu-glass-raised); box-shadow: var(--lu-shadow-pressed); border-radius: var(--lu-radius-row); }
 
+.macrow { display: flex; align-items: flex-end; gap: var(--lu-space-2); margin-top: var(--lu-space-2); }
+.macrow .flab { flex: 1; min-width: 0; }

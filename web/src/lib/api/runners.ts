@@ -12,5 +12,5 @@ export const addRunner = (b: RunnerInput) => post<Runner>('api/runners', b);
 export const removeRunner = (url: string) => post<{ ok: boolean }>('api/runners/remove', { url });
 export const testRunner = (b: { url: string; token?: string; name?: string }) => post<{ ok: boolean; error?: string; ops?: string[]; engines?: Record<string, string> }>('api/runners/test', b);
 export const discoverRunners = () => post<DiscoveredRunner[]>('api/runners/discover', {});
-/** proposed endpoint: send the wake packet for a runner that `can_wake`; `eta_s` = about how long until it answers */
-export const wakeRunner = (url: string) => post<{ ok: boolean; eta_s?: number }>('api/runners/wake', { url });
+/** send the wake packet for a runner that `can_wake` (by name); `eta_s` = about how long until it answers */
+export const wakeRunner = (name: string) => post<{ ok: boolean; eta_s?: number }>(`api/runners/${encodeURIComponent(name)}/wake`, {});

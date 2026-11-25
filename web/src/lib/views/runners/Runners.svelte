@@ -1,12 +1,13 @@
 <script lang="ts">
-  import { SvelteMap, SvelteSet } from 'svelte/reactivity';
-  import { addRunner, discoverRunners, removeRunner, testRunner, wakeRunner } from '../../api/runners';
+  import { SvelteMap } from 'svelte/reactivity';
+  import { addRunner, discoverRunners, removeRunner, testRunner } from '../../api/runners';
   import type { DiscoveredRunner, GpuStats, OpId, Runner } from '../../api/types';
   import { OPS, QUALITIES, QUALITY_ORDER, engineOf, qualitiesOf } from '../../choices';
   import { budget } from '../../stores/budget.svelte';
   import { nav } from '../../stores/nav.svelte';
   import { runners } from '../../stores/runners.svelte';
   import { toast } from '../../stores/toast.svelte';
+  import WakeButton from '../../shell/WakeButton.svelte';
   import Dialog from '../../ui/Dialog.svelte';
   import Icon from '../../ui/Icon.svelte';
   import type { IconName } from '../../ui/icons';
@@ -31,8 +32,6 @@
     return /nas|server|rack|box/i.test(k) ? 'server' : 'monitor';
   }
 
-  /** Runners we sent a wake packet to, until they answer. */
-  const waking = new SvelteSet<string>();
   /** switch positions shown before the server confirms them */
   const preferGuess = new SvelteMap<string, boolean>();
   const rowError = new SvelteMap<string, string>();
@@ -45,7 +44,9 @@
       return { state: 'ok', word: 'Ready' };
     }
     if (isAsleep(r)) {
-      if (waking.has(r.url)) return { state: 'asleep', word: r.wake_eta_s ? `Waking · about ${r.wake_eta_s} s` : 'Waking up' };
+      const w = runners.wakes[r.url];
+      if (w && !w.failed) { const left = runners.wakeLeft(r.url); return { state: 'asleep', word: left ? `Waking · about ${left} s` : 'Waking up' }; }
+      if (w?.failed) return { state: 'warn', word: 'Didn’t wake' };
       return { state: 'asleep', word: r.wake_eta_s ? `Asleep · wakes in about ${r.wake_eta_s} s` : 'Asleep' };
     }
     return { state: 'offline', word: 'Offline' };
@@ -83,26 +84,24 @@
   }
 
   /* ---------- actions on a row ---------- */
-  let alive = true;
-  $effect(() => () => { alive = false; });
-  const sleep = (ms: number): Promise<void> => new Promise((res) => setTimeout(res, ms));
-
-  async function wake(r: Runner): Promise<void> {
+  /* ---------- wake address (MAC) for a runner that has none ---------- */
+  let macFor = $state<string | null>(null);
+  let macText = $state('');
+  let macBusy = $state(false);
+  async function saveMac(r: Runner): Promise<void> {
+    const m = macText.trim();
+    if (!m || macBusy) return;
+    macBusy = true;
     rowError.delete(r.url);
-    waking.add(r.url);
     try {
-      const res = await wakeRunner(r.url);
-      toast.show(`Waking ${r.name}${res.eta_s ? ` · about ${res.eta_s} s` : ''}`);
-      // the list polls every 5 s; check faster while someone is waiting on it
-      for (let i = 0; i < 90 && alive; i++) {
-        await sleep(2000);
-        await runners.refresh();
-        if (runners.list.find((x) => x.url === r.url)?.online) break;
-      }
+      await addRunner({ name: r.name, url: r.url, mac: m });
+      await runners.refresh();
+      macFor = null;
+      toast.show(`Saved the wake address for ${r.name}`);
     } catch (e) {
-      rowError.set(r.url, msgOf(e, `Could not wake ${r.name}.`));
+      rowError.set(r.url, msgOf(e, 'The server refused that address.'));
     } finally {
-      waking.delete(r.url);
+      macBusy = false;
     }
   }
 
@@ -281,11 +280,18 @@
                 {/each}
               </dl>
             {/if}
+            {#if macFor === r.url && !r.can_wake}
+              <form class="macrow" onsubmit={(e) => { e.preventDefault(); void saveMac(r); }}>
+                <label class="flab"><span>Wake address (MAC)</span><span class="field"><input type="text" bind:value={macText} placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off" autocapitalize="off" spellcheck="false" /></span></label>
+                <button type="submit" class="btn primary" aria-disabled={!macText.trim() || macBusy || undefined}>Save</button>
+              </form>
+            {/if}
             {#if rowError.get(r.url)}<p class="rerr" role="alert"><Icon name="alert" small />{rowError.get(r.url)}</p>{/if}
           </div>
           <div class="ract">
-            {#if isAsleep(r) && r.can_wake}
-              <button type="button" class="btn" aria-disabled={waking.has(r.url) || undefined} onclick={() => !waking.has(r.url) && wake(r)}><Icon name="power" />{waking.has(r.url) ? 'Waking…' : 'Wake up'}</button>
+            {#if !r.online}
+              <WakeButton runner={r} variant="btn" />
+              {#if !r.can_wake && !fixed}<button type="button" class="btn quiet" onclick={() => { macFor = macFor === r.url ? null : r.url; macText = ''; }}>Add wake address</button>{/if}
             {/if}
             <span class="prefer">
               <span class="muted">Prefer</span>

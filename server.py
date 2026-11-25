@@ -27,6 +27,7 @@ import sys
 import gzip
 import json
 import time
+import urllib.parse
 import uuid
 import queue
 import logging
@@ -1541,13 +1542,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": r["online"], "error": None if r["online"] and not r["note"]
                                     else (r["note"] or "Could not reach it."),
                                     "ops": r["ops"], "engines": r["engines"], "node": r["node"], "kind": r["kind"]})
-        if path == "/api/runners/wake":                # a Wake-on-LAN packet for a sleeping runner
-            url = str(self._body().get("url", "")).rstrip("/")
-            entry = next((r for r in merged_runners() if str(r.get("url", "")).rstrip("/") == url), None)
+        if path.startswith("/api/runners/") and path.endswith("/wake") and len(path) > len("/api/runners//wake"):
+            name = urllib.parse.unquote(path[len("/api/runners/"):-len("/wake")])   # a Wake-on-LAN packet for a sleeping runner
+            entry = next((r for r in merged_runners() if name in (r.get("name"), str(r.get("url", "")).rstrip("/"))), None)
             if entry is None:
                 return self._send(404, {"error": "no such runner"})
             if not entry.get("mac"):
-                return self._send(409, {"error": "This runner has no MAC address, so it cannot be woken."})
+                return self._send(400, {"error": "This runner has no MAC address, so it cannot be woken."})
             if not core.wake_runner(entry):
                 return self._send(502, {"error": "The wake packet could not be sent."})
             return self._send(200, {"ok": True, "eta_s": wake_eta()})

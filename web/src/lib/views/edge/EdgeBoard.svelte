@@ -20,7 +20,7 @@
     const r = runners.list.find((x) => !x.online && x.can_wake);
     if (!r) { toast.show('No sleeping runner to wake'); return; }
     try {
-      await wakeRunner(r.url);
+      await wakeRunner(r.name);
       toast.show(`Waking ${r.name}`);
       await runners.refresh();
     } catch (e) {

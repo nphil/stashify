@@ -5,6 +5,7 @@
   import { nav, type View } from '../stores/nav.svelte';
   import { jobs } from '../stores/jobs.svelte';
   import { runners } from '../stores/runners.svelte';
+  import WakeButton from './WakeButton.svelte';
   import { budget } from '../stores/budget.svelte';
   import type { Runner } from '../api/types';
   import { usd } from '../util/format';
@@ -41,16 +42,19 @@
   </nav>
   <div class="pills">
     {#each shown as r (r.url)}
-      <button type="button" class="hp" aria-label={label(r)} onclick={() => nav.go('runners')}>
-        <Icon name={iconOf(r)} /><span class="nm">{r.name}</span>
-        {#if r.online}
+      {#if r.online}
+        <button type="button" class="hp" aria-label={label(r)} onclick={() => nav.go('runners')}>
+          <Icon name={iconOf(r)} /><span class="nm">{r.name}</span>
           <span class="mini"><i style:width="{load(r)}%"></i></span><span class="num">{load(r)}%</span>
-        {:else if r.asleep}
-          <Icon name="moon" small /><span class="wd">Asleep</span>
-        {:else}
-          <Icon name="power" small /><span class="wd">Offline</span>
-        {/if}
-      </button>
+        </button>
+      {:else}
+        <!-- not up: the pill holds its own wake button, so it is a container, not a button (buttons cannot nest) -->
+        <span class="hp hpx" role="group" aria-label={label(r)}>
+          <button type="button" class="hpn" aria-label={`${r.name}: open Runners`} onclick={() => nav.go('runners')}><Icon name={iconOf(r)} /><span class="nm">{r.name}</span></button>
+          <WakeButton runner={r} />
+          <span class="wd">{runners.wakes[r.url] && !runners.wakes[r.url].failed ? `Waking… ${runners.wakeLeft(r.url) ?? ''}${runners.wakeLeft(r.url) ? ' s' : ''}` : runners.wakes[r.url]?.failed ? 'Didn’t wake' : r.asleep ? 'Asleep' : 'Offline'}</span>
+        </span>
+      {/if}
     {/each}
     {#if more}
       <button type="button" class="hp" aria-label={`${more} more runner${more > 1 ? 's' : ''}`} onclick={() => nav.go('runners')}><span class="num">+{more}</span></button>
