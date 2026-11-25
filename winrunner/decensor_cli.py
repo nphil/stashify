@@ -116,12 +116,37 @@ def _final_stage_progress(output_dir, input_path):
     return None
 
 
+# jasna's LTX model reports a different bar from BasicVSR++, one per step:
+#   LTX 2/4 encode:  92%|####| 63600/69150 [15:54<01:09, 79.52frame/s, run 1:39:22 left]
+# The bar's own % restarts every step, so whole-job progress comes from the clock:
+# time run so far against jasna's "run H:MM:SS left".
+_RE_LTX = re.compile(
+    r"LTX\s+(\d)/(\d)\s+(\w+):\s*(\d{1,3})%.*?(\d+)/(\d+)\s*\[.*?"
+    r"(?:([\d.]+)\s*frame/s)?[^\]]*?run\s+(?:(\d+):)?(\d+):(\d+)\s+left", re.IGNORECASE)
+_T0 = time.time()
+
+
+def _normalize_ltx(seg):
+    m = _RE_LTX.search(seg)
+    if not m:
+        return None
+    step, steps, name, _pct, frame, _total, fps, h, mi, s = m.groups()
+    left = int(h or 0) * 3600 + int(mi) * 60 + int(s)
+    ran = time.time() - _T0
+    pct = int(100 * ran / (ran + left)) if ran + left > 0 else 0
+    return ("decensor: %d%%| |Remaining: %d:%02d:%02d | Speed: %s f/s | LTX step %s of %s (%s)"
+            % (min(99, pct), left // 3600, left % 3600 // 60, left % 60, fps or "0", step, steps, name))
+
+
 def normalize(seg):
     """Jasna tqdm segment -> lada-style progress line, or None if not progress."""
     seg = seg.replace(",", "")            # tqdm thousands separators in frame counts
     # tqdm redraws with \r (no \n), so a following log line gets glued onto the
     # bar; cut at that log timestamp so the progress line stays clean.
     seg = re.split(r"\d{2}:\d{2}:\d{2}\s+jasna\.", seg, maxsplit=1)[0]
+    ltx = _normalize_ltx(seg)
+    if ltx:
+        return ltx
     if not _RE_HAS_PCT.search(seg) or "(" not in seg:
         return None
     # "Speed: 12.3fps" -> "Speed: 12.3 f/s" (the runner's fps regex wants f/s)

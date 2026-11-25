@@ -290,6 +290,7 @@ _NARRATION = [
     (re.compile(r"smart mode - restoring", re.I), ("Restoring mosaic segments", None)),
     (re.compile(r"scanning for mosaic", re.I), ("Scanning for mosaics", True)),
     (re.compile(r"upscaling decensored", re.I), ("Upscaling decensored output", None)),
+    (re.compile(r"LTX step \d of \d", re.I), ("Restoring in high detail (LTX)", None)),
 ]
 
 
