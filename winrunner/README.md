@@ -57,8 +57,11 @@ powershell -ExecutionPolicy Bypass -File install-jasna.ps1    # optional: decens
 `install.ps1` provisions the venv (torch cu124 + deps), installs ffmpeg,
 downloads the SPAN model, writes `config.json` (edit `path_map` if your NAS
 shares differ), registers the **`StashifyRunner`** scheduled task running **as
-you at logon** (so your saved SMB credentials work — a LocalSystem service
-authenticates as the machine account, which the NAS denies; a small supervisor,
+you at boot, signed in or not** (Task Scheduler keeps your Windows password; the
+installer asks for it once on the PC's desktop and a re-run keeps it - so a
+Wake-on-LAN boot serves jobs with nobody logged in, and your SMB credentials work:
+a LocalSystem service authenticates as the machine account, which the NAS denies;
+the tray is a separate password-less **`StashifyRunnerTray`** logon task; a small supervisor,
 `supervise.ps1`, restarts the runner whenever it exits and records why in
 `logs\supervisor.log` - set `alert_url` in `config.json` to be told when it
 keeps failing), opens the firewall for the LAN, and starts the tray.

@@ -7,6 +7,8 @@ $TaskName = "StashifyRunner"
 # stop the runner process + task
 Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+Stop-ScheduledTask -TaskName "${TaskName}Tray" -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName "${TaskName}Tray" -Confirm:$false -ErrorAction SilentlyContinue
 Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe' OR Name='powershell.exe'" -ErrorAction SilentlyContinue |
   Where-Object { $_.CommandLine -like "*StashifyRunner*.py*" -or $_.CommandLine -like "*StashifyRunner*supervise.ps1*" } |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }

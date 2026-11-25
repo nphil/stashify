@@ -1,7 +1,8 @@
 <#
-  Stashify runner supervisor - keeps runner.py alive for as long as you are
-  signed in. The scheduled task launches THIS (windowless, via conhost
-  --headless), not python directly, because a bare launcher loses three things:
+  Stashify runner supervisor - keeps runner.py alive from BOOT, whether or not
+  anyone is signed in. The scheduled task (At startup, run as you with your
+  stored password) launches THIS (windowless, via conhost --headless), not
+  python directly, because a bare launcher loses three things:
 
     - restarts: the runner is relaunched after any exit, forever, with a
       backoff (5 s doubling to 5 min) so a broken install can't spin the CPU;
@@ -10,14 +11,17 @@
       in logs\supervisor.log;
     - an alert: after 3 quick failures in a row it posts once to the optional
       "alert_url" in config.json (any ntfy-style URL that accepts a POST body).
-    - no sign-in popup: it waits for the network before the first start.
+    - no startup error: it waits for the network before the first start.
       Windows Smart App Control asks Microsoft's cloud about the unsigned
-      python.exe; with no network yet (the first seconds after sign-in) it
-      blocks the launch and shows an error. The tray is started from here
-      for the same reason, not from the Startup folder.
+      python.exe; with no network yet (the first seconds after boot) it
+      blocks the launch. After a Wake-on-LAN boot that wait can be a minute.
 
-  One supervisor per session: a second copy exits at once, which is what lets
-  the task also fire every few minutes as a "make sure it is running" check.
+  The tray icon is NOT started here (this runs in session 0, no desktop): the
+  StashifyTray task starts it at logon via tray-launch.ps1.
+
+  One supervisor per PC: a second copy exits at once (machine-wide mutex),
+  which is what lets the task also fire every few minutes as a "make sure it
+  is running" check, and keeps a signed-in session from ever doubling it up.
 #>
 param([string]$Root = "$env:LOCALAPPDATA\StashifyRunner")
 $ErrorActionPreference = "Continue"
@@ -33,7 +37,7 @@ function Note($msg) {
   Add-Content $log ("{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg)
 }
 
-$mutex = New-Object System.Threading.Mutex($false, "Local\StashifyRunnerSupervisor")
+$mutex = New-Object System.Threading.Mutex($false, "Global\StashifyRunnerSupervisor")
 try { if (-not $mutex.WaitOne(0)) { exit 0 } }
 catch [System.Threading.AbandonedMutexException] { }   # previous supervisor was killed: the mutex is ours
 
@@ -45,7 +49,7 @@ function Send-Alert($msg) {
 }
 
 Note "supervisor started (pid $PID)"
-for ($i = 0; $i -lt 30; $i++) {
+for ($i = 0; $i -lt 100; $i++) {
   try { [System.Net.Dns]::GetHostAddresses("www.microsoft.com") | Out-Null; break } catch { Start-Sleep 3 }
 }
 
@@ -56,7 +60,7 @@ function Start-Hidden($script) {
   $psi.WorkingDirectory = $app
   $psi.UseShellExecute = $false
   $psi.CreateNoWindow = $true
-  $psi.RedirectStandardError = ($script -eq "runner.py")
+  $psi.RedirectStandardError = $true
   [System.Diagnostics.Process]::Start($psi)
 }
 
@@ -67,10 +71,6 @@ while ($true) {
   Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" |
     Where-Object { $_.CommandLine -like "*$app\runner.py*" } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-  if (-not (Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" |
-            Where-Object { $_.CommandLine -like "*$app\tray.py*" })) {
-    try { Start-Hidden "tray.py" | Out-Null } catch { Note "tray not started: $_" }
-  }
 
   $started = Get-Date
   $code = $null; $err = ""
