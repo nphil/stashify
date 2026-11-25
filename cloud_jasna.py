@@ -500,6 +500,40 @@ def make_estimator(cfg, scene, preset_key, plan=None, release_gb=None):
     return lambda offer: estimate_job(scene, preset_key, offer, rel, plan, disk)
 
 
+@dataclasses.dataclass(frozen=True)
+class JobCostSum(JobCost):
+    """Several scenes on one machine: each scene is its own rental, so the times and the bill
+    add up, and the price is the sum of the per-scene prices (each rounded up to the cent,
+    which is what each scene's own confirmation is checked against)."""
+    usd_sum: float = 0.0
+
+    @property
+    def est_usd(self):
+        return round(self.usd_sum, 2)
+
+
+def sum_costs(costs):
+    """One JobCostSum from the JobCost of each scene."""
+    costs = list(costs)
+    cb = [c.cost for c in costs]
+    total = hireling.cost.CostBreakdown(
+        hours=sum(b.hours for b in cb), compute=sum(b.compute for b in cb), storage=sum(b.storage for b in cb),
+        bw_down=sum(b.bw_down for b in cb), bw_up=sum(b.bw_up for b in cb),
+        gb_down=sum(b.gb_down for b in cb), gb_up=sum(b.gb_up for b in cb),
+        notes=tuple(dict.fromkeys(n for b in cb for n in b.notes)))
+    return JobCostSum(hours=sum(c.hours for c in costs), cost=total,
+                      assumptions=tuple(dict.fromkeys(a for c in costs for a in c.assumptions)),
+                      setup_min=sum(c.setup_min for c in costs), transfer_min=sum(c.transfer_min for c in costs),
+                      processing_min=sum(c.processing_min for c in costs),
+                      disk_gb=max(c.disk_gb for c in costs), usd_sum=sum(c.est_usd for c in costs))
+
+
+def make_estimator_many(cfg, scenes, preset_key, plan=None, release_gb=None):
+    """make_estimator for several scenes run one after another on the same machine."""
+    one = [make_estimator(cfg, s, preset_key, plan, release_gb) for s in scenes]
+    return lambda offer: sum_costs(e(offer) for e in one)
+
+
 _BRIEF = ("provider", "id", "gpu", "num_gpus", "vram_gb", "price_per_hour", "reliability", "datacenter",
           "host_type", "location", "country", "inet_down", "inet_up", "storage_per_gb_hr",
           "bw_up_per_gb", "bw_down_per_gb")
@@ -775,6 +809,21 @@ def _after_stop(cl, job, rented):
     return "The machine was destroyed and nothing was kept."
 
 
+# The dashboard's five steps of a rental (boot, upload, run, download, cleanup), from the
+# message each stage reports; a message that starts none of these changes nothing.
+_PHASES = (("boot", ("Looking up", "Renting", "Installing", "Checking the video encoder", "Activating")),
+           ("upload", ("Uploading",)),
+           ("run", ("Starting Jasna", "Decensoring", "Downloading the LTX")),
+           ("download", ("Downloading the result",)))
+
+
+def cloud_phase_of(message):
+    for phase, starts in _PHASES:
+        if str(message or "").startswith(starts):
+            return phase
+    return None
+
+
 def run_decensor(cfg, input_path, result_dir, *, on_line=None, log_cb=None, status_cb=None,
                  cl=None, stamp=None, check_cancel=None, release_fn=None):
     """Run one scene through cloud Jasna (Decensor, Decensor + upscale or Upscale). Returns
@@ -791,6 +840,9 @@ def run_decensor(cfg, input_path, result_dir, *, on_line=None, log_cb=None, stat
     say = log_cb or (lambda _line: None)
 
     def phase(stage, progress, message, indeterminate=False, **extra):
+        step = cloud_phase_of(message)
+        if step and stamp:
+            stamp(cloud_phase=step)
         if status_cb:
             status_cb(dict({"stage": stage, "progress": progress, "message": message,
                             "indeterminate": indeterminate}, **extra))
@@ -820,7 +872,9 @@ def run_decensor(cfg, input_path, result_dir, *, on_line=None, log_cb=None, stat
         if stamp:
             stamp(runner="%s \u00b7 %s" % (cl.provider(box.provider).display_name, box.gpu), engine="jasna",
                   cloud=True, cloud_usd=round(box.spent_total(), 2), cloud_cap=round(box.cap, 2),
-                  cloud_gpu=box.gpu, cloud_offer_id=str(box.offer.id), cloud_provider=box.provider)
+                  cloud_gpu=box.gpu, cloud_offer_id=str(box.offer.id), cloud_provider=box.provider,
+                  provider=cl.provider(box.provider).display_name,
+                  cloud_tier="dc" if box.offer.datacenter else "comm")
 
     def on_offer(n, offer):
         rented.append(offer.id)
@@ -853,6 +907,8 @@ def run_decensor(cfg, input_path, result_dir, *, on_line=None, log_cb=None, stat
             say("[cloud] machine ready: %s, $%.2f/hour, spend cap $%.2f" % (box.gpu, box.dph, box.cap))
             _on_box(box, cfg, job, input_path, result_dir, urls, licence, progress, phase, say, last, plan)
             produced = _fetch_result(box, input_path, result_dir, phase, say, last, output_suffix(plan))
+            if stamp:
+                stamp(cloud_phase="cleanup")
             say("[cloud] finished: spent $%.2f (estimate was $%.2f)" % (box.spent_total(), quote["est_usd"]))
             return produced
     except hireling.NoOffers:

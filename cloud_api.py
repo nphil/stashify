@@ -72,14 +72,22 @@ def test_key(cl, body):
 
 def status(cl):
     """Settings-page status: spend, running machines, and each provider with its credit
-    (looked up at most once a minute)."""
-    return 200, cl.status(with_credit=True)
+    (looked up at most once a minute). Each running machine also says which scene and quality
+    it is for, what it has cost so far (`usd`) and when it started (`started`, epoch seconds)."""
+    out = cl.status(with_credit=True)
+    registry = cl.registry.all()
+    for row in out["active"]:
+        rec = registry.get(row.get("label")) or {}
+        meta, inst = rec.get("meta") or {}, rec.get("inst") or {}
+        row.update(scene=meta.get("scene"), scene_id=meta.get("scene_id"), preset=meta.get("preset"),
+                   usd=row.get("spent"), started=inst.get("created_at") or None)
+    return 200, out
 
 
 # -- market view ------------------------------------------------------------------------ #
 
 # Query parameters that belong to Stashify, not to hireling's market contract.
-OFFER_PARAMS = ("scene", "preset", "op", "upscale", "upscale_height", "hours")
+OFFER_PARAMS = ("scene", "scene_ids", "preset", "op", "upscale", "upscale_height", "hours")
 
 
 def _rental_estimator(hours, disk_gb):
@@ -88,17 +96,25 @@ def _rental_estimator(hours, disk_gb):
     return lambda offer: hireling.JobEstimate(hours, hireling.estimate_cost(offer, hours, disk_gb=disk_gb), note)
 
 
+def _caps(cl):
+    """The owner's limits and this month's spend, so the browser can mark what is over them."""
+    cfg = cl.config()
+    return {"max_price": cfg.max_price, "job_cap": cfg.job_cap, "month_cap": cfg.month_cap,
+            "max_job_hours": cfg.max_job_hours, "month_to_date": round(cl.month_spend_committed(), 2)}
+
+
 def offers(cl, query, meta=None):
     """GET /api/cloud/offers : the whole GPU market behind the enabled providers, with
     hireling's filter / sort / page parameters, every offer marked compatible or not with
     what Jasna needs (and why not).
 
-    `meta` is the scene's facts (cloud_jasna.scene_meta) when the query names a scene. Every
-    offer then carries what THIS job would take and cost on it (minutes, price, the compute /
-    storage / bandwidth breakdown), the cost and time sorts work, and the hardware choices
-    (fastest, best value) are picked for the job. `op`, `preset`, `upscale` and
-    `upscale_height` say which job. Without a scene, `hours` costs a plain rental of that
-    length instead."""
+    `meta` is the scene's facts (cloud_jasna.scene_meta) when the query names a scene, or a
+    list of them for `scene_ids`. Every offer then carries what THIS job would take and cost on
+    it (minutes, price, the compute / storage / bandwidth breakdown), the cost and time sorts
+    work, and the hardware choices (fastest, best value) are picked for the job. Several scenes
+    are one rental each, run one after another on the machine: the estimate is their sum.
+    `op`, `preset`, `upscale` and `upscale_height` say which job. Without a scene, `hours`
+    costs a plain rental of that length instead."""
     if not cl.enabled_providers():
         return REFUSED, {"error": "Add your Vast.ai API key in Cloud settings first.", "code": "no_key"}
     cfg = cl.config()
@@ -106,21 +122,26 @@ def offers(cl, query, meta=None):
         plan = cloud_jasna.plan_from_body({k: query[k] for k in ("op", "upscale", "upscale_height") if k in query})
     except cloud_jasna.PlanError as exc:
         return 400, {"error": str(exc), "code": exc.code}
+    metas = [] if meta is None else list(meta) if isinstance(meta, (list, tuple)) else [meta]
     requirements, estimator, target = cloud_jasna.requirements(cfg), None, None
-    if meta is not None:
+    if metas:
         restoring = plan.op != "upscale"
         preset = query.get("preset") or cloud_jasna.DEFAULT_PRESET
         if restoring and preset not in cloud_jasna.PRESETS:
             return 400, {"error": "Unknown cloud quality preset.", "code": "bad_preset"}
-        requirements = cloud_jasna.requirements(cfg, meta.get("size") or 0,
-                                                ratio=cloud_jasna.result_ratio(meta, plan))
-        known = (meta.get("duration") or 0) > 0
+        # one rental per scene: the machine must fit the scene that needs the most disk
+        requirements = max((cloud_jasna.requirements(cfg, m.get("size") or 0, ratio=cloud_jasna.result_ratio(m, plan))
+                            for m in metas), key=lambda r: r.disk_gb)
+        known = all((m.get("duration") or 0) > 0 for m in metas)
         if known:
-            estimator = cloud_jasna.make_estimator(cfg, meta, preset, plan)
-        target = {"scene_id": meta.get("id"), "title": meta.get("title"), "op": plan.op,
+            estimator = (cloud_jasna.make_estimator(cfg, metas[0], preset, plan) if len(metas) == 1
+                         else cloud_jasna.make_estimator_many(cfg, metas, preset, plan))
+        target = {"scene_id": metas[0].get("id"), "title": metas[0].get("title"), "op": plan.op,
                   "preset": preset if restoring else None, "upscale": plan.upscale or None,
                   "upscale_height": plan.upscale_height or None,
                   "label": cloud_jasna.plan_label(plan, preset), "estimated": known}
+        if len(metas) > 1:
+            target.update(scene_ids=[m.get("id") for m in metas], scenes=len(metas))
     elif "hours" in query:
         hours = _num(query["hours"])
         if hours is None or not 0 < hours <= 168:
@@ -139,6 +160,7 @@ def offers(cl, query, meta=None):
         return 502, {"error": next(iter(payload["errors"].values())), "code": "offers_unavailable",
                      "errors": payload["errors"]}
     payload["for"] = target
+    payload["caps"] = _caps(cl)
     return 200, payload
 
 
@@ -231,4 +253,4 @@ def admit(cl, body, meta, queued_usd, backend):
     return 202, {"preset": preset, "label": quote["label"], "scene": meta, "est_usd": quote["est_usd"],
                  "confirm_usd": confirm, "cap": quote["job_cap"], "gpu": quote["gpu"], "op": plan.op,
                  "plan": plan.as_dict(), "offer_id": plan.offer_id or None, "provider": plan.provider or None,
-                 "hardware": body.get("hardware") or None}
+                 "hardware": body.get("hardware") or None, "est_min": quote.get("total_min")}

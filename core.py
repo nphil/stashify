@@ -114,7 +114,7 @@ title
 details
 date
 rating100
-files { path }
+files { path height size duration }
 tags { id name }
 performers { id }
 studio { id }
@@ -370,6 +370,24 @@ def backend_command(cfg, input_path, result_dir, on_line=None, log_cb=None, stat
     return newest_video(result_dir)
 
 
+def runner_health(url, token="", timeout=(2, 4), retry_delay=0.25):
+    """A runner's /health as a dict. One quick retry on a connection-level failure: the
+    network drops a share of TCP connects to a perfectly healthy PC, and a single dropped
+    connect must not read as "offline" (the dashboard flapped, and a sleeping-runner wake
+    packet was sent to an awake machine). Anything that is not a connection failure (a
+    token refusal, a page that is not JSON) raises at once. Raises the last error."""
+    import requests
+
+    headers = {"X-Runner-Token": token, "X-Lada-Token": token}
+    for attempt in (0, 1):
+        try:
+            return requests.get(url.rstrip("/") + "/health", headers=headers, timeout=timeout).json()
+        except (requests.ConnectionError, requests.Timeout):
+            if attempt:
+                raise
+            time.sleep(retry_delay)
+
+
 def wake_runner(c):
     """Send a Wake-on-LAN magic packet for a runner entry that declares "mac".
     Goes out as a LAN broadcast AND straight to the runner's own address: from
@@ -417,8 +435,6 @@ def resolve_runner(cfg, op, wake=False):
     given runnerWakeSecs (default 120) to answer; if it doesn't, routing carries
     on with whoever is online. With wake=False (the dashboard's dry run) nothing
     is sent and the sleeping runner is returned marked "asleep"."""
-    import requests
-
     target_runner = str(cfg.get("targetRunner") or "").strip().rstrip("/")
     target_engine = str(cfg.get("targetEngine") or "").strip()
     if target_runner.lower() == "auto":
@@ -435,10 +451,7 @@ def resolve_runner(cfg, op, wake=False):
     def probe(c):
         url = str(c.get("url") or "").rstrip("/")
         try:
-            tok = c.get("token", "")
-            h = requests.get(url + "/health",
-                             headers={"X-Runner-Token": tok, "X-Lada-Token": tok},
-                             timeout=4).json()
+            h = runner_health(url, c.get("token", ""))
         except Exception:  # noqa: BLE001 - offline node
             return None
         if op not in (h.get("ops") or []) or h.get("paused"):
@@ -1210,6 +1223,7 @@ def process_to_review(stash, cfg, scene_id, progress=None, log_cb=None):
 
         p(1.0, "Preview ready")
         return {
+            "result": result_facts(stash, scene, review_id, dest),
             "orig_scene_id": scene["id"],
             "orig_path": input_path,
             "output_path": dest,
@@ -1219,6 +1233,27 @@ def process_to_review(stash, cfg, scene_id, progress=None, log_cb=None):
     finally:
         for d in stage_dirs:
             shutil.rmtree(d, ignore_errors=True)
+
+
+def result_facts(stash, scene, review_id, dest):
+    """What the finished preview did to the video, for the Review page: duration (s), heights
+    (px) and sizes (bytes) before and after. Best effort: a fact Stash cannot give is left out."""
+    src = ((scene.get("files") or [{}])[0]) or {}
+    out = {"duration": src.get("duration"), "from_height": src.get("height"), "from_bytes": src.get("size")}
+    try:
+        out["to_bytes"] = os.path.getsize(dest)
+    except OSError:
+        pass
+    if review_id:
+        try:
+            made = stash.find_scene(int(review_id), fragment="files { height size duration }") or {}
+            f = ((made.get("files") or [{}])[0]) or {}
+            out["to_height"] = f.get("height")
+            out["to_bytes"] = f.get("size") or out.get("to_bytes")
+            out["duration"] = f.get("duration") or out["duration"]
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"Could not read the preview's facts: {exc}")
+    return {k: v for k, v in out.items() if v}
 
 
 def replace_original(stash, cfg, info, progress=None):

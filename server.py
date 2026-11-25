@@ -24,6 +24,7 @@ discarded, error.
 import os
 import re
 import sys
+import gzip
 import json
 import time
 import uuid
@@ -37,6 +38,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import core
+import events
 import cloud_api
 import cloud_jasna
 
@@ -49,8 +51,8 @@ logging.basicConfig(
 
 TOKEN = os.environ.get("WORKER_TOKEN", "")
 PORT = core._int(os.environ.get("PORT", "8710"), 8710)
-WEBUI_DIR = os.environ.get(
-    "WEBUI_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "webui")
+WEBUI_DIR = os.environ.get(      # the built dashboard (web/ -> `npm run build`)
+    "WEBUI_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "dist")
 )
 STASH_URL_RAW = os.environ.get("STASH_URL", "")
 STASH_API_KEY = os.environ.get("STASH_API_KEY", "")
@@ -95,6 +97,8 @@ def stash_gql(query, variables=None):
     return j["data"]
 
 # Per-request overrides the UI may send -> cfg keys.
+SCENE_SORTS = ("date", "created_at", "file_mod_time", "title", "random")
+
 OVERRIDES = {
     "backend": "backend",                  # decensor | upscale | transcode | command
     "post_upscale": "postUpscale",         # decensor: chain decensor -> upscale on the runner
@@ -173,23 +177,63 @@ def merged_runners():
     return list(seen.values())
 
 
+def wake_eta():
+    """Seconds a woken runner is given to answer (the same budget job routing waits)."""
+    return core._int(core.config_from_env().get("runnerWakeSecs"), 120)
+
+
+def _runner_gpu_facts(name, label):
+    """(GPU name, VRAM in GB) for the runner card: the name a runner reports, the size from the
+    meter poll. Either may be unknown."""
+    with _gpus_lock:
+        row = next((r for r in _gpus if r.get("name") == name), None)
+    mem = ((row or {}).get("gpu") or {}).get("mem_total")
+    return label or None, (round(mem / 1024.0) if mem else None)
+
+
+def _runner_qualities(ops, engines):
+    """Quality levels a runner offers for decensoring: all four with Jasna, one with Lada."""
+    if ops is not None and "decensor" not in ops:
+        return None
+    eng = (engines or {}).get("decensor")
+    if eng == "jasna":
+        return ["fast", "balanced", "high", "max"]
+    return ["fast"] if eng else None
+
+
+def _runner_queue_eta(name):
+    """Seconds until a runner is free of the job it is running (0 when idle), None if unknown."""
+    with _jobs_lock:
+        etas = [j.get("eta") for j in _jobs.values() if j.get("state") == "running" and j.get("runner") == name]
+    if not etas:
+        return 0
+    return int(max(etas)) if all(e is not None for e in etas) else None
+
+
 def probe_runner(r):
     """Live status for one runner (for the dashboard list)."""
     import requests
 
     url = str(r.get("url", "")).rstrip("/")
+    can_wake = bool(r.get("mac"))
     out = {"name": r.get("name") or url, "url": url, "ops": r.get("ops"),
            "engines": r.get("engines"),
            "prefer": r.get("prefer") or [], "source": r.get("_source", "manual"),
-           "online": False, "busy": None, "node": None, "kind": None, "note": None}
+           "online": False, "busy": None, "node": None, "kind": None, "note": None,
+           "asleep": False, "can_wake": can_wake, "wake_eta_s": None, "queue_eta_s": None,
+           "gpu": None, "vram_gb": None, "qualities": None}
     if not url:
         return out
     tok = r.get("token") or os.environ.get("WORKER_TOKEN", "")
     try:
-        h = requests.get(url + "/health", headers={"X-Runner-Token": tok, "X-Lada-Token": tok}, timeout=4).json()
+        h = core.runner_health(url, tok)
+        label = next((ln.get("gpu") for ln in (h.get("lanes") or {}).values() if ln.get("gpu")), None)
         out.update(online=True, busy=h.get("busy"), node=h.get("node"),
                    kind=h.get("kind"), ops=h.get("ops") or r.get("ops"),
                    engines=h.get("engines") or r.get("engines"), paused=h.get("paused"))
+        out["gpu"], out["vram_gb"] = _runner_gpu_facts(out["name"], label)
+        out["qualities"] = _runner_qualities(out["ops"], out["engines"])
+        out["queue_eta_s"] = _runner_queue_eta(out["name"])
     except Exception:  # noqa: BLE001 - maybe reachable but token-gated
         try:
             p = requests.get(url + "/ping", timeout=3).json()
@@ -198,9 +242,28 @@ def probe_runner(r):
                            ops=p.get("ops") or r.get("ops"),
                            engines=p.get("engines") or r.get("engines"), note="token mismatch")
         except Exception:  # noqa: BLE001
-            if r.get("mac"):
-                out["note"] = "asleep - wakes when a job needs it"
+            if can_wake:
+                out.update(asleep=True, note="asleep - wakes when a job needs it",
+                           wake_eta_s=wake_eta())
     return out
+
+
+def runners_snapshot():
+    """Every routable runner with its live status: the list GET /api/runners and the event
+    stream both send."""
+    from concurrent.futures import ThreadPoolExecutor
+    rs = merged_runners()
+    # resolve_runner also treats RUNNER_URL as a candidate ("default"); surface
+    # it here too (deduped by url) so the dashboard's pickers + enable gate see
+    # every routable node, not just registered ones.
+    runner_url = (os.environ.get("RUNNER_URL") or os.environ.get("LADA_URL") or "").strip().rstrip("/")
+    if runner_url and not any(str(r.get("url", "")).rstrip("/") == runner_url for r in rs):
+        rs = rs + [{"name": "default", "url": runner_url,
+                    "token": (os.environ.get("RUNNER_TOKEN") or os.environ.get("LADA_TOKEN")
+                              or os.environ.get("WORKER_TOKEN", "")),
+                    "_source": "env"}]
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        return list(ex.map(probe_runner, rs))
 
 
 def discover_runners(timeout=0.5):
@@ -296,6 +359,56 @@ def job_log_since(job_id, after):
         if not dq:
             return []
         return [dict(x) for x in dq if x["seq"] > after]
+
+
+def _running_ids():
+    with _jobs_lock:
+        return [j["id"] for j in _jobs.values() if j.get("state") in ("running", "replacing")]
+
+
+def log_batches(cursors):
+    """New log lines of each running job since `cursors` (job id -> last seq), as event
+    payloads; advances the cursors and forgets jobs that are no longer running."""
+    ids = _running_ids()
+    for gone in [j for j in cursors if j not in ids]:
+        del cursors[gone]
+    out = []
+    for jid in ids:
+        lines = job_log_since(jid, cursors.get(jid, 0))
+        if lines:
+            cursors[jid] = lines[-1]["seq"]
+            out.append({"job_id": jid, "cursor": lines[-1]["seq"], "lines": lines})
+    return out
+
+
+def log_snapshot():
+    """Every buffered line of every running job: what a client that just connected is sent."""
+    return [{"job_id": jid, "cursor": job_log_cursor(jid), "lines": lines}
+            for jid in _running_ids() for lines in [job_log_since(jid, 0)] if lines]
+
+
+def gpus_snapshot():
+    with _gpus_lock:
+        return [dict(r) for r in _gpus]
+
+
+def cloud_snapshot():
+    return cloud_api.status(cloud_jasna.cloud())[1]
+
+
+_hub = None
+_hub_lock = threading.Lock()
+
+
+def event_hub():
+    """The process's one event hub (GET /api/events)."""
+    global _hub
+    with _hub_lock:
+        if _hub is None:
+            _hub = events.EventHub([("jobs", jobs_snapshot, 0.5), ("gpus", gpus_snapshot, 1.0),
+                                    ("runners", runners_snapshot, 5.0), ("cloud", cloud_snapshot, 10.0)],
+                                   logs=(log_batches, log_snapshot))
+        return _hub
 
 
 def raw_log_sink(job_id):
@@ -619,7 +732,45 @@ def get_stash():
     return _stash
 
 
-def new_job(scene_id, overrides, cloud=None):
+_CLOUD_QUALITY = {"close-ups": "fast", "detail": "balanced", "detail-close-ups": "high"}
+
+
+def job_op(overrides, cloud=None):
+    """The dashboard's name for what a job does: decensor | decensor_up | upscale | transcode."""
+    if cloud:
+        return {"upscale": "upscale", "decensor+upscale": "decensor_up"}.get(cloud.get("op"), "decensor")
+    backend = overrides.get("backend") or core.config_from_env().get("backend")
+    if backend in ("upscale", "transcode"):
+        return backend
+    post = overrides.get("post_upscale")
+    return "decensor_up" if (cloud_jasna.truthy(post) if post is not None else core.env_bool("POST_UPSCALE", False)) \
+        else "decensor"
+
+
+def job_quality(overrides, cloud=None):
+    """fast | balanced | high for a decensor job (None where the idea does not apply)."""
+    if cloud:
+        return _CLOUD_QUALITY.get(cloud.get("preset"))
+    if job_op(overrides) not in ("decensor", "decensor_up"):
+        return None
+    rest = str(overrides.get("restoration") or "")
+    if rest in ("basicvsrpp", "ltx-basic"):
+        return "fast"
+    if rest.startswith("ltx"):
+        return "balanced" if overrides.get("ltx_auto_split") else "high"
+    return None
+
+
+def scene_title(scene_id):
+    """A scene's display name (title, else file name) or None; never raises."""
+    try:
+        (meta,) = cloud_api.scene_metas(stash_gql, [scene_id])
+        return (meta or {}).get("title") or None
+    except Exception:  # noqa: BLE001 - a name is nice to have, never a reason to refuse a job
+        return None
+
+
+def new_job(scene_id, overrides, cloud=None, title=None):
     job_id = uuid.uuid4().hex[:12]
     job = {
         "id": job_id,
@@ -639,6 +790,11 @@ def new_job(scene_id, overrides, cloud=None):
         "eta": None,
         "paused": False,
         "started_at": None,
+        "created": time.time(),
+        "scene_title": title,
+        "op": job_op(overrides, cloud),
+        "quality": job_quality(overrides, cloud),
+        "result": None,
         "_overrides": overrides,
         "_info": None,
     }
@@ -646,7 +802,8 @@ def new_job(scene_id, overrides, cloud=None):
         job.update({"_cloud": cloud, "cloud": True, "cloud_est": cloud["est_usd"], "cloud_usd": 0.0,
                     "cloud_cap": cloud["cap"], "cloud_label": cloud["label"], "cloud_op": cloud.get("op"),
                     "cloud_gpu": cloud.get("gpu"), "cloud_offer_id": cloud.get("offer_id"),
-                    "cloud_provider": cloud.get("provider"), "cloud_hardware": cloud.get("hardware")})
+                    "cloud_provider": cloud.get("provider"), "cloud_hardware": cloud.get("hardware"),
+                    "cloud_est_usd": cloud["est_usd"], "_est_min": cloud.get("est_min")})
     with _jobs_lock:
         _jobs[job_id] = job
     return job
@@ -684,6 +841,35 @@ def public(job):
     return out
 
 
+def _queue_etas(jobs):
+    """Seconds each queued job waits before it can start: what the running job has left plus the
+    estimated minutes of the paid jobs ahead of it. Only given when every step of that is known."""
+    wait = 0
+    for j in jobs:
+        if j.get("state") in ("running", "replacing", "discarding"):
+            wait = None if (wait is None or j.get("eta") is None) else wait + j["eta"]
+    out = {}
+    for j in jobs:
+        if j.get("state") != "queued":
+            continue
+        out[j["id"]] = None if wait is None else int(wait)
+        own = j.get("_est_min")
+        wait = None if (wait is None or own is None) else wait + own * 60
+    return out
+
+
+def jobs_snapshot():
+    """Every job, oldest first, as the dashboard shows it."""
+    with _jobs_lock:
+        jobs = list(_jobs.values())
+        etas = _queue_etas(jobs)
+        rows = [public(j) for j in jobs]
+    for row in rows:
+        if row["id"] in etas:
+            row["eta"] = etas[row["id"]]
+    return rows
+
+
 def set_job(job_id, **fields):
     with _jobs_lock:
         job = _jobs.get(job_id)
@@ -702,7 +888,7 @@ def progress_cb(job_id):
                 last["msg"] = msg
                 push_log(job_id, msg, "event")
         if stats:
-            for k in ("stage", "frame", "total_frames", "fps", "eta", "indeterminate"):
+            for k in ("stage", "frame", "total_frames", "fps", "eta", "indeterminate", "cloud_phase"):
                 if stats.get(k) is not None:
                     fields[k] = stats[k]
         set_job(job_id, **fields)
@@ -738,7 +924,7 @@ def do_process(job):
         job_id, state="review_ready", progress=1.0, message="Preview ready to review",
         indeterminate=False,
         review_scene_id=info.get("review_scene_id"), output_path=info.get("output_path"),
-        _info=info, _ended_at=time.time(),
+        result=info.get("result") or None, _info=info, _ended_at=time.time(),
     )
 
 
@@ -802,6 +988,32 @@ def worker_loop():
 # HTTP
 # --------------------------------------------------------------------------- #
 
+_GZIP_TYPES = (".html", ".js", ".css", ".svg", ".json", ".webmanifest", ".txt")
+_gz_cache = {}                      # path -> (mtime_ns, size, gzipped bytes)
+
+
+def static_file(full, accept_gzip):
+    """(body, content type, is gzipped) for one file of the built dashboard. index.html gets the
+    worker token written in (it is how the dashboard signs itself in); gzipped copies of the
+    other text files are made once and kept until the file changes."""
+    ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
+    st = os.stat(full)
+    zip_it = accept_gzip and full.endswith(_GZIP_TYPES)
+    if zip_it and not full.endswith("index.html"):
+        hit = _gz_cache.get(full)
+        if hit and hit[:2] == (st.st_mtime_ns, st.st_size):
+            return hit[2], ctype, True
+    with open(full, "rb") as fh:
+        body = fh.read()
+    if full.endswith("index.html"):
+        body = body.replace(b"__WORKER_TOKEN__", TOKEN.encode())
+    if zip_it:
+        body = gzip.compress(body, 6, mtime=0)
+        if not full.endswith("index.html"):
+            _gz_cache[full] = (st.st_mtime_ns, st.st_size, body)
+    return body, ctype, zip_it
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "Stashify/1.0"
 
@@ -842,23 +1054,28 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def serve_static(self, raw):
-        """Serve the bundled WebUI SPA for any GET not under /api."""
+        """Serve the built dashboard for any GET not under /api: hashed files under assets/
+        cache for a year, index.html never (it carries the token and names the assets), and
+        text files go out gzipped when the browser accepts it. A path with no file extension
+        is a screen of the single-page app and gets index.html; a missing file does not."""
         rel = posixpath.normpath("/" + raw).lstrip("/") or "index.html"
-        full = os.path.join(WEBUI_DIR, rel.replace("/", os.sep))
         root = os.path.abspath(WEBUI_DIR)
-        if not os.path.abspath(full).startswith(root) or not os.path.isfile(full):
-            full = os.path.join(WEBUI_DIR, "index.html")  # SPA fallback for unknown routes
+        full = os.path.abspath(os.path.join(root, rel.replace("/", os.sep)))
+        if os.path.commonpath([full, root]) != root or not os.path.isfile(full):
+            if posixpath.splitext(rel)[1]:
+                return self._send(404, {"error": "not found"})
+            rel, full = "index.html", os.path.join(root, "index.html")
         try:
-            with open(full, "rb") as fh:
-                body = fh.read()
+            body, ctype, encoded = static_file(full, "gzip" in self.headers.get("Accept-Encoding", ""))
         except OSError:
             return self._send(404, {"error": "WebUI not installed on this worker"})
-        if full.endswith("index.html"):
-            body = body.replace(b"__WORKER_TOKEN__", TOKEN.encode())  # self-auth the dashboard
-        ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
         self.send_response(200)
         self.send_header("Content-Type", ctype)
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable" if rel.startswith("assets/")
+                         else "no-cache" if rel == "index.html" else "public, max-age=3600")
+        if encoded:
+            self.send_header("Content-Encoding", "gzip")
+        self.send_header("Vary", "Accept-Encoding")
         self._cors()
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -874,12 +1091,19 @@ class Handler(BaseHTTPRequestHandler):
             return v[0] if v else d
 
         sort = g("sort", "date")
+        if sort not in SCENE_SORTS:
+            return self._send(400, {"error": "sort must be one of " + ", ".join(SCENE_SORTS)})
+        direction = (g("dir", "") or ("ASC" if sort == "title" else "DESC")).upper()
+        if direction not in ("ASC", "DESC"):
+            return self._send(400, {"error": "dir must be asc or desc"})
+        if sort == "random":                     # a stable shuffle: the same seed gives the same order
+            sort = "random_" + (re.sub(r"\D", "", g("seed", "")) or "0")[:9]
         f = {
             "q": g("q", ""),
             "page": core._int(g("page", "1"), 1),
             "per_page": min(60, max(1, core._int(g("per_page", "36"), 36))),
             "sort": sort,
-            "direction": (g("dir", "") or ("ASC" if sort == "title" else "DESC")).upper(),
+            "direction": direction,
         }
         sf = {}
         want_tag = g("tag", "").strip()          # live tag filter from the dashboard
@@ -932,12 +1156,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(*cloud_api.status(cl))
         if path == "/api/cloud/offers":
             meta = None
-            if query.get("scene"):         # cost the market for this scene (and the operation asked for)
+            # cost the market for one scene, or for several (`scene_ids`, comma-separated): each
+            # is its own rental on the machine, so the estimate is their sum
+            ids = [i.strip() for i in (query.get("scene_ids") or query.get("scene") or "").split(",") if i.strip()][:20]
+            if ids:
                 try:
-                    (meta,) = cloud_api.scene_metas(stash_gql, [query["scene"]])
+                    meta = cloud_api.scene_metas(stash_gql, ids)
                 except Exception as exc:  # noqa: BLE001
                     return self._send(502, {"error": "stash: " + cloud_jasna.redact(exc)})
-                if meta is None:
+                if any(m is None for m in meta):
                     return self._send(404, {"error": "Scene not found in Stash.", "code": "no_scene"})
             return self._send(*cloud_api.offers(cl, query, meta))
         if path == "/api/cloud/quote":
@@ -974,7 +1201,7 @@ class Handler(BaseHTTPRequestHandler):
             op = payload["op"]
             overrides = dict(overrides, backend="upscale" if op == "upscale" else "decensor",
                              post_upscale=op == "decensor+upscale")
-            job = new_job(scene_id, overrides, cloud=payload)
+            job = new_job(scene_id, overrides, cloud=payload, title=(meta or {}).get("title"))
             _work.put(("process", job["id"]))
         return self._send(202, public(job))
 
@@ -1001,8 +1228,7 @@ class Handler(BaseHTTPRequestHandler):
             with _gpu_lock:
                 return self._send(200, dict(_gpu))
         if path == "/api/gpus":                 # per-runner GPU rows for the dashboard meters
-            with _gpus_lock:
-                return self._send(200, [dict(r) for r in _gpus])
+            return self._send(200, gpus_snapshot())
         # Media proxies for the dashboard's <img>/<video> (which can't send the
         # token header) — left open; the worker sits behind your proxy's auth.
         m = re.match(r"^/api/(img|vid)/(\d+)$", path)
@@ -1093,6 +1319,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.wfile.write(body)
         if not self._authed():
             return self._send(401, {"error": "bad token"})
+        if path == "/api/events":
+            return events.serve(self, event_hub())
         if path.startswith("/api/cloud/"):
             return self.cloud_get(path)
         if path == "/api/scenes":
@@ -1107,23 +1335,9 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 return self._send(502, {"error": "stash: " + str(exc)})
         if path == "/api/jobs":
-            with _jobs_lock:
-                data = [public(j) for j in _jobs.values()]
-            return self._send(200, data)
+            return self._send(200, jobs_snapshot())
         if path == "/api/runners":
-            from concurrent.futures import ThreadPoolExecutor
-            rs = merged_runners()
-            # resolve_runner also treats RUNNER_URL as a candidate ("default"); surface
-            # it here too (deduped by url) so the dashboard's pickers + enable gate see
-            # every routable node, not just registered ones.
-            runner_url = (os.environ.get("RUNNER_URL") or os.environ.get("LADA_URL") or "").strip().rstrip("/")
-            if runner_url and not any(str(r.get("url", "")).rstrip("/") == runner_url for r in rs):
-                rs = rs + [{"name": "default", "url": runner_url,
-                            "token": (os.environ.get("RUNNER_TOKEN") or os.environ.get("LADA_TOKEN")
-                                      or os.environ.get("WORKER_TOKEN", "")),
-                            "_source": "env"}]
-            with ThreadPoolExecutor(max_workers=8) as ex:
-                return self._send(200, list(ex.map(probe_runner, rs)))
+            return self._send(200, runners_snapshot())
         if path == "/api/route-preview":
             # "which runner + engine would handle this right now" for the dashboard,
             # honoring the same targetEngine/targetRunner pins a real job would use.
@@ -1177,7 +1391,7 @@ class Handler(BaseHTTPRequestHandler):
             overrides = {k: body[k] for k in OVERRIDES if k in body}
             if body.get("cloud_preset") or cloud_jasna.truthy(body.get("cloud")):
                 return self.submit_cloud(str(scene_id), body, overrides)
-            job = new_job(str(scene_id), overrides)
+            job = new_job(str(scene_id), overrides, title=scene_title(str(scene_id)))
             _work.put(("process", job["id"]))
             return self._send(202, public(job))
 
@@ -1187,17 +1401,20 @@ class Handler(BaseHTTPRequestHandler):
             url = str(b.get("url", "")).rstrip("/")
             if not url.startswith("http"):
                 return self._send(400, {"error": "a valid http(s) url is required"})
-            # discovered/added runners usually share the fleet token; without a
-            # default they'd probe online (/ping is unauth) but 401 on dispatch
-            entry = {"name": b.get("name") or url, "url": url,
-                     "token": b.get("token") or os.environ.get("WORKER_TOKEN", ""),
-                     "ops": b.get("ops") or None, "prefer": b.get("prefer") or []}
-            if b.get("mac"):
-                entry["mac"] = b["mac"]
             with _runners_lock:
-                store = [r for r in load_store() if str(r.get("url", "")).rstrip("/") != url]
-                store.append(entry)
-                save_store(store)
+                store = load_store()
+                old = next((r for r in store if str(r.get("url", "")).rstrip("/") == url), {})
+                # a field the edit leaves out keeps what is stored; a runner added without a
+                # token of its own gets the fleet token (it probes online either way, but would
+                # 401 on dispatch)
+                entry = {"name": b.get("name") or old.get("name") or url, "url": url,
+                         "token": b.get("token") or old.get("token") or os.environ.get("WORKER_TOKEN", ""),
+                         "ops": (b["ops"] or None) if "ops" in b else old.get("ops"),
+                         "prefer": b["prefer"] or [] if "prefer" in b else old.get("prefer") or []}
+                mac = b["mac"] if "mac" in b else old.get("mac")
+                if mac:
+                    entry["mac"] = mac
+                save_store([r for r in store if r is not old] + [entry])
             return self._send(201, probe_runner(dict(entry, _source="manual")))
         if path == "/api/runners/remove":
             url = str(self._body().get("url", "")).rstrip("/")
@@ -1206,8 +1423,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True})
         if path == "/api/runners/test":
             b = self._body()
-            return self._send(200, probe_runner({"url": b.get("url"), "token": b.get("token"),
-                                                 "name": b.get("name"), "_source": "test"}))
+            r = probe_runner({"url": b.get("url"), "token": b.get("token"), "name": b.get("name"), "_source": "test"})
+            return self._send(200, {"ok": r["online"], "error": None if r["online"] and not r["note"]
+                                    else (r["note"] or "Could not reach it."),
+                                    "ops": r["ops"], "engines": r["engines"], "node": r["node"], "kind": r["kind"]})
+        if path == "/api/runners/wake":                # a Wake-on-LAN packet for a sleeping runner
+            url = str(self._body().get("url", "")).rstrip("/")
+            entry = next((r for r in merged_runners() if str(r.get("url", "")).rstrip("/") == url), None)
+            if entry is None:
+                return self._send(404, {"error": "no such runner"})
+            if not entry.get("mac"):
+                return self._send(409, {"error": "This runner has no MAC address, so it cannot be woken."})
+            if not core.wake_runner(entry):
+                return self._send(502, {"error": "The wake packet could not be sent."})
+            return self._send(200, {"ok": True, "eta_s": wake_eta()})
         if path == "/api/runners/discover":
             found = discover_runners()
             known = {str(r.get("url", "")).rstrip("/") for r in merged_runners()}

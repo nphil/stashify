@@ -1248,8 +1248,12 @@ class PlanRunTest(JasnaCase):
     def test_the_run_names_the_machine_it_rented(self):
         self.run_job()
         (rented,) = self.rented()
-        last = self.stamps[-1]
+        last = [s for s in self.stamps if "cloud_usd" in s][-1]
         self.assertEqual((last["runner"], last["engine"], last["cloud"]), ("Vast.ai \u00b7 RTX 4090", "jasna", True))
+        self.assertEqual((last["provider"], last["cloud_tier"]), ("Vast.ai", "dc"))
+        phases = [s["cloud_phase"] for s in self.stamps if "cloud_phase" in s]
+        order = [p for i, p in enumerate(phases) if p not in phases[:i]]
+        self.assertEqual(order, ["boot", "upload", "run", "download", "cleanup"])
         self.assertEqual((last["cloud_gpu"], last["cloud_provider"], last["cloud_offer_id"]),
                          ("RTX 4090", "vast", rented))
         self.assertGreater(last["cloud_cap"], 0)
@@ -1259,14 +1263,14 @@ class PlanRunTest(JasnaCase):
         plan = cj.plan_from_body({"offer_id": "14", "provider": "vast"})
         self.run_job(self.cfg_for(plan))
         self.assertEqual(self.rented(), ["14"])
-        self.assertEqual(self.stamps[-1]["cloud_offer_id"], "14")
+        self.assertEqual([s for s in self.stamps if "cloud_offer_id" in s][-1]["cloud_offer_id"], "14")
         self.assertClean()
 
     def test_a_chosen_gpu_is_the_one_rented(self):
         self.vast.offers = market()
         self.run_job(self.cfg_for(cj.plan_from_body({"gpu": "RTX 3090"})))
         self.assertEqual(self.rented(), ["13"])
-        self.assertEqual(self.stamps[-1]["cloud_gpu"], "RTX 3090")
+        self.assertEqual([s for s in self.stamps if "cloud_gpu" in s][-1]["cloud_gpu"], "RTX 3090")
 
     def test_a_picked_machine_that_was_taken_is_never_replaced(self):
         self.vast.offers = market()
