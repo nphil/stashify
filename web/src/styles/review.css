@@ -1,0 +1,36 @@
+/* ---------- review compare stage ---------- */
+.cmp { position: relative; aspect-ratio: 16 / 9; border-radius: var(--lu-radius-card); overflow: hidden; --x: 50%; background: var(--lu-material-well); }
+.cmp .lay { position: absolute; inset: 0; }
+.cmp .lay.after { clip-path: inset(0 0 0 var(--x)); }
+.cmp .grip { position: absolute; top: 0; bottom: 0; left: var(--x); width: 0; z-index: 2; }
+.cmp .grip::before { content: ""; position: absolute; top: 0; bottom: 0; left: -1px; width: 2px; background: var(--lu-ink); opacity: .9; }
+.cmp .grip span { position: absolute; top: 50%; left: 0; display: grid; place-items: center; width: 44px; height: 44px; margin: -22px 0 0 -22px; border-radius: var(--lu-radius-pill); background: var(--lu-over-pic); color: var(--lu-ink); border: 1px solid var(--lu-edge-raised); }
+.cmp .wipe { position: absolute; inset: 0; z-index: 3; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: ew-resize; }
+.cmp:has(.wipe:focus-visible) .grip span { background: var(--lu-glass-raised); background-image: var(--lu-sheen); border-color: var(--lu-edge-raised); box-shadow: var(--lu-shadow-pressed); transform: scale(var(--lu-profile-focus-scale, 1.02)); }
+.cmp-lbl { display: flex; justify-content: space-between; gap: var(--lu-space-3); padding: var(--lu-space-2) var(--lu-space-1) 0; color: var(--lu-ink-2); font: 500 var(--lu-type-label)/1.3 var(--lu-font); }
+.cmp-lbl b { color: var(--lu-ink); font-weight: 600; }
+.scene { position: absolute; inset: 0; background: radial-gradient(64% 34% at 22% 100%, var(--c) 0 52%, transparent 74%), radial-gradient(70% 38% at 86% 104%, color-mix(in srgb, var(--c) 80%, var(--lu-ink)) 0 46%, transparent 72%), radial-gradient(11% 19% at 76% 26%, color-mix(in srgb, var(--lu-ink) 22%, transparent), transparent 80%), linear-gradient(170deg, var(--a), var(--b)); }
+.scene.big { --a: color-mix(in srgb, var(--lu-info) 56%, var(--lu-canvas)); --b: color-mix(in srgb, var(--lu-accent) 36%, var(--lu-canvas)); --c: color-mix(in srgb, var(--lu-accent) 26%, var(--lu-canvas)); }
+.patch { position: absolute; left: 34%; top: 33%; width: 26%; height: 38%; border-radius: var(--lu-radius-control); overflow: hidden; }
+.patch.blocks { display: grid; grid-template-columns: repeat(9, 1fr); grid-template-rows: repeat(8, 1fr); }
+.patch.blocks i { background: color-mix(in srgb, var(--lu-ink) calc(var(--l) * 1%), var(--lu-canvas)); }
+.patch.clean { background: radial-gradient(70% 60% at 42% 36%, color-mix(in srgb, var(--lu-ink) 30%, transparent), transparent 72%), radial-gradient(60% 70% at 70% 74%, color-mix(in srgb, var(--lu-live) 28%, transparent), transparent 74%), linear-gradient(160deg, color-mix(in srgb, var(--lu-ink) 16%, var(--lu-canvas)), color-mix(in srgb, var(--lu-ink) 8%, var(--lu-canvas))); }
+.tline { position: relative; height: 36px; display: flex; align-items: center; }
+.tline .tk { position: relative; flex: 1 1 auto; height: 10px; border-radius: var(--lu-radius-pill); background: var(--lu-track-off); }
+.tline .tk i { position: absolute; top: 0; bottom: 0; border-radius: var(--lu-radius-pill); background: var(--lu-accent-fill); opacity: .75; }
+.tline .tk em { position: absolute; top: -5px; width: 4px; height: 20px; margin-left: -2px; border-radius: var(--lu-radius-pill); background: var(--lu-ink); }
+.cmp .wipe { touch-action: pan-y; outline: none; }
+.cmp .grip span { pointer-events: none; }
+.cmp .lay video { object-fit: contain; }
+.cmp-bar { justify-content: space-between; padding-bottom: var(--lu-space-1); }
+.tline .seek { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; appearance: none; -webkit-appearance: none; background: transparent; }
+.tline .seek::-webkit-slider-thumb { appearance: none; -webkit-appearance: none; width: 0; height: 0; border: 0; }
+.tline .seek::-moz-range-thumb { width: 0; height: 0; border: 0; }
+.tline:has(.seek:focus-visible) .tk { box-shadow: var(--lu-shadow-pressed); }
+.tline:has(.seek:focus-visible) .tk em { transform: scaleY(1.3); }
+.banner.pos { --tone: var(--lu-positive); --tone-text: var(--lu-positive-text); }
+.rdecided { margin-bottom: var(--lu-space-4); }
+.rsw { padding-bottom: var(--lu-space-3); }
+.rsw .chip { max-width: 100%; }
+.skel.rsk-stage { display: block; height: auto; aspect-ratio: 16 / 9; width: min(100%, calc((100vh - 380px) * 16 / 9)); border-radius: var(--lu-radius-card); }
+

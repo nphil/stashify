@@ -1,0 +1,73 @@
+/* ---------- scene thumbnails: neutral gradient blocks, no real images ---------- */
+.tn { --a: var(--lu-ink); --b: var(--lu-canvas); --c: var(--lu-canvas);
+  background: radial-gradient(110% 70% at 20% 118%, var(--c) 0 46%, transparent 70%), radial-gradient(34% 46% at 74% 30%, color-mix(in srgb, var(--lu-ink) 14%, transparent), transparent 70%), linear-gradient(155deg, var(--a), var(--b)); }
+.tn-1 { --a: color-mix(in srgb, var(--lu-info) 52%, var(--lu-canvas)); --b: color-mix(in srgb, var(--lu-accent) 34%, var(--lu-canvas)); --c: color-mix(in srgb, var(--lu-accent) 24%, var(--lu-canvas)); }
+.tn-2 { --a: color-mix(in srgb, var(--lu-warning) 46%, var(--lu-canvas)); --b: color-mix(in srgb, var(--lu-live) 30%, var(--lu-canvas)); --c: color-mix(in srgb, var(--lu-live) 22%, var(--lu-canvas)); }
+.tn-3 { --a: color-mix(in srgb, var(--lu-accent) 50%, var(--lu-canvas)); --b: color-mix(in srgb, var(--lu-info) 26%, var(--lu-canvas)); --c: color-mix(in srgb, var(--lu-info) 20%, var(--lu-canvas)); }
+.tn-4 { --a: color-mix(in srgb, var(--lu-positive) 40%, var(--lu-canvas)); --b: color-mix(in srgb, var(--lu-warning) 28%, var(--lu-canvas)); --c: color-mix(in srgb, var(--lu-positive) 24%, var(--lu-canvas)); }
+.tn-5 { --a: color-mix(in srgb, var(--lu-live) 40%, var(--lu-canvas)); --b: color-mix(in srgb, var(--lu-accent) 34%, var(--lu-canvas)); --c: color-mix(in srgb, var(--lu-accent) 22%, var(--lu-canvas)); }
+.tn-6 { --a: color-mix(in srgb, var(--lu-ink) 24%, var(--lu-canvas)); --b: color-mix(in srgb, var(--lu-info) 28%, var(--lu-canvas)); --c: color-mix(in srgb, var(--lu-ink) 14%, var(--lu-canvas)); }
+.pill-pic { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 var(--lu-space-2); border-radius: var(--lu-radius-pill); background: var(--lu-over-pic); color: var(--lu-ink); font: 700 var(--lu-type-caption)/1 var(--lu-font); }
+.pill-pic .ico { --ico: 14px; }
+.pill-pic.ok { color: var(--lu-positive-text); }
+
+/* scene tile (selectable): ONE button, pressed = selected. Nothing interactive lives inside it. */
+.tile { position: relative; display: flex; flex-direction: column; gap: var(--lu-space-2); min-width: 0; padding: 0; border: 0; background: transparent; text-align: left; border-radius: var(--lu-radius-tile); }
+.tile .frame { position: relative; display: block; order: -1; border-radius: var(--lu-radius-tile); }
+.tile .pic { position: relative; display: block; aspect-ratio: 16 / 9; border-radius: var(--lu-radius-tile); overflow: hidden; transition: transform var(--lu-motion-card) var(--lu-ease), border-radius var(--lu-motion-card) var(--lu-ease); }
+.tile .pic .thumb { position: absolute; inset: 0; }
+.tile .pic::after { content: ""; position: absolute; inset: 0; background: var(--lu-sheen); pointer-events: none; }
+.tile .chk { position: absolute; top: var(--lu-space-3); left: var(--lu-space-3); z-index: 1; display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--lu-radius-pill); border: 2px solid var(--lu-ink); background: var(--lu-over-pic); color: transparent; }
+.tile .chk .ico { --ico: 16px; stroke-width: 2.4; }
+.tile[aria-pressed="true"] .frame { background: var(--lu-glass-raised); box-shadow: inset 0 0 0 1px var(--lu-edge-raised); }
+.tile[aria-pressed="true"] .pic { transform: scale(.9); }
+.tile[aria-pressed="true"] .chk { background: var(--lu-accent-fill); border-color: var(--lu-accent-fill); color: var(--lu-accent-fill-ink); }
+.tile:hover .pic { transform: scale(.985); }
+.tile[aria-pressed="true"]:hover .pic { transform: scale(.9); }
+.tile .pp { position: absolute; z-index: 1; }
+.tile .pp.tr { top: var(--lu-space-3); right: var(--lu-space-3); } .tile .pp.br { bottom: var(--lu-space-3); right: var(--lu-space-3); } .tile .pp.bl { bottom: var(--lu-space-3); left: var(--lu-space-3); }
+/* (the pills sit inside .pic, which already scales) */
+.tile .tt, .tile .ts { display: block; padding: 0 var(--lu-space-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tile .tt { font: 600 var(--lu-type-label)/1.3 var(--lu-font); }
+.tile .ts { color: var(--lu-ink-2); font: var(--lu-type-caption-weight) var(--lu-type-caption)/1.3 var(--lu-font); }
+.tile:focus-visible { transform: none; background: transparent; box-shadow: none; border-color: transparent; }
+.tile:focus-visible .frame { background: var(--lu-glass-raised); box-shadow: var(--lu-shadow-pressed); }
+.tile:focus-visible .pic { transform: scale(.94); }
+
+/* ---------- library page: tools row ---------- */
+.lib-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--lu-space-2); padding-bottom: var(--lu-space-4); }
+.lib-tools .field { flex: 1 1 280px; max-width: 480px; }
+.lib-tools .sel { display: inline-flex; align-items: center; gap: var(--lu-space-1); }
+.lib-tools .sel .cap { padding: 0 var(--lu-space-1); }
+html[data-lu-profile="phone"] .lib-tools .field { flex-basis: 100%; max-width: none; }
+.lib { position: relative; }
+.lib-live { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+
+/* popover menus (sort, size, tags): anchored under their chip; a bottom sheet on phones */
+.lib-menuwrap { position: relative; display: inline-flex; }
+.lib-menu { position: absolute; top: calc(100% + var(--lu-space-2)); left: 0; z-index: var(--lu-z-popup); min-width: 264px; max-width: calc(100vw - var(--lu-edge-x) * 2); max-height: min(560px, 70dvh); overflow: auto; scrollbar-width: thin; padding: var(--lu-space-2); display: flex; flex-direction: column; gap: var(--lu-space-1); }
+.lib-menu .hd { padding: var(--lu-space-2) var(--lu-space-3) var(--lu-space-1); color: var(--lu-ink-2); font: 600 var(--lu-type-caption)/1.2 var(--lu-font); }
+.lib-menu .opt { min-height: var(--h-btn); padding: var(--lu-space-2) var(--lu-space-3); }
+.lib-menu .opt .ico { color: var(--lu-accent-text); flex: none; }
+.lib-menu .opt .oh { font-size: var(--lu-type-caption); }
+.lib-menu .opt .nm { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 500 var(--lu-type-label)/1.25 var(--lu-font); }
+.lib-menu .opt[aria-checked="true"] .nm { font-weight: 600; }
+.lib-menu .opt .n { flex: none; color: var(--lu-ink-2); font: 500 var(--lu-type-caption)/1 var(--lu-font); font-variant-numeric: tabular-nums; }
+.lib-menu .none { padding: var(--lu-space-3); color: var(--lu-ink-2); font: 500 var(--lu-type-label)/1.4 var(--lu-font); }
+.lib-menu .dir { padding: var(--lu-space-2) var(--lu-space-1) var(--lu-space-1); }
+.lib-menu .dir .seg { display: flex; } .lib-menu .dir .seg button { flex: 1 1 0; }
+.lib-menu .field { flex: none; margin-bottom: var(--lu-space-1); }
+html[data-lu-profile="phone"] .lib-menuwrap { position: static; }
+html[data-lu-profile="phone"] .lib-menu { position: fixed; top: auto; left: 0; right: 0; bottom: 0; min-width: 0; max-width: none; max-height: 72dvh; padding: var(--lu-space-3) var(--lu-space-3) calc(var(--lu-space-3) + env(safe-area-inset-bottom, 0px)); border-radius: var(--lu-radius-sheet) var(--lu-radius-sheet) 0 0; background: var(--lu-reading); box-shadow: var(--lu-shadow-raised); animation: drawer var(--lu-motion-layer) var(--lu-ease) both; }
+
+/* ---------- library page: the windowed grid ---------- */
+.lib-win { min-height: 1px; gap: var(--lu-space-4); }
+html[data-lu-profile="phone"] .lib-win { gap: var(--lu-space-3); }
+.grid { display: grid; grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr)); gap: inherit; }
+.grid.busy { opacity: .6; transition: opacity var(--lu-motion-label) var(--lu-ease); }
+.sk-tile { display: flex; flex-direction: column; gap: var(--lu-space-2); min-width: 0; }
+.sk-tile .sk-pic { display: block; aspect-ratio: 16 / 9; height: auto; border-radius: var(--lu-radius-tile); }
+.sk-tile .skel.s { margin: 0 var(--lu-space-1); }
+.lib-state { display: flex; flex-direction: column; align-items: center; gap: var(--lu-space-3); padding: var(--lu-space-8) var(--lu-space-4); text-align: center; color: var(--lu-ink-2); font: 500 var(--lu-type-body)/1.4 var(--lu-font); }
+.lib-state b { color: var(--lu-ink); font: 600 var(--lu-type-title, var(--lu-type-body))/1.3 var(--lu-font); }
+.lib-more { display: flex; align-items: center; justify-content: center; gap: var(--lu-space-3); padding: var(--lu-space-5) 0; color: var(--lu-ink-2); font: 500 var(--lu-type-label)/1.3 var(--lu-font); }

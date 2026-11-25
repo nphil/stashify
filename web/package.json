@@ -1,0 +1,21 @@
+{
+  "name": "stashify-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Stashify dashboard (Svelte 5 + TypeScript + Vite). Served as static files by the Python server.",
+  "scripts": {
+    "themes": "node scripts/themes.mjs",
+    "dev": "node scripts/themes.mjs && vite",
+    "build": "node scripts/themes.mjs && vite build",
+    "check": "node scripts/themes.mjs --check && svelte-check --tsconfig ./tsconfig.json",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.3.2",
+    "svelte": "^5.59.1",
+    "svelte-check": "^4.7.8",
+    "typescript": "~5.9.3",
+    "vite": "^8.3.8"
+  }
+}

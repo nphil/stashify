@@ -1,0 +1,17 @@
+/* ---------- dialog (top layer, opaque backdrop) ---------- */
+dialog.dlg { padding: 0; border: 1px solid var(--lu-material-edge); border-radius: var(--lu-radius-sheet); background: var(--lu-reading); color: var(--lu-ink); box-shadow: var(--lu-shadow-raised); width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; }
+dialog.dlg::backdrop { background: var(--lu-scrim-hides); }
+dialog.dlg[open] { animation: rise var(--lu-motion-layer) var(--lu-ease) both; }
+.dlg .dh { padding: var(--lu-space-6) var(--lu-space-6) var(--lu-space-3); }
+.dlg .db { padding: 0 var(--lu-space-6) var(--lu-space-4); }
+.dlg .df { display: flex; flex-wrap: wrap; gap: var(--lu-space-2); justify-content: flex-end; padding: var(--lu-space-3) var(--lu-space-6) var(--lu-space-6); }
+html[data-lu-profile="phone"] .dlg .df { flex-direction: column; align-items: stretch; padding-inline: var(--lu-space-5); }
+html[data-lu-profile="phone"] .dlg .df .btn { justify-content: center; }
+.facts { display: grid; grid-template-columns: auto 1fr; gap: var(--lu-space-2) var(--lu-space-5); align-items: baseline; font: 500 var(--lu-type-label)/1.35 var(--lu-font); }
+.facts dt { color: var(--lu-ink-2); }
+.facts dd { text-align: right; font-weight: 600; }
+.facts dd small { display: block; color: var(--lu-ink-2); font: 400 var(--lu-type-caption)/1.35 var(--lu-font); }
+
+/* toast */
+.toast { display: inline-flex; align-items: center; gap: var(--lu-space-3); height: var(--h-btn); padding: 0 var(--lu-space-5); border-radius: var(--lu-radius-pill); background: var(--lu-reading); border: 1px solid var(--lu-material-edge); box-shadow: var(--lu-shadow-rest); font: 600 var(--lu-type-label)/1 var(--lu-font); }
+

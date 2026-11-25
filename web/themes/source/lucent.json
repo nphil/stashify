@@ -1,0 +1,39 @@
+{
+  "palettes": [
+    {
+      "id": "lucent-dark",
+      "name": "Lucent",
+      "family": "Lucent",
+      "scheme": "dark",
+      "sources": [
+        "design-language skill, palettes/rose-pine/palette.json (the Stashify house palette, derived from Rosé Pine by the owner; used by the approved mockup)",
+        "https://rosepinetheme.com/palette/ingredients/ (pine #31748F is the official Rosé Pine hex used for info)"
+      ],
+      "roles": {
+        "canvas": "#191724", "sheet": "#1F1D2EE8", "scrim": "#120E1A6B", "glass": "#120E1A66", "glassRaised": "#2C263A8F",
+        "edge": "#FFFFFF1F", "edgeRaised": "#FFFFFF33", "ink": "#F2EFF6", "ink2": "#F2EFF6A8", "ink3": "#F2EFF66B",
+        "focus": "#F2EDE8FA", "focusInk": "#17131F", "trackOff": "#FFFFFF29", "accent": "#A79BF5", "accentInk": "#17131F",
+        "positive": "#9CCFD8", "warning": "#F6C177", "danger": "#EB6F92", "info": "#9CCFD8", "live": "#EB6F92"
+      },
+      "alt": { "info": ["#31748F"] },
+      "notes": "House palette copied verbatim. The generator only changes what fails: info (equal to positive in the house file) is remapped to Rosé Pine pine so the four status colours stay distinguishable."
+    },
+    {
+      "id": "lucent-light",
+      "name": "Lucent",
+      "family": "Lucent",
+      "scheme": "light",
+      "sources": [
+        "design-language skill, palettes/rose-pine/palette.json (the Stashify house palette, derived from Rosé Pine Dawn; used by the approved mockup)"
+      ],
+      "roles": {
+        "canvas": "#FAF4ED", "sheet": "#FFFAF3EB", "scrim": "#FAF4ED4D", "glass": "#FFFFFF85", "glassRaised": "#FFFFFFB8",
+        "edge": "#FFFFFFD9", "edgeRaised": "#FFFFFFE6", "ink": "#17131F", "ink2": "#17131FA8", "ink3": "#17131F6B",
+        "focus": "#FFFFFFF2", "focusInk": "#17131F", "trackOff": "#17131F1F", "accent": "#907AA9", "accentInk": "#FFFFFF",
+        "positive": "#286983", "warning": "#EA9D34", "danger": "#B4637A", "info": "#56949F", "live": "#B4637A"
+      },
+      "alt": {},
+      "notes": "House palette copied verbatim. The generator tunes what fails: accentInk (white on the lilac is 3.6:1) and the amber warning glyph (2:1 on the canvas)."
+    }
+  ]
+}

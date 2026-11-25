@@ -1,0 +1,58 @@
+/* ---------- jobs ---------- */
+.job { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: var(--lu-space-5); padding: var(--lu-space-5); border-radius: var(--lu-radius-card); background: var(--lu-material-card); border: 1px solid var(--lu-material-edge); }
+.jmedia { display: grid; grid-template-columns: 1fr 1fr; gap: var(--lu-space-2); align-content: start; }
+.jmedia .jv { position: relative; aspect-ratio: 16 / 9; border-radius: var(--lu-radius-control); overflow: hidden; }
+.jmedia .jc { grid-column: 1 / -1; display: flex; justify-content: space-between; color: var(--lu-ink-2); font: 500 var(--lu-type-caption)/1.3 var(--lu-font); }
+.jmedia.one { grid-template-columns: 1fr; }
+.jbody { display: flex; flex-direction: column; gap: var(--lu-space-3); min-width: 0; }
+.jhead { display: flex; align-items: flex-start; gap: var(--lu-space-3); }
+.jhead .ttl { font-size: 20px; }
+.jwhere { display: flex; flex-wrap: wrap; align-items: center; gap: var(--lu-space-1) var(--lu-space-3); color: var(--lu-ink-2); font: 500 var(--lu-type-label)/1.3 var(--lu-font); }
+.jwhere span { display: inline-flex; align-items: center; gap: 6px; }
+.jprog { display: flex; align-items: baseline; justify-content: space-between; gap: var(--lu-space-3); }
+.jprog b { font: 700 var(--lu-type-title)/1 var(--lu-font); }
+.jstats { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: var(--lu-space-3) var(--lu-space-4); }
+.jstats div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.jstats dt { color: var(--lu-ink-2); font: 500 var(--lu-type-caption)/1.3 var(--lu-font); }
+.jstats dd { font: 600 var(--lu-type-label)/1.3 var(--lu-font); white-space: nowrap; }
+.jfoot { display: flex; flex-wrap: wrap; align-items: center; gap: var(--lu-space-2); margin-top: auto; }
+.jobs { display: grid; gap: var(--lu-space-4); }
+.phases { display: flex; flex-wrap: wrap; gap: 2px var(--lu-space-4); color: var(--lu-ink-2); font: 500 var(--lu-type-caption)/1.4 var(--lu-font); }
+.ph { display: inline-flex; align-items: center; gap: 5px; }
+.ph[aria-current="step"] { color: var(--lu-ink); font-weight: 700; }
+.ph .dot { width: 7px; height: 7px; color: var(--lu-info-text); }
+.jcost { display: flex; flex-wrap: wrap; gap: var(--lu-space-3) var(--lu-space-6); padding-top: var(--lu-space-3); border-top: 1px solid var(--lu-material-edge); }
+.jcost .col { gap: 2px; }
+.qlist { display: grid; }
+.qrow { display: flex; align-items: center; gap: var(--lu-space-3); min-height: var(--lu-row); padding: var(--lu-space-2) var(--lu-space-3); border-radius: var(--lu-radius-row); }
+.qrow + .qrow { border-top: 1px solid var(--lu-material-edge); border-radius: 0; }
+ul.qlist { list-style: none; margin: 0; padding: 0; }
+.frow + .frow { border-top: 1px solid var(--lu-material-edge); }
+.jsec { padding: var(--lu-space-2) var(--lu-space-1); }
+.job > .jlogw, .frow > .jlogw { grid-column: 1 / -1; }
+.frow > .jlogw { padding: 0 var(--lu-space-3) var(--lu-space-3); }
+ol.phases { list-style: none; margin: 0; padding: 0; }
+.jprog .muted { text-align: right; }
+.jcost b { font: 700 var(--lu-type-body)/1.2 var(--lu-font); }
+/* progress bar: only transforms move */
+.pbar i { width: 100%; transform-origin: 0 50%; transform: scaleX(var(--p, 0)); transition: transform var(--lu-motion-layer) linear; }
+.pbar.is-paused i { opacity: .5; }
+.pbar.indeterminate i { width: 38%; transform: none; transition: none; animation: jsweep 1.4s ease-in-out infinite; }
+@keyframes jsweep { from { transform: translateX(-100%); } to { transform: translateX(263%); } }
+/* small pictures of a running card */
+.jv > .thumb { position: absolute; inset: 0; }
+.jv video, .cmp video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity var(--lu-motion-layer) var(--lu-ease); background: var(--lu-material-well); pointer-events: none; }
+.jv video.in, .cmp video.in { opacity: 1; }
+/* live log */
+.jlog { display: grid; gap: var(--lu-space-2); justify-items: start; }
+.jlog .btn .cap { margin-left: var(--lu-space-2); }
+.logbody { justify-self: stretch; max-height: 240px; overflow: auto; scrollbar-width: thin; padding: var(--lu-space-3); border-radius: var(--lu-radius-control); background: var(--lu-material-well); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+.logbody .ln { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--lu-ink-2); }
+.logbody .lv-event { color: var(--lu-ink); font-weight: 600; }
+.logbody .lv-warn { color: var(--lu-warning-text); }
+.logbody .lv-error { color: var(--lu-danger-text); }
+.logbody .lvl { margin-right: 6px; font-weight: 700; }
+.logbody .lvl::after { content: ":"; }
+/* first-load placeholder */
+.skel.jsk-media { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; border-radius: var(--lu-radius-control); }
+

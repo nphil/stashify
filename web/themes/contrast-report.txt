@@ -1,0 +1,51 @@
+Stashify themes: contrast on composited surfaces (min over canvas, accent glow, sheet, glass, raised glass)
+Floors: ink/ink2/accentInk/fillInk/accentText/status text >= 4.5, ink3/accent/status glyph/track >= 3, status dE00 >= 12.
+ink = body text, ink2 = secondary, ink3 = muted tier, acc = accent glyph on canvas+sheet, accI = accentInk on accent, fill = fill label on button fill,
+accT = accent-coloured text, glyf = raw status colour as glyph (min of 4), stTx = status text (min of 4, also on 18% tints), trck = switch track,
+focI = focusInk on focus fill, dE00 = smallest CIEDE2000 between the four status colours.
+
+theme                 sch    ink  ink2  ink3   acc  accI  fill  accT  glyf  stTx  trck  focI  dE00  result  tuned
+lucent-dark           dark  11.1   5.8   3.3   6.8   7.5   7.5   5.1   3.2   4.6   6.1  15.1  29.8  pass    dangerText L+0.015; info remapped for distinctness; infoText L+0.16
+rose-pine             dark   9.6   5.8   3.5   7.9   8.6   8.6   5.8   3.2   4.6   5.4  15.2  29.8  pass    dangerText L+0.015; infoText L+0.16
+rose-pine-moon        dark   8.2   5.7   3.2   6.9   7.8   7.8   5.0   4.0   4.5   5.0  13.8  20.9  pass    dangerText L+0.055; infoText L+0.11
+catppuccin-mocha      dark   6.6   5.7   3.1   6.4   8.4   8.4   4.6   5.6   4.5   4.3  13.8  20.9  pass    dangerText L+0.035; infoText L+0.015
+catppuccin-macchiato  dark   5.7   4.6   3.2   5.3   7.2   7.2   4.6   4.7   4.5   3.9  12.4  20.3  pass    accentText L+0.04; dangerText L+0.075; infoText L+0.06
+catppuccin-frappe     dark   5.3   4.7   3.3   4.4   6.0   6.0   4.6   3.7   4.5   3.7  11.0  19.6  pass    ink fg 23% toward white; accentText L+0.095; positiveText L+0.045; warningText L+0.03; dangerText L+0.14; infoText L+0.105
+tokyo-night           dark   6.3   5.5   3.4   5.5   7.0   7.0   4.6   5.2   4.6   4.1  13.6  26.5  pass    accentText L+0.035; dangerText L+0.045; infoText L+0.04
+tokyo-night-storm     dark   6.3   5.5   3.4   5.4   6.1   6.1   4.6   5.1   4.6   4.1  11.9  26.5  pass    accentText L+0.035; dangerText L+0.045; infoText L+0.045
+dracula               dark   6.6   5.3   3.2   4.0   6.2   6.2   4.6   3.0   4.6   4.4  14.1  20.1  pass    accentText L+0.12; dangerText L+0.185
+nord                  dark   6.7   5.3   3.2   5.1   6.7   6.7   4.6   3.1   4.6   4.4  12.1  18.8  pass    accentText L+0.055; positiveText L+0.07; warningText L+0.01; danger L+0.05; dangerText L+0.185; infoText L+0.135
+gruvbox-dark          dark   6.4   5.6   3.1   4.7   6.1   6.1   4.5   3.4   4.6   4.2  12.8  17.1  pass    accentText L+0.07; positiveText L+0.035; dangerText L+0.145; infoText L+0.095
+everforest-dark       dark   5.6   4.9   3.1   5.5   6.7   6.7   4.5   4.0   4.5   3.8  10.8  16.7  pass    ink fg 25% toward white; accentText L+0.035; positiveText L+0.045; warningText L+0.025; dangerText L+0.115; infoText L+0.065
+solarized-dark        dark   5.6   4.9   3.1   3.6   5.7   5.7   4.5   3.1   4.5   3.6  11.6  18.1  pass    ink fg 45% toward white; accentText L+0.135; positiveText L+0.1; warningText L+0.105; danger L+0.02; dangerText L+0.165; infoText L+0.135
+one-dark              dark   5.7   4.6   3.1   4.0   4.6   4.6   4.6   4.1   4.6   3.8  11.1  21.9  pass    ink fg 28% toward white; accentText L+0.11; positiveText L+0.005; dangerText L+0.11; infoText L+0.04
+monokai               dark   7.8   5.5   3.1   7.3  10.1  10.1   5.0   3.0   4.6   5.0  14.7  14.4  pass    danger L+0.005; dangerText L+0.175
+night-owl             dark   8.9   5.5   3.3   6.6   7.8   7.8   5.0   4.6   4.6   5.1  15.5  34.6  pass    dangerText L+0.07
+ayu-mirage            dark   9.7   5.3   3.1   9.2  10.3  10.3   6.2   5.5   4.5   5.8  14.5  23.7  pass    dangerText L+0.03
+github-dark           dark  11.3   5.9   3.3   4.7   5.1   5.1   4.5   4.7   4.5   6.0  17.0  34.6  pass    accentText L+0.06; dangerText L+0.035; infoText L+0.06
+kanagawa-wave         dark   7.4   5.7   3.4   5.2   6.2   6.2   4.6   4.5   4.6   4.6  13.6  20.6  pass    accentText L+0.045; dangerText L+0.085; infoText L+0.045
+nightfox              dark   6.6   5.7   3.1   4.9   5.8   5.8   4.6   3.2   4.5   4.2  12.8  25.2  pass    accentText L+0.06; positiveText L+0.025; dangerText L+0.165; infoText L+0.06
+material-palenight    dark   5.7   4.6   3.1   3.1   5.1   5.1   4.6   4.4   4.5   3.8  11.0  23.5  pass    accent L+0.04; ink fg 35% toward white; accentText L+0.18; dangerText L+0.09; infoText L+0.04
+lucent-light          light 14.3   5.3   3.1   3.5   4.8   4.5   4.7   3.0   4.5   4.6  18.2  17.6  pass    accentInk was #FFFFFF (3.8:1); accentFill L-0.045; accentText L-0.11; positiveText L-0.01; warning L-0.105; warningText L-0.145; dangerText L-0.09; infoText L-0.135
+rose-pine-dawn        light  7.5   5.9   3.3   3.5   5.5   4.5   4.7   3.0   4.5   3.1   9.5  17.6  pass    accentFill L-0.045; accentText L-0.11; positiveText L-0.135; warning L-0.105; warningText L-0.145; dangerText L-0.09; infoText L-0.01
+catppuccin-latte      light  6.9   5.5   3.2   4.5   5.4   5.4   4.6   3.0   4.5   3.0   9.9  34.4  pass    ink fg 18% toward black; accentText L-0.055; positive L-0.025; positiveText L-0.14; warning L-0.09; warningText L-0.145; dangerText L-0.075; infoText L-0.08
+tokyo-night-day       light  6.6   5.4   3.2   3.1   4.7   4.6   4.6   3.1   4.5   3.1  11.3  21.0  pass    accent L-0.025; ink fg 43% toward black; accentFill L-0.005; accentText L-0.135; positiveText L-0.1; warningText L-0.115; danger L-0.035; dangerText L-0.16; info L-0.025; infoText L-0.135
+alucard               light 12.7   5.7   3.4   6.0   6.2   6.2   4.8   4.8   4.5   4.3  16.5  24.5  pass    warningText L-0.04; dangerText L-0.05; infoText L-0.01
+gruvbox-light         light  8.2   5.5   3.1   5.4   6.1   6.1   4.6   3.3   4.6   3.4  11.5  19.2  pass    accentText L-0.02; positiveText L-0.065; warningText L-0.13; infoText L-0.01
+everforest-light      light  7.2   5.7   3.3   3.1   6.0   4.6   4.6   3.0   4.5   3.1   9.8  20.3  pass    accent L-0.045; ink fg 35% toward black; accentFill L-0.065; accentText L-0.14; positive L-0.045; positiveText L-0.14; warning L-0.115; warningText L-0.135; danger L-0.015; dangerText L-0.15; info L-0.005; infoText L-0.14
+solarized-light       light  6.9   5.5   3.2   3.0   5.7   4.6   4.5   3.0   4.5   3.1  10.0  17.5  pass    ink fg 45% toward black; accentFill L-0.055; accentText L-0.14; positive L-0.035; positiveText L-0.14; warning L-0.035; warningText L-0.14; dangerText L-0.1; infoText L-0.145
+one-light             light  9.1   5.9   3.2   4.0   5.1   4.6   4.6   3.1   4.6   3.4  11.3  30.2  pass    accentFill L-0.025; accentText L-0.08; positiveText L-0.14; warningText L-0.145; dangerText L-0.115; infoText L-0.09
+night-owl-light       light  7.9   5.3   3.4   4.7   5.0   5.0   4.6   3.1   4.5   3.2  10.2  35.1  pass    accentText L-0.045; positiveText L-0.1; warning L-0.13; warningText L-0.14; dangerText L-0.085; infoText L-0.125
+ayu-light             light 16.0   6.0   3.3   3.0   6.3   4.5   4.6   3.0   4.6   5.2  19.9  26.7  pass    accent L-0.09; accentFill L-0.09; accentText L-0.145; positive L-0.065; positiveText L-0.14; warning L-0.11; warningText L-0.145; danger L-0.025; dangerText L-0.145; info L-0.035; infoText L-0.145
+github-light          light 12.5   5.6   3.3   4.9   5.2   5.2   4.5   4.6   4.6   4.2  15.8  31.3  pass    accentText L-0.035; positiveText L-0.045; warningText L-0.055; dangerText L-0.045; infoText L-0.045
+kanagawa-lotus        light  6.8   5.5   3.2   4.1   5.5   5.5   4.5   3.1   4.5   3.1  11.0  28.5  pass    ink fg 30% toward black; accentText L-0.07; positive L-0.015; positiveText L-0.135; warning L-0.035; warning remapped for distinctness; warningText L-0.14; dangerText L-0.11; infoText L-0.075
+dayfox                light  7.7   5.3   3.1   6.1   8.1   8.1   4.8   3.9   4.5   3.3  12.3  22.7  pass    positiveText L-0.04; warningText L-0.09; dangerText L-0.025
+dawnfox               light  6.9   5.5   3.2   4.9   6.1   6.1   4.6   3.1   4.5   3.1  10.1  23.0  pass    ink fg 25% toward black; accentText L-0.03; positiveText L-0.125; warning L-0.14; warningText L-0.14; dangerText L-0.115; infoText L-0.04
+material-lighter      light  7.2   5.6   3.2   3.0   6.6   4.6   4.6   3.0   4.5   3.0   8.8  29.5  pass    accent L-0.085; ink fg 30% toward black; accentFill L-0.09; accentText L-0.14; positive L-0.09; positiveText L-0.14; warning L-0.12; warningText L-0.145; dangerText L-0.09; infoText L-0.095
+oxocarbon-light       light  7.1   5.6   3.2   4.5   5.0   5.0   4.6   3.1   4.6   3.1   9.6  36.0  pass    accentText L-0.055; positive L-0.09; positiveText L-0.145; warning L-0.05; warningText L-0.15; danger L-0.005; dangerText L-0.145; infoText L-0.06
+flexoki-light         light 14.1   5.4   3.1   5.8   6.5   6.5   4.6   3.1   4.6   4.8  19.1  20.8  pass    positiveText L-0.08; warningText L-0.14; dangerText L-0.015; infoText L-0.01
+modus-operandi        light 15.8   5.2   3.5   9.4  10.4  10.4   7.0   6.4   4.8   5.6  21.0  26.6  pass    -
+papercolor-light      light  7.0   5.6   3.2   5.6   7.0   7.0   4.6   3.1   4.6   3.1  10.5  20.9  pass    ink fg 8% toward black; accentText L-0.01; positiveText L-0.1; warning L-0.005; warningText L-0.145; dangerText L-0.02; infoText L-0.035
+selenized-light       light  6.7   5.4   3.2   3.8   4.8   4.8   4.5   3.1   4.5   3.0  10.2  25.2  pass    ink fg 35% toward black; accentText L-0.09; positiveText L-0.13; warning L-0.04; warningText L-0.135; dangerText L-0.085; infoText L-0.095
+
+42 themes (21 dark, 21 light); 0 failing.

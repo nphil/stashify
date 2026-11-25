@@ -1,0 +1,30 @@
+/* ---------- the app frame: fills the screen, respects notches, hosts the mock bar ---------- */
+html, body { height: 100%; }
+#app { height: 100dvh; }
+html[data-mock]:not([data-shot]) #app { height: calc(100dvh - 44px); margin-top: 44px; }
+
+.skip { position: absolute; z-index: calc(var(--lu-z-popup) + 1); left: var(--lu-space-3); top: var(--lu-space-2); }
+.skip:focus { width: auto; height: auto; clip: auto; padding: var(--lu-space-2) var(--lu-space-4); border-radius: var(--lu-radius-pill); background: var(--lu-glass-raised); background-image: var(--lu-sheen); box-shadow: var(--lu-shadow-pressed); color: var(--lu-ink); font: 600 var(--lu-type-label)/1 var(--lu-font); }
+
+/* phones with a notch / home bar */
+.appbar { height: calc(var(--lu-shell-app-bar) + env(safe-area-inset-top, 0px)); padding-top: env(safe-area-inset-top, 0px); padding-left: max(var(--lu-edge-x), env(safe-area-inset-left, 0px)); padding-right: max(var(--lu-edge-x), env(safe-area-inset-right, 0px)); }
+.bnav { height: calc(var(--lu-shell-bottom-bar) + env(safe-area-inset-bottom, 0px)); padding-bottom: env(safe-area-inset-bottom, 0px); }
+.a-main { scrollbar-width: thin; }
+.appbar .pills { min-width: 0; }
+.appbar > .thm { flex: none; }
+
+/* scene picture: gradient first, real image fades in over it */
+.thumb { position: relative; display: block; width: 100%; height: 100%; overflow: hidden; }
+.thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity var(--lu-motion-layer) var(--lu-ease); }
+.thumb img.in { opacity: 1; }
+
+/* mock mode only: a bar to jump between the mockup's named states. Not part of the product UI. */
+.mock { position: fixed; z-index: 90; left: 0; right: 0; top: 0; height: 44px; display: flex; align-items: center; gap: 8px; padding: 0 12px; background: color-mix(in srgb, var(--lu-canvas) 92%, var(--lu-ink)); border-bottom: 1px solid var(--lu-material-edge); font: 600 12px/1 var(--lu-font); overflow-x: auto; scrollbar-width: none; }
+.mock b { margin-right: 6px; white-space: nowrap; }
+.mock button { flex: none; height: 30px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--lu-material-edge); background: transparent; color: var(--lu-ink); font: 600 12px/1 var(--lu-font); white-space: nowrap; }
+.mock button[aria-pressed="true"] { background: var(--lu-accent-fill); color: var(--lu-accent-fill-ink); border-color: transparent; }
+.mock .sep { width: 1px; height: 18px; background: var(--lu-material-edge); flex: none; }
+html[data-shot] .mock { display: none; }
+
+/* the click-away layer behind popovers is a real <button> (keyboard users close with Escape), so reset the button look */
+.a-scrim { padding: 0; border: 0; background: transparent; cursor: default; }

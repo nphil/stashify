@@ -1,0 +1,13 @@
+/* ---------- header pills, library ---------- */
+.pills { display: flex; align-items: center; gap: var(--lu-space-2); }
+.hp .mini { width: 36px; }
+html[data-lu-profile="phone"] .hp .nm, html[data-lu-profile="phone"] .hp .wd { display: none; }
+ul.plain { list-style: none; margin: var(--lu-space-3) 0 0; padding: 0; display: grid; gap: var(--lu-space-2); }
+ul.plain li { display: flex; align-items: flex-start; gap: var(--lu-space-2); color: var(--lu-ink-2); font: 500 var(--lu-type-label)/1.4 var(--lu-font); }
+ul.plain li .ico { margin-top: 2px; }
+.opt-list { display: grid; gap: var(--lu-space-1); }
+/* dialogs: the autofocused safe button reads as focused even without a key press */
+dialog.dlg .btn:focus { outline: none; background-color: var(--lu-glass-raised); background-image: var(--lu-sheen); border-color: var(--lu-edge-raised); box-shadow: var(--lu-shadow-pressed); transform: translateY(calc(var(--lu-lift-raised) / -2)) scale(var(--lu-profile-focus-scale, 1.02)); color: var(--lu-ink); }
+/* the app at 200% text, used to test that nothing overlaps */
+html[data-ts="2"] { --lu-type-caption: 24px; --lu-type-label: 28px; --lu-type-body: 32px; --lu-type-title: 40px; }
+
