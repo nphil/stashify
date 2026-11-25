@@ -630,7 +630,19 @@ def quote_with_spec(cl, scene, preset_key, plan=None, queued_usd=0.0, release_gb
         return refuse("over_month_cap", "Estimated $%.2f would take this month past your $%.2f cap "
                       "($%.2f already spent or queued)." % (est.est_usd, cfg.month_cap,
                                                               committed + queued_usd))
+    credit = provider_credit(cl, offer.provider)
+    if credit is not None:
+        out["credit"] = round(credit, 2)
+        if queued_usd + est.est_usd > credit:
+            return refuse("over_credit", "This needs about $%.2f but you only have $%.2f of %s credit. "
+                                         "Add credit or pick a cheaper run." % (est.est_usd, credit, offer.provider.capitalize()))
     return out, spec
+
+
+def provider_credit(cl, name):
+    """The provider's prepaid balance (cached a minute by hireling), or None when it cannot be read."""
+    prov = getattr(cl, "_providers", {}).get(name)
+    return cl._credit(prov)[0] if prov is not None else None
 
 
 def build_quote(cl, scene, preset_key, queued_usd=0.0, release_gb=None, plan=None):

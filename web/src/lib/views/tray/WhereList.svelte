@@ -54,7 +54,7 @@
   {/each}
 
   <button type="button" class="opt" role="radio" aria-checked={options.cloud} aria-disabled={cloudOff || undefined} tabindex={stop === WHERE_CLOUD ? 0 : -1}
-    onclick={() => { if (!cloudOff) options.where = WHERE_CLOUD; }}>
+    onclick={() => { if (cloudOff) return; if (options.cloud) ui.overlay = 'picker'; else options.where = WHERE_CLOUD; }}>
     <span class="gt sm"><Icon name="cloud" /></span>
     <span class="om">
       <span class="on">Cloud GPU</span>

@@ -20,11 +20,12 @@ html[data-lu-profile="phone"] .a-shell { --tray-b: calc(var(--lu-shell-bottom-ba
 .tsum .tip, .tsum + .tip { vertical-align: middle; margin-block: -8px; }
 .tok.sel { padding-right: var(--lu-space-1); cursor: default; }
 .tok.sel .iconbtn { width: 32px; height: 32px; }
-.tok .tl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 230px; }
+.tok .tl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 230px; min-width: 0; }
 .tok[aria-expanded="true"] { background: var(--lu-glass-raised); border-color: var(--lu-edge-raised); }
 .tok.full { width: 100%; justify-content: space-between; }
 .tok.full .tl { max-width: none; flex: 1 1 0; text-align: left; }
-.twrap { position: relative; display: inline-flex; min-width: 0; }
+.twrap { position: relative; display: inline-flex; min-width: 0; max-width: 100%; }
+.tok { max-width: 100%; }
 .twrap.grow { flex: 1 1 0; }
 .tpop { position: absolute; z-index: var(--lu-z-popup); bottom: calc(100% + var(--lu-space-4)); left: 0; width: 448px; max-width: calc(100vw - var(--lu-edge-x) * 2); max-height: min(62vh, 580px); overflow: auto; scrollbar-width: thin; padding: var(--lu-space-2); }
 .tpop .fgrp { padding: var(--lu-space-2) var(--lu-space-2) var(--lu-space-3); }

@@ -28,7 +28,7 @@
     return `${r.name} ${load(r)}%, ${r.busy ? 'busy' : 'ready'}`;
   }
   const cloudLabel = $derived(
-    !budget.connected && budget.settings ? 'Cloud: not set up' : budget.left === null ? 'Cloud' : `Cloud: ${usd(budget.left)} left this month`,
+    !budget.connected && budget.settings ? 'Cloud: not set up' : budget.left === null ? 'Cloud' : `Cloud: ${usd(budget.left)} left to spend`,
   );
 </script>
 

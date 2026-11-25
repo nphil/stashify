@@ -103,7 +103,7 @@ export function budgetReason(total: number, pricePerHour: number, caps: Caps | n
   if (caps.maxPrice > 0 && pricePerHour > caps.maxPrice + 1e-9) return `Over your ${usd(caps.maxPrice)}/h limit`;
   if (caps.jobCap > 0 && total > caps.jobCap + 1e-9) return `Over your ${usd(caps.jobCap)} stop per rental`;
   if (caps.monthCap > 0 && total > caps.monthCap - caps.monthToDate + 1e-9) return 'Over this month’s limit';
-  if (caps.credit !== null && total > caps.credit + 1e-9) return 'Not enough credit';
+  if (caps.credit !== null && total > caps.credit + 1e-9) return `Needs ${usd(total)}, you have ${usd(caps.credit)}`;
   return null;
 }
 

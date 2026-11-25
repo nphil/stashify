@@ -55,6 +55,8 @@ dl, dd { margin: 0; }
 .grow { flex: 1 1 0; min-width: 0; }
 .nowrap { white-space: nowrap; }
 .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* overflow:hidden clips to the line box, which at line-height 1 cuts descenders (g, y, p): every ellipsis box gets vertical room that does not move the layout */
+.ell, .tok .tl, .tile .tt, .tile .ts, .mrow .l1, .mrow .l2, .mrow .l3, .lib-menu .opt .nm, .thm-name { padding-block: .16em; margin-block: -.16em; }
 .right { margin-left: auto; }
 .hr { height: 1px; background: var(--lu-material-edge); border: 0; margin: var(--lu-space-3) 0; }
 
@@ -73,7 +75,7 @@ html[data-shot] *, html[data-shot] *::before, html[data-shot] *::after { animati
 }
 .btn {
   position: relative; display: inline-flex; align-items: center; justify-content: center; gap: var(--lu-space-2);
-  height: var(--h-btn); padding: 0 var(--lu-space-5); border-radius: var(--lu-radius-pill);
+  min-height: var(--h-btn); padding: 0 var(--lu-space-5); border-radius: var(--lu-radius-pill);
   border: 1px solid var(--lu-material-edge); background: transparent; color: var(--lu-ink);
   font: 600 var(--lu-type-label)/1 var(--lu-font); white-space: nowrap;
 }
@@ -100,7 +102,7 @@ html[data-shot] *, html[data-shot] *::before, html[data-shot] *::after { animati
 
 /* chips: filters, tokens, header pills. Hit area grows to the 48 target, the visual stays 40. */
 .chip, .hp, .tab, .tok {
-  position: relative; display: inline-flex; align-items: center; gap: var(--lu-space-2); height: var(--h-chip); padding: 0 var(--lu-space-4);
+  position: relative; display: inline-flex; align-items: center; gap: var(--lu-space-2); min-height: var(--h-chip); padding: 0 var(--lu-space-4);
   border-radius: var(--lu-radius-pill); border: 1px solid var(--lu-material-edge); background: var(--lu-glass); color: var(--lu-ink);
   font: 500 var(--lu-type-label)/1 var(--lu-font); white-space: nowrap;
 }

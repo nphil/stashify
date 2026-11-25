@@ -4,6 +4,12 @@ import { live } from '../api/events';
 import { getCloudSettings, getCloudStatus, saveCloudSettings } from '../api/cloudSettings';
 import type { Caps, CloudSettings, CloudStatus } from '../api/types';
 
+/** what a run can really spend: the lower of this month's remaining limit and the prepaid credit */
+export function spendable(c: Caps): number {
+  const month = Math.max(0, c.monthCap - c.monthToDate);
+  return c.credit === null ? month : Math.max(0, Math.min(month, c.credit));
+}
+
 class Budget {
   settings = $state.raw<CloudSettings | null>(null);
   status = $state.raw<CloudStatus | null>(null);
@@ -15,8 +21,8 @@ class Budget {
     if (!s || !st) return null;
     return { maxPrice: s.max_price, jobCap: s.job_cap, monthCap: s.month_cap, monthToDate: st.month_to_date, credit: st.credit ?? null, dcOnly: s.datacenter_only };
   });
-  /** dollars left this month, or null before the first load */
-  left: number | null = $derived(this.caps ? Math.max(0, this.caps.monthCap - this.caps.monthToDate) : null);
+  /** dollars left to spend: the monthly limit's remainder, or the real prepaid credit when that is lower; null before the first load */
+  left: number | null = $derived(this.caps ? spendable(this.caps) : null);
   /** a paid provider key is saved */
   connected: boolean = $derived(!!this.settings && (this.settings.vast_api_key.set || !!this.settings.runpod_api_key?.set));
 

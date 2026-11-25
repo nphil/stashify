@@ -313,7 +313,7 @@
           </div>
           <div class="rsub">
             {#if budget.connected && budget.left !== null}
-              {usd(budget.left)} left this month{#if budget.caps?.credit != null} · credit {usd(budget.caps.credit)}{/if}{#if running > 0} · {plural(running, 'rental')} running{/if}
+              {usd(Math.max(0, (budget.caps?.monthCap ?? 0) - (budget.caps?.monthToDate ?? 0)))} left this month{#if budget.caps?.credit != null} · credit {usd(budget.caps.credit)}{/if}{#if running > 0} · {plural(running, 'rental')} running{/if}
             {:else}
               Add your provider key to rent a GPU for the big jobs.
             {/if}

@@ -288,6 +288,13 @@ class QuotesApiTest(cf.CloudCase):
         self.assertEqual(payload["total_usd"], round(first["est_usd"] + second["est_usd"], 2))
         self.assertEqual(payload["label"], "High detail")
 
+    def test_a_run_over_the_real_credit_is_refused(self):
+        self.vast.balance = 0.01                                 # a big month cap, almost no prepaid credit
+        self.clock.sleep(61)                                     # past the one-minute credit cache
+        q = cloud_api.quotes(self.cl, [("5", SCENE)], "detail")[1]["quotes"][0]
+        self.assertEqual(q["refusal"]["code"], "over_credit")
+        self.assertIn("$0.01", q["refusal"]["message"])
+
     def test_an_unknown_scene_is_reported_not_quoted(self):
         payload = cloud_api.quotes(self.cl, [("404", None), ("5", SCENE)], "close-ups")[1]
         self.assertEqual(payload["quotes"][0]["refusal"]["code"], "no_scene")
