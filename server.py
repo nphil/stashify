@@ -942,7 +942,9 @@ def set_job(job_id, **fields):
             return
         before = job.get("state")
         job.update(fields)
-        changed = "review_ready" in (before, job.get("state")) and before != job.get("state")
+        # any state change: the Replace/Discard handler moves a job out of review_ready
+        # directly, so a review_ready-only check missed it and the job came back on restart
+        changed = before != job.get("state")
     if changed:
         save_reviews()
 

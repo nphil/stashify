@@ -33,6 +33,16 @@ class ReviewStoreTest(unittest.TestCase):
         server.load_reviews()
         self.assertEqual(server._jobs, {})
 
+    def test_a_job_claimed_out_of_review_by_the_handler_does_not_come_back(self):
+        job = server.new_job("42", {}, title="Scene")
+        server.set_job(job["id"], state="review_ready", _info={"orig_scene_id": "42", "output_path": "/x.mp4"})
+        with server._jobs_lock:                       # what the Replace handler does
+            server._jobs[job["id"]]["state"] = "replacing"
+        server.set_job(job["id"], state="replaced")
+        server._jobs.clear()
+        server.load_reviews()
+        self.assertEqual(server._jobs, {})
+
 
 if __name__ == "__main__":
     unittest.main()
