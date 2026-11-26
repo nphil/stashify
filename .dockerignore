@@ -9,4 +9,5 @@ docs
 tests
 winrunner/*
 !winrunner/transcode_cli.py
+!winrunner/frame_preview.py
 unraid
