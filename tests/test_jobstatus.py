@@ -21,6 +21,7 @@ os.environ.setdefault("STASHIFY_RUNNER_STREAM", "0")   # the poll tests fake the
 os.environ["LOCALAPPDATA"] = _scratch          # the runner writes its log under here when imported
 
 import core                          # noqa: E402
+import decensor_cli                  # noqa: E402
 import jobprogress                   # noqa: E402
 import runner                        # noqa: E402
 import server                        # noqa: E402
@@ -49,12 +50,22 @@ def job(**kw):
 
 
 class RunnerLinesTest(unittest.TestCase):
-    LTX = "decensor: 20%| |Remaining: 1:39:22 | Speed: 79.52 f/s | LTX step 2 of 4 (encode)"
+    LTX_SCAN = "LTX 1/4 scan:  22%|██▏       | 8408/37495 [00:58<03:10, 152.62frame/s]"
 
     def test_an_ltx_line_names_the_step_and_says_it_is_an_estimate(self):
-        f = runner.parse_progress(self.LTX)
+        raw = "LTX 2/4 encode: 92%|####| 63600/69150 [15:54<01:09, 79.52frame/s, run 1:39:22 left]"
+        with mock.patch.object(decensor_cli.time, "time", return_value=decensor_cli._T0 + 1500):
+            f = runner.parse_progress(decensor_cli.normalize(raw))
         self.assertEqual((f["phase"], f["step"], f["steps"], f["detail"]), ("Restoring in high detail", 2, 4, "encode"))
         self.assertEqual((f["progress"], f["fps"], f["eta"], f["estimate"]), (0.2, 79.52, 5962, True))
+
+    def test_ltx_scan_without_a_time_or_rate_still_reports_measured_progress(self):
+        raw = "LTX 1/4 scan: 0%|          | 0/37495 [00:00<?, ?frame/s]"
+        f = runner.parse_progress(decensor_cli.normalize(raw))
+        self.assertEqual((f["stage"], f["phase"], f["step"], f["steps"]), ("scan", "Scanning for mosaics", 1, 4))
+        self.assertEqual((f["progress"], f["detail"], f["estimate"]), (0, "0%", False))
+        self.assertNotIn("fps", f)
+        self.assertNotIn("eta", f)
 
     def test_a_plain_line_clears_the_step_and_names_the_work(self):
         f = runner.parse_progress("upscaling: 42%| |Processed: 00:12 (1234f) | Remaining: 01:23 | Speed: 12.3f/s")
@@ -165,6 +176,55 @@ class ProgressCallbackTest(unittest.TestCase):
         j = server._jobs[self.id]
         self.assertEqual((j["progress"], j["phase"], j["step"], j["estimate"]), (0.5, "Finishing the video", None, False))
         self.assertGreater(j["updated_at"], 0)
+
+    def test_measured_ltx_scan_reaches_clients_without_becoming_whole_job_progress(self):
+        t, clk = tracker()
+        cb = server.progress_cb(self.id)
+        active = job(id=self.id, state="running", stage="decensor+upscale",
+                     phase="Loading models", message="Loading models & engines", indeterminate=True,
+                     pass_no=1, passes=2, pass_progress=0.0)
+        runner_states, coordinator_states = [], []
+
+        def snapshot():
+            state = runner.public(active)
+            runner_states.append(state)
+            cb(*t.update(state))
+            coordinator_states.append(dict(server._jobs[self.id]))
+            clk.t += 60
+
+        def stdout():
+            yield decensor_cli.normalize(RunnerLinesTest.LTX_SCAN)
+            snapshot()
+            yield "decensor: 20%| |Remaining: 1:39:22 | LTX step 2 of 4 (encode)"
+            snapshot()
+
+        lane = mock.Mock(lock=mock.MagicMock(), cancel=False)
+        proc = mock.Mock(stdout=stdout(), returncode=0)
+        snapshot()
+        with mock.patch.dict(runner._jobs, {self.id: active}), \
+                mock.patch.object(runner.subprocess, "Popen", return_value=proc), \
+                mock.patch.object(runner.threading, "Thread"), \
+                mock.patch.object(runner, "push_log"):
+            runner._stream_subprocess(lane, self.id, ["decensor_cli"], scale=(0, 2), stage=active["stage"])
+
+        _, scan, encode = runner_states
+        self.assertEqual((scan["stage"], scan["message"], scan["progress"], scan["pass_progress"]),
+                         ("scan", "Scanning for mosaics", 0.22, 0.0))
+        self.assertEqual((scan["fps"], scan["eta"]), (152.62, None))
+        self.assertEqual((encode["stage"], encode["progress"], encode["pass_progress"]),
+                         ("decensor+upscale", 0.1, 0.2))
+        self.assertEqual((encode["fps"], encode["eta"]), (None, 5962))
+
+        loading, scan, encode = coordinator_states
+        self.assertEqual((scan["phase"], scan["step"], scan["steps"], scan["detail"]),
+                         ("Scanning for mosaics", 1, 4, "22% · 03:10 left in scan"))
+        self.assertEqual((scan["fps"], scan["eta"], scan["indeterminate"], scan["estimate"]),
+                         (152.62, None, False, False))
+        self.assertEqual((encode["phase"], encode["detail"], encode["fps"], encode["estimate"]),
+                         ("Restoring in high detail", "encode", None, True))
+        self.assertGreater(encode["eta"], 5962)
+        self.assertLessEqual(loading["progress"], scan["progress"])
+        self.assertLessEqual(scan["progress"], encode["progress"])
 
     def test_the_coordinators_own_message_becomes_the_phase(self):
         cb = server.progress_cb(self.id)

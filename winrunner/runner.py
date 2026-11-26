@@ -33,7 +33,12 @@ import logging
 import subprocess
 import threading
 from collections import deque, OrderedDict
+from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
+
+from frame_preview import FramePreview, latest_pair, pair_path, watch_frames
+from preview import JasnaFrames, SegmentPreview
 
 try:
     import psutil
@@ -254,7 +259,8 @@ def parse_progress(line):
     f = {}
     pm = _RE_PCT.search(line)
     if pm:
-        f["progress"] = round(min(100, int(pm.group(1))) / 100.0, 3)
+        pct = min(100, int(pm.group(1)))
+        f["progress"] = pct / 100.0
         # a determinate line says what is running; step/steps/detail are cleared when it is not LTX
         pre = _PROGRESS_PREFIX.match(line)
         f["phase"] = _PHASE_BY_PREFIX[pre.group(1).lower()] if pre else "Processing"
@@ -262,9 +268,14 @@ def parse_progress(line):
         f["estimate"] = False
         lt = _RE_LTX_STEP.search(line)
         if lt:
-            f["phase"] = "Restoring in high detail"
             f["step"], f["steps"], f["detail"] = int(lt.group(1)), int(lt.group(2)), lt.group(3)
-            f["estimate"] = True          # LTX progress is the clock against jasna's own "left"
+            if (f["detail"] or "").lower() == "scan":
+                f["stage"] = "scan"
+                f["phase"] = "Scanning for mosaics"
+                f["detail"] = f"{pct}%"
+            else:
+                f["phase"] = "Restoring in high detail"
+                f["estimate"] = True       # later LTX steps use the clock against jasna's own "left"
     lf = _RE_FRAME.search(line)
     if lf:
         f["frame"] = int(lf.group(1))
@@ -285,7 +296,10 @@ def parse_progress(line):
     et = _RE_ETA.search(line)
     if et:
         h, m2, s = et.group(1), et.group(2), et.group(3)
-        f["eta"] = (int(h) * 3600 + int(m2) * 60 + int(s)) if s else (int(h) * 60 + int(m2))
+        if f.get("stage") == "scan":
+            f["detail"] += " · " + ":".join(filter(None, (h, m2, s))) + " left in scan"
+        else:
+            f["eta"] = (int(h) * 3600 + int(m2) * 60 + int(s)) if s else (int(h) * 60 + int(m2))
     return f
 
 
@@ -663,7 +677,7 @@ _PASS_RESET = {"step": None, "steps": None, "detail": None, "estimate": False,
                "eta": None, "fps": None, "frame": None, "total_frames": None}
 
 
-def _stream_subprocess(lane, jid, argv, scale=None):
+def _stream_subprocess(lane, jid, argv, scale=None, *, stage=None):
     """Run a CLI, streaming lada-style progress into the job. A watchdog kills a
     stalled subprocess (no output for STALL_SECS) so a dead SMB mount can't wedge
     the lane forever. scale=(phase_idx, n_phases) maps this CLI's 0-100% into its
@@ -688,6 +702,7 @@ def _stream_subprocess(lane, jid, argv, scale=None):
                 lane.do_cancel()
                 return
     threading.Thread(target=watchdog, daemon=True).start()
+    scanning = False
 
     try:
         for line in proc.stdout:
@@ -697,7 +712,13 @@ def _stream_subprocess(lane, jid, argv, scale=None):
             push_log(jid, line, "proc")
             f = parse_progress(line)
             if f.get("progress") is not None:
-                if scale:
+                scan = f.get("stage") == "scan"
+                if scan != scanning:
+                    f = {**_PASS_RESET, **f}
+                if scan or scanning:
+                    f.update(stage="scan" if scan else stage, message=f["phase"])
+                scanning = scan
+                if scale and not scan:                     # measured scan % is local to the scan
                     idx, n = scale
                     f["pass_progress"] = f["progress"]       # this pass alone; the coordinator weights passes by time
                     f["progress"] = round((idx + f["progress"]) / n, 3)
@@ -835,8 +856,9 @@ def run_job(lane, job):
         push_log(jid, "source copied local; scan + decensor now read local disk", "event")
         src = tmp_copy
 
-    stop_preview = threading.Event()
-    threading.Thread(target=preview_loop, args=(jid, out_dir, src, stop_preview), daemon=True).start()
+    preview_dir = os.path.join(out_dir, ".preview")
+    frames = FramePreview(src, preview_dir, FFMPEG, FFPROBE)
+    capture_output = lambda: frames.capture(_newest_video(out_dir))
 
     try:
         if op == "transcode":
@@ -847,7 +869,8 @@ def run_job(lane, job):
             for k in ("codec", "height", "quality", "container"):
                 if o.get(k) not in (None, ""):
                     argv += ["--" + k, str(o[k])]
-            rc, cancelled = _stream_subprocess(lane, jid, argv)
+            with watch_frames(capture_output):
+                rc, cancelled = _stream_subprocess(lane, jid, argv)
         elif op == "upscale":
             enc = o.get("encoder") or resolve_lane_encoder("ai")
             argv = [CFG["venv_python"], os.path.join(HERE, "upscale_cli.py"),
@@ -863,7 +886,8 @@ def run_job(lane, job):
             # phase so its silent SPAN-model load animates instead of freezing at the copy band
             set_job(jid, stage=op, progress=0.0, indeterminate=True, message="Loading upscale model",
                     phase="Loading the upscaler", **_PASS_RESET)
-            rc, cancelled = _stream_subprocess(lane, jid, argv)
+            with watch_frames(capture_output):
+                rc, cancelled = _stream_subprocess(lane, jid, argv)
         elif op in ("decensor", "decensor+upscale"):
             if not decensor_available():
                 raise RuntimeError("decensor not available: set jasna_exe in config")
@@ -876,8 +900,10 @@ def run_job(lane, job):
             # the NAS); decensor now does too, and we copy only the finished file back.
             mid_dir = os.path.join(CFG["local_temp"], "mid_" + jid)
             os.makedirs(mid_dir, exist_ok=True)
-            # ---- live segment preview (opt-in): scan mosaics -> smart mode -> tap fragments
-            preview_on = bool(o.get("preview") or CFG.get("jasna_preview"))
+            restoration, split = _jasna_restoration(o)
+            # Jasna's own auto-split has the LTX/BasicVSR++ decisions. Explicit
+            # --segments replaces those decisions and cannot be combined with it.
+            preview_on = _preview_req and not split
             seg_string, seg_ranges, seg_codec = "", None, ""
             if preview_on and not CFG.get("jasna_in_place"):
                 push_log(jid, "preview: needs jasna >=0.8.0 (in-place mode); disabled", "warn")
@@ -912,33 +938,17 @@ def run_job(lane, job):
                 argv += ["--encoder-settings", str(CFG["jasna_encoder_settings"])]
             if CFG["jasna_no_compile"]:
                 argv.append("--no-compile")
-            # restoration model. A job may name one ("basicvsrpp" = the fast model,
-            # or an LTX level with its own ltx_auto_split); a job that names none
-            # gets this runner's default (config jasna_restoration + jasna_ltx_auto_split),
-            # so the Stash plugin's plain "Decensor" button follows the owner's choice.
-            # LTX = much more detail, minutes per minute of video; ltx_auto_split keeps
-            # it for the big mosaics only. jasna turns denoise off for LTX-restored
-            # parts and rejects a missing model/licence with a clear error.
-            if str(o.get("restoration") or "").strip():
-                restoration, split = str(o["restoration"]).lower(), o.get("ltx_auto_split")
-            else:
-                restoration = str(CFG.get("jasna_restoration") or "").lower()
-                split = CFG.get("jasna_ltx_auto_split")
-            if restoration in ("ltx-basic", "ltx", "ltx-4step", "ltx-8step"):
+            if restoration:
                 argv += ["--restoration-model", restoration]
-                try:
-                    split = int(split or 0)
-                except (TypeError, ValueError):
-                    split = 0
-                if 1 <= split <= 100:
-                    argv += ["--ltx-auto-split", str(split)]
-            else:
-                restoration = ""
+            if split:
+                argv += ["--ltx-auto-split", str(split)]
+            elif not preview_on and _jasna_can_fragment(CFG["jasna_exe"]):
+                argv.append("--fmp4")
             # primary spatial denoise on restored crops (jasna --denoise), independent
             # of the RTX secondary pass. Validated to jasna's accepted levels. With LTX
             # it only applies to the BasicVSR++ share of an auto-split.
             denoise_primary = str(o.get("denoise") or CFG.get("jasna_denoise") or "").lower()
-            if denoise_primary in ("low", "medium", "high") and (not restoration or "--ltx-auto-split" in argv):
+            if denoise_primary in ("low", "medium", "high") and (not restoration or split):
                 argv += ["--denoise", denoise_primary]
             if preview_on:
                 argv += ["--segments", seg_string, "--codec", seg_codec]
@@ -966,13 +976,14 @@ def run_job(lane, job):
                         argv += ["--rtx-denoise", denoise]
                     if deblur in (_levels | {"none"}):
                         argv += ["--rtx-deblur", deblur]
+            out_stem = os.path.splitext(os.path.basename(src))[0] + "_decensored"
+            restored = os.path.join(mid_dir, out_stem + ".mp4")
+            jasna_frames = JasnaFrames(frames, restored, ranges=seg_ranges)
             seg_stop = threading.Event()
             _seg = _seg_thread = None
             if preview_on:
-                from preview import SegmentPreview
                 _seg = SegmentPreview(
-                    jid=jid, watch_dir=(mid_dir or out_dir),
-                    out_stem=os.path.splitext(os.path.basename(src))[0] + "_decensored",
+                    jid=jid, watch_dir=mid_dir, out_stem=out_stem,
                     src=src, ranges=seg_ranges,
                     prev_dir=os.path.join(CFG["local_temp"], "preview_" + jid),
                     ffmpeg=FFMPEG, ffprobe=FFPROBE,
@@ -990,8 +1001,11 @@ def run_job(lane, job):
             set_job(jid, stage=op, progress=0.0, indeterminate=True,
                     message="Loading models & engines", phase="Loading models",
                     pass_no=1, passes=n_phases, pass_progress=0.0, **_PASS_RESET)
-            rc, cancelled = _stream_subprocess(lane, jid, argv, scale=(0, n_phases))
+            with watch_frames(jasna_frames.capture):
+                rc, cancelled = _stream_subprocess(lane, jid, argv, scale=(0, n_phases), stage=op)
             seg_stop.set()
+            if rc == 0 and not cancelled:
+                jasna_frames.capture(finished=True)
             if _seg is not None and rc == 0 and not cancelled:
                 # let the watcher drain the last segments, then concat them into one
                 # smooth "decensored portions only" sample clip for review
@@ -1002,8 +1016,8 @@ def run_job(lane, job):
                 if _seg.build_sample():
                     set_job(jid, sample=True)
             if chain and rc == 0 and not cancelled:
-                mid = _newest_video(mid_dir)
-                if not mid:
+                mid = restored
+                if not os.path.isfile(mid):
                     rc = 1
                     push_log(jid, "chain: decensor produced no output", "error")
                 else:
@@ -1021,13 +1035,15 @@ def run_job(lane, job):
                         argv.append("--fp16")
                     if o.get("no_trt") or not CFG.get("upscale_trt", True):
                         argv.append("--no-trt")
-                    rc, cancelled = _stream_subprocess(lane, jid, argv, scale=(1, n_phases))
+                    upscale_part = os.path.join(out_dir, out_stem + ".upscaling.tmp.mp4")
+                    with watch_frames(lambda: frames.capture(upscale_part, windows=jasna_frames.ranges)):
+                        rc, cancelled = _stream_subprocess(lane, jid, argv, scale=(1, n_phases))
             elif not chain and rc == 0 and not cancelled:
                 # decensor-only: jasna assembled locally in mid_dir; copy just the finished
                 # file to the NAS scratch (out_dir) for the coordinator to import. Write to
                 # a .partial name + atomic replace so _newest_video never sees a half-copy.
-                produced_local = _newest_video(mid_dir)
-                if not produced_local:
+                produced_local = restored
+                if not os.path.isfile(produced_local):
                     rc = 1
                     push_log(jid, "decensor produced no output", "error")
                 else:
@@ -1046,8 +1062,12 @@ def run_job(lane, job):
                         _purge(tmp_dest)
         else:
             raise RuntimeError("unsupported op on this runner: " + op)
+        if rc == 0 and not cancelled and op != "decensor":
+            produced = _newest_video(out_dir)
+            if produced:
+                windows = jasna_frames.ranges if op == "decensor+upscale" else None
+                frames.capture(produced, windows=windows, finished=True)
     finally:
-        stop_preview.set()
         if seg_stop:
             seg_stop.set()
         # retry-purge: on cancel/stall the tree-killed child can briefly hold these
@@ -1079,66 +1099,34 @@ def run_job(lane, job):
 # live before/after preview
 # --------------------------------------------------------------------------- #
 
-def _src_fps(path):
+def _jasna_restoration(opts):
+    # An explicit choice (including BasicVSR++) overrides both runner defaults.
+    if str(opts.get("restoration") or "").strip():
+        restoration, split = str(opts["restoration"]).lower(), opts.get("ltx_auto_split")
+    else:
+        restoration = str(CFG.get("jasna_restoration") or "").lower()
+        split = CFG.get("jasna_ltx_auto_split")
+    if restoration not in ("ltx-basic", "ltx", "ltx-4step", "ltx-8step"):
+        return "", 0
     try:
-        r = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "v:0",
-                            "-show_entries", "stream=r_frame_rate", "-of",
-                            "default=nw=1:nk=1", path],
-                           capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=20, creationflags=NOWIN)
-        num, _, den = r.stdout.strip().partition("/")
-        return float(num) / float(den or 1)
-    except Exception:  # noqa: BLE001
-        return None
+        split = int(split or 0)
+    except (ValueError, TypeError):
+        split = 0
+    return restoration, split if 1 <= split <= 100 else 0
 
 
-def _grab(src, t, dest):
-    tmp = dest + ".tmp"
+@lru_cache(maxsize=1)
+def _jasna_can_fragment(exe):
+    # Older Jasna builds do not support this flag. Probe the CLI once, not the GPU.
     try:
-        r = subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-ss", str(max(0.0, t)),
-                            "-i", src, "-frames:v", "1", "-vf", "scale=480:-2",
-                            "-q:v", "4", "-f", "image2", tmp],
-                           capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=25, creationflags=NOWIN)
-        if r.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
-            os.replace(tmp, dest)
-            return True
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        os.remove(tmp)
-    except OSError:
-        pass
-    return False
+        result = subprocess.run([exe, "--help"], capture_output=True, timeout=15,
+                                creationflags=NOWIN)
+        return result.returncode == 0 and b"--fmp4" in result.stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
-def preview_loop(jid, out_dir, input_path, stop_evt):
-    pdir = os.path.join(out_dir, ".preview")
-    try:
-        os.makedirs(pdir, exist_ok=True)
-    except OSError:
-        return
-    fps = _src_fps(input_path)
-    if not fps:
-        return
-    while not stop_evt.wait(2.0):
-        try:
-            with _jobs_lock:
-                j = _jobs.get(jid)
-                frame = j.get("frame") if j else None
-            if not frame:
-                continue
-            t = frame / fps - 2.0
-            if t < 1.0:
-                continue
-            part = _newest_video(out_dir)
-            if part and _grab(part, t, os.path.join(pdir, "after.jpg")):
-                _grab(input_path, t, os.path.join(pdir, "before.jpg"))
-        except Exception:  # noqa: BLE001
-            pass
-
-
-def preview_path(jid, which):
+def preview_path(jid, which, pair=None):
     with _jobs_lock:
         j = _jobs.get(jid)
     if not j:
@@ -1146,18 +1134,26 @@ def preview_path(jid, which):
     od = to_local(j["_opts"]["output_dir"])
     if not od:
         return None
-    p = os.path.join(od, ".preview", which + ".jpg")
-    return p if os.path.isfile(p) else None
+    directory = os.path.join(od, ".preview")
+    return pair_path(directory, which, latest_pair(directory) if pair is None else pair)
 
 
 def seg_preview_path(jid, n, which):
     """Local path to a segment-preview clip (seg<N>_before/after.mp4), or None."""
+    with _jobs_lock:
+        job = _jobs.get(jid)
+        if not job or not any(s["n"] == int(n) for s in job.get("segments", [])):
+            return None
     p = os.path.join(CFG["local_temp"], "preview_" + jid, "seg%d_%s.mp4" % (int(n), which))
     return p if os.path.isfile(p) else None
 
 
 def sample_preview_path(jid):
     """Local path to the concatenated decensored-only sample clip, or None."""
+    with _jobs_lock:
+        job = _jobs.get(jid)
+        if not job or not job.get("sample"):
+            return None
     p = os.path.join(CFG["local_temp"], "preview_" + jid, "sample.mp4")
     return p if os.path.isfile(p) else None
 
@@ -1549,7 +1545,8 @@ class Handler(BaseHTTPRequestHandler):
                                     "paused": _node["paused"]})
         m = re.match(r"^/jobs/([0-9a-f]+)/preview/(before|after)\.jpg$", raw)
         if m:
-            p = preview_path(m.group(1), m.group(2))
+            query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+            p = preview_path(m.group(1), m.group(2), query.get("pair", [None])[0])
             return self._send_file(p, "image/jpeg") if p else self._send(404, {"error": "no preview"})
         m = re.match(r"^/jobs/([0-9a-f]+)/seg/(\d+)/(before|after)\.mp4$", raw)
         if m:

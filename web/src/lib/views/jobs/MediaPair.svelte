@@ -1,51 +1,36 @@
 <script lang="ts">
-  import { MOCK } from '../../api/client';
   import { jobMedia } from '../../api/jobs';
-  import { videoUrl } from '../../api/library';
-  import type { Job, JobSegment } from '../../api/types';
-  import Thumb from '../../ui/Thumb.svelte';
-  import { BLOCKS } from './jobInfo';
-  import Clip from './Clip.svelte';
+  import type { Job } from '../../api/types';
 
-  /* The two small pictures of a running card: the original next to the restored result. While segments
-     finish it shows the newest one; otherwise the live feed next to the original. Neutral placeholders
-     stay underneath until real video arrives. */
-  let { job, fresh }: { job: Job; fresh: boolean } = $props();
-
-  const newest = $derived<JobSegment | null>(job.segments?.length ? job.segments.reduce((a, b) => (b.n > a.n ? b : a)) : null);
-  const armed = $derived(!!job.preview && !fresh && (job.progress > 0 || (job.frame ?? 0) > 0));
-  const beforeSrc = $derived(newest ? jobMedia.segBefore(job.id, newest.n) : videoUrl(job.scene_id));
-  const afterSrc = $derived(newest ? jobMedia.segAfter(job.id, newest.n) : jobMedia.live(job.id));
-  /** segment pair or live feed: a change of source starts new players */
-  const pairKey = $derived(newest ? `s${newest.n}` : 'live');
-  const caption = $derived(newest ? `After · moment ${newest.n + 1} of ${job.segments?.length ?? 1}` : 'After · live');
-
+  let { job }: { job: Job } = $props();
+  const newest = $derived(job.segments?.reduce<number | undefined>(
+    (last, seg) => last === undefined || seg.n > last ? seg.n : last, undefined));
+  const pair = $derived(job.preview && job.preview_id ? job.preview_id : null);
+  const key = $derived(pair ? `frame:${pair}` : newest !== undefined ? `moment:${newest}` : null);
+  let beforeReady = $state<string | null>(null);
+  let afterReady = $state<string | null>(null);
   let before = $state<HTMLVideoElement>();
   let after = $state<HTMLVideoElement>();
 
-  /* The original follows the restored clip: same play state, pulled back when it drifts. */
-  function sync(): void {
-    if (!before || !after) return;
-    if (after.paused !== before.paused) {
-      if (after.paused) before.pause();
-      else before.play().catch(() => { /* autoplay refused: the poster stays, nothing to do */ });
-    }
-    if (before.readyState >= 1 && Math.abs(before.currentTime - after.currentTime) > (newest ? 0.2 : 1)) before.currentTime = after.currentTime;
+  function sync() {
+    if (!after || !before || before.readyState < 1) return;
+    if (Math.abs(before.currentTime - after.currentTime) > 0.2) before.currentTime = after.currentTime;
+    if (after.paused) before.pause();
+    else if (before.paused) before.play().catch(() => {});
   }
 </script>
 
-<div class={['jmedia', fresh && 'one']}>
-  <div class="jv">
-    <Thumb id={job.scene_id} />
-    {#if MOCK}<div class="patch blocks">{#each BLOCKS as l, i (i)}<i style:--l={l}></i>{/each}</div>{/if}
-    {#if armed}{#key pairKey}<Clip src={beforeSrc} bind:video={before} loop={!!newest} />{/key}{/if}
-  </div>
-  {#if !fresh}
-    <div class="jv">
-      <Thumb id={job.scene_id} />
-      {#if MOCK}<div class="patch clean"></div>{/if}
-      {#if armed}{#key pairKey}<Clip src={afterSrc} bind:video={after} loop={!!newest} onsync={sync} />{/key}{/if}
+{#if key}
+  {#each [key] as version (version)}
+    <div class="jmedia" hidden={beforeReady !== key || afterReady !== key}>
+      {#if pair}
+        <img class="jv" src={jobMedia.before(job.id, pair)} alt="Original frame" onload={() => beforeReady = version} onerror={() => beforeReady = null} />
+        <img class="jv" src={jobMedia.after(job.id, pair)} alt="Processed frame" onload={() => afterReady = version} onerror={() => afterReady = null} />
+      {:else if newest !== undefined}
+        <video class="jv" bind:this={before} src={jobMedia.segBefore(job.id, newest)} aria-label="Original moment" muted playsinline loop preload="auto" onloadeddata={() => beforeReady = version} onerror={() => beforeReady = null}></video>
+        <video class="jv" bind:this={after} src={jobMedia.segAfter(job.id, newest)} aria-label="Processed moment" muted playsinline autoplay loop preload="auto" onloadeddata={() => afterReady = version} onerror={() => afterReady = null} ontimeupdate={sync} onplay={sync} onpause={sync}></video>
+      {/if}
+      <div class="jc"><span>Before</span><span>{pair ? 'After · processed frame' : `After · moment ${(newest ?? 0) + 1}`}</span></div>
     </div>
-  {/if}
-  <div class="jc">{#if fresh}<span>Just started</span>{:else}<span>Before</span><span>{caption}</span>{/if}</div>
-</div>
+  {/each}
+{/if}

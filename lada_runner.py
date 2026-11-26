@@ -28,6 +28,9 @@ import subprocess
 import threading
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
+
+from winrunner.frame_preview import FramePreview, latest_pair, pair_path, watch_frames
 
 LADA_CLI = os.environ.get("LADA_CLI", "/opt/lada/.venv/bin/lada-cli")
 LADA_DIR = os.environ.get("LADA_DIR", "/opt/lada")
@@ -199,97 +202,16 @@ def _stage_of(line):
 
 # --------------------------------------------------------------------------- #
 # live before/after frame extraction
-#
-# The output is a growing fragmented mp4, whose container duration reads 0
-# mid-write — so we derive the encode position from our own parsed progress
-# (frames done / source fps) and extract with the bundled ffmpeg 7.x. JPEGs
-# land in <out_dir>/.preview/ and are served at /jobs/<id>/preview/*.jpg.
+# Each snapshot is an immutable before/after pair taken from real video frames.
 # --------------------------------------------------------------------------- #
 
-def _src_fps(path):
-    try:
-        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
-                            "-show_entries", "stream=r_frame_rate",
-                            "-of", "default=nw=1:nk=1", path],
-                           capture_output=True, text=True, timeout=15)
-        num, _, den = r.stdout.strip().partition("/")
-        return float(num) / float(den or 1)
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _grab(src, t, dest):
-    """Extract one frame; returns (ok, error-string)."""
-    tmp = dest + ".tmp"
-    try:
-        r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
-                            "-ss", str(max(0.0, t)), "-i", src,
-                            "-frames:v", "1", "-vf", "scale=480:-2",
-                            "-q:v", "4", "-f", "image2", tmp],
-                           capture_output=True, text=True, timeout=25)
-        if r.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
-            os.replace(tmp, dest)
-            return True, ""
-        err = (r.stderr or "").strip()[-200:] or ("rc=%s empty output" % r.returncode)
-    except Exception as exc:  # noqa: BLE001
-        err = str(exc)
-    try:
-        os.remove(tmp)
-    except OSError:
-        pass
-    return False, err
-
-
-def _preview_loop(jid, out_dir, input_path, stop_evt):
-    pdir = os.path.join(out_dir, ".preview")
-    os.makedirs(pdir, exist_ok=True)
-    fps = _src_fps(input_path)
-    if not fps:
-        push_log(jid, "preview: could not read source fps; preview disabled", "warn")
-        return
-    announced = warned = False
-    misses = 0
-    while not stop_evt.wait(2.0):
-        try:
-            with _jobs_lock:
-                j = _jobs.get(jid)
-                frame = j.get("frame") if j else None
-            if not frame:
-                continue
-            t = frame / fps - 2.0        # trail the encoder by a safety margin
-            if t < 1.0:
-                continue
-            part = _newest_video(out_dir)
-            if not part:
-                continue
-            ok, err = _grab(part, t, os.path.join(pdir, "after.jpg"))
-            if ok:
-                misses = 0
-                _grab(input_path, t, os.path.join(pdir, "before.jpg"))
-                if not announced:
-                    announced = True
-                    push_log(jid, "preview: live frames available", "event")
-            else:
-                # The first attempts routinely race the encoder's first fragment
-                # flush ("Invalid data found") and self-heal — only warn when it
-                # keeps failing, which indicates a real problem.
-                misses += 1
-                if misses >= 5 and not warned:
-                    warned = True
-                    push_log(jid, "preview grabs failing repeatedly: " + err, "warn")
-        except Exception as exc:  # noqa: BLE001 - preview must never break the job
-            if not warned:
-                warned = True
-                push_log(jid, "preview loop error: " + str(exc), "warn")
-
-
-def preview_path(jid, which):
+def preview_path(jid, which, pair=None):
     with _jobs_lock:
         j = _jobs.get(jid)
     if not j:
         return None
-    p = os.path.join(j["_opts"]["output_dir"], ".preview", which + ".jpg")
-    return p if os.path.isfile(p) else None
+    directory = os.path.join(j["_opts"]["output_dir"], ".preview")
+    return pair_path(directory, which, latest_pair(directory) if pair is None else pair)
 
 
 def read_gpu():
@@ -424,9 +346,7 @@ def run_job(job):
     set_job(jid, state="running", message="Starting " + op, started_at=time.time())
     with _active_lock:
         _active["cancel"] = False
-    stop_preview = threading.Event()
-    threading.Thread(target=_preview_loop, args=(jid, out_dir, o["input"], stop_preview),
-                     daemon=True).start()
+    frames = FramePreview(o["input"], os.path.join(out_dir, ".preview"), FFMPEG, FFPROBE)
 
     # Phase plan. For the chain, phase 2 consumes phase 1's newest output.
     phases = []                       # list of (name, argv_builder)
@@ -441,30 +361,35 @@ def run_job(job):
                 _ended_at=time.time())
         return
 
-    try:
-        current_input = o["input"]
-        for idx, (name, build) in enumerate(phases):
-            set_job(jid, message="Running " + name)
+    current_input = o["input"]
+    for idx, (name, build) in enumerate(phases):
+        set_job(jid, message="Running " + name, frame=None, total_frames=None)
+        if name == "upscale":
+            stem = os.path.splitext(os.path.basename(current_input))[0]
+            part = os.path.join(out_dir, stem + ".upscaling.tmp.mp4")
+            poll = lambda: frames.capture(part)
+        else:
+            poll = lambda: frames.capture(_newest_video(out_dir))
+        with watch_frames(poll):
             rc, cancelled = _run_phase(jid, build(o, current_input, out_dir, encoder),
                                        idx, len(phases))
-            if cancelled or rc is None:
-                set_job(jid, state="cancelled", message="Cancelled", _ended_at=time.time())
-                push_log(jid, "Cancelled", "warn")
-                return
-            if rc != 0:
-                msg = "%s exited %s" % (name, rc)
-                set_job(jid, state="error", message=msg, error=msg, _ended_at=time.time())
-                push_log(jid, "ERROR: " + msg, "error")
-                return
-            nxt = _newest_video(out_dir)
-            if not nxt:
-                msg = "%s produced no video" % name
-                set_job(jid, state="error", message=msg, error=msg, _ended_at=time.time())
-                push_log(jid, "ERROR: " + msg, "error")
-                return
-            current_input = nxt
-    finally:
-        stop_preview.set()
+        if cancelled or rc is None:
+            set_job(jid, state="cancelled", message="Cancelled", _ended_at=time.time())
+            push_log(jid, "Cancelled", "warn")
+            return
+        if rc != 0:
+            msg = "%s exited %s" % (name, rc)
+            set_job(jid, state="error", message=msg, error=msg, _ended_at=time.time())
+            push_log(jid, "ERROR: " + msg, "error")
+            return
+        nxt = _newest_video(out_dir)
+        if not nxt or nxt == current_input:
+            msg = "%s produced no video" % name
+            set_job(jid, state="error", message=msg, error=msg, _ended_at=time.time())
+            push_log(jid, "ERROR: " + msg, "error")
+            return
+        current_input = nxt
+        frames.capture(current_input, finished=True)
 
     set_job(jid, state="done", progress=1.0, message="Done", output_path=current_input,
             _ended_at=time.time())
@@ -673,7 +598,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, read_gpu())
         m = re.match(r"^/jobs/([0-9a-f]+)/preview/(before|after)\.jpg$", raw)
         if m:
-            p = preview_path(m.group(1), m.group(2))
+            query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+            p = preview_path(m.group(1), m.group(2), query.get("pair", [None])[0])
             if not p:
                 return self._send(404, {"error": "no preview yet"})
             try:

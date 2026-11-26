@@ -187,6 +187,8 @@ class JobRow(QFrame):
             bar.setRange(0, 100); bar.setValue(int((job.get("progress") or 0) * 100))
         v.addWidget(bar)
         msg = job.get("message") or ""
+        if job.get("stage") == "scan" and job.get("step") and job.get("detail"):
+            msg = "%s · %s" % (msg, job["detail"])
         if msg and msg.lower() != (job.get("state") or "").lower():
             v.addWidget(_lbl(msg, muted=True, size=10))   # the live phase (compile/scan/mux/…)
         bits = []

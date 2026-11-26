@@ -16,9 +16,11 @@ a fragment that overlaps a requested range is a restored span.
 import os
 import glob
 import json
+import math
 import time
 import subprocess
 import threading
+from pathlib import Path
 
 IS_WIN = os.name == "nt"
 NOWIN = subprocess.CREATE_NO_WINDOW if IS_WIN else 0
@@ -50,6 +52,79 @@ def _probe_duration(ffprobe, path):
         return float(r.stdout.strip())
     except Exception:  # noqa: BLE001
         return None
+
+
+class JasnaFrames:
+    """Find readable exports and smart fragments with a known source timeline offset."""
+
+    def __init__(self, frames, output, ranges=None):
+        self.frames = frames
+        self.output = Path(output)
+        self.ranges = tuple(tuple(r) for r in ranges) if ranges else None
+        self.checkpoint = self.output.with_name(f".{self.output.stem}.jasna-resume") / "render"
+        self._read_ranges = False
+        self._last_span = -1
+
+    def _load_ranges(self):
+        if self._read_ranges:
+            return
+        try:
+            inputs = json.loads((self.checkpoint / "job.json").read_text(encoding="utf-8"))["inputs"]
+            restored, ltx = [], []
+            for row in inputs["latents"]["segments"]:
+                start, end = float(row["start"]), float(row["end"])
+                if math.isfinite(start) and math.isfinite(end) and 0 <= start < end:
+                    restored.append((start, end))
+                    if row["restoration"]["model"] == "ltx":
+                        ltx.append((start, end))
+            self.ranges = tuple(sorted(ltx or restored)) or self.ranges
+            self._read_ranges = True
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+
+    def _spans(self, fragments):
+        # The raw span names alone don't tell us where they belong. Jasna writes
+        # the exact planned durations in its concat manifest before assembly.
+        try:
+            rows = (fragments / "fragments.ffconcat").read_text(encoding="utf-8").splitlines()
+            if not rows or rows[0] != "ffconcat version 1.0" or len(rows) % 2 != 1:
+                raise ValueError("incomplete concat manifest")
+            spans, start = [], 0.0
+            for i in range(1, len(rows), 2):
+                if not rows[i].startswith("file ") or not rows[i + 1].startswith("duration "):
+                    raise ValueError("unrecognized concat row")
+                duration = float(rows[i + 1].split(" ", 1)[1])
+                if not math.isfinite(duration) or duration <= 0:
+                    raise ValueError("invalid span duration")
+                spans.append((start, duration))
+                start += duration
+            if spans:
+                return spans
+        except (OSError, ValueError):
+            pass
+        # Before assembly, only span zero is guaranteed to begin at 0. If it's
+        # a copy gap, no restored range overlaps the frames we can read from it.
+        return [(0.0, None)]
+
+    def capture(self, finished=False):
+        self._load_ranges()
+        if self.frames.capture(self.output, windows=self.ranges, finished=finished):
+            return True
+        if finished or not self.ranges:
+            return False
+        fragments = self.checkpoint / "segments"
+        spans = self._spans(fragments)
+        for n in range(len(spans) - 1, self._last_span, -1):
+            start, duration = spans[n]
+            if duration and not any(lo < start + duration and hi > start for lo, hi in self.ranges):
+                continue
+            fragment = fragments / f"{n:04d}-raw.nut"
+            if n == 0 and duration is None and not fragment.is_file():
+                fragment = fragments / "0000-partial.nut"
+            if self.frames.capture(fragment, offset=start, duration=duration, windows=self.ranges):
+                self._last_span = n
+                return True
+        return False
 
 
 def _mosaic_window(start, end, ranges):
@@ -113,9 +188,9 @@ class SegmentPreview:
                 return p
         return None
 
-    def _is_done(self, temp_dir, idx, path):
-        # a fragment is complete once the NEXT span's raw/normalized file exists
-        # (jasna writes spans strictly in order), or it stops growing.
+    def _is_done(self, temp_dir, idx):
+        # Older Jasna writes spans in order. The next span or final assembly
+        # proves this one is finished.
         nxt = self._fragment(temp_dir, idx + 1)
         if nxt or os.path.exists(os.path.join(temp_dir, "%04d-raw.nut" % (idx + 1))):
             return True
@@ -132,7 +207,7 @@ class SegmentPreview:
         # downscale only the mosaic window [ss, ss+t) of the restored fragment off the
         # 3080 (no -c copy: light, browser-friendly, faststart, normalized size). ss/t
         # keep this bounded so a long fragment can't trigger a multi-minute encode.
-        argv = [self.ffmpeg, "-nostdin", "-loglevel", "error", "-y",
+        argv = [self.ffmpeg, "-nostdin", "-loglevel", "error", "-abort_on", "empty_output_stream", "-y",
                 "-ss", "%.3f" % ss, "-i", frag, "-t", "%.3f" % t,
                 "-an", "-vf", self._vf(), "-c:v", self.encoder, "-pix_fmt", "yuv420p",
                 "-movflags", "+faststart", dst]
@@ -141,7 +216,7 @@ class SegmentPreview:
     def _encode_before(self, start, dur, dst):
         # cut the matching original window (accurate seek + re-encode for exact
         # frame alignment with the after clip)
-        argv = [self.ffmpeg, "-nostdin", "-loglevel", "error", "-y",
+        argv = [self.ffmpeg, "-nostdin", "-loglevel", "error", "-abort_on", "empty_output_stream", "-y",
                 "-ss", "%.3f" % start, "-i", self.src, "-t", "%.3f" % dur,
                 "-an", "-vf", self._vf(), "-c:v", self.encoder, "-pix_fmt", "yuv420p",
                 "-movflags", "+faststart", dst]
@@ -221,14 +296,14 @@ class SegmentPreview:
             # process every fragment that is complete, in strict index order
             while True:
                 frag = self._fragment(temp_dir, self._next_idx)
-                if not frag or not self._is_done(temp_dir, self._next_idx, frag):
+                if not frag or not self._is_done(temp_dir, self._next_idx):
                     break
                 dur = _probe_duration(self.ffprobe, frag)
                 if dur is None or dur <= 0:
-                    dur = 0.0
+                    break                   # a missing duration would shift all following before-clips
                 start = self._cum
                 self._cum += dur
-                win = _mosaic_window(start, start + dur, self.ranges) if dur > 0 else None
+                win = _mosaic_window(start, start + dur, self.ranges)
                 if win:
                     self._emit(self._next_idx, start, win, frag)
                 self._next_idx += 1

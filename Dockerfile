@@ -32,6 +32,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY core.py jobprogress.py runner_stream.py worker.py server.py events.py cloud_api.py cloud_caps.py cloud_jasna.py entrypoint.sh /app/
 COPY winrunner/transcode_cli.py /app/
+COPY winrunner/frame_preview.py /app/winrunner/
 COPY --from=web /web/dist /app/web/dist
 RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 

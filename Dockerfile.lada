@@ -59,6 +59,7 @@ RUN uv pip install spandrel
 COPY lada_runner.py /opt/lada/lada_runner.py
 COPY upscale_cli.py /opt/lada/upscale_cli.py
 COPY winrunner/transcode_cli.py /opt/lada/transcode_cli.py
+COPY winrunner/frame_preview.py /opt/lada/winrunner/
 COPY lada_entrypoint.sh /usr/local/bin/lada_entrypoint.sh
 # normalize line endings (file may transit a Windows checkout) + make executable
 RUN sed -i 's/\r$//' /usr/local/bin/lada_entrypoint.sh && chmod +x /usr/local/bin/lada_entrypoint.sh

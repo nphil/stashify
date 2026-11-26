@@ -12,9 +12,8 @@ export const jobAction = (id: string, action: JobAction) => post<Job>(`api/jobs/
 
 /** Media the browser loads itself. */
 export const jobMedia = {
-  live: (id: string) => mediaUrl(`api/jobs/${id}/live.mp4`),
-  before: (id: string) => mediaUrl(`api/jobs/${id}/preview/before.jpg`),
-  after: (id: string) => mediaUrl(`api/jobs/${id}/preview/after.jpg`),
+  before: (id: string, pair: string) => mediaUrl(`api/jobs/${id}/preview/before.jpg`, { pair }),
+  after: (id: string, pair: string) => mediaUrl(`api/jobs/${id}/preview/after.jpg`, { pair }),
   segBefore: (id: string, n: number) => mediaUrl(`api/jobs/${id}/seg/${n}/before.mp4`),
   segAfter: (id: string, n: number) => mediaUrl(`api/jobs/${id}/seg/${n}/after.mp4`),
   sample: (id: string) => mediaUrl(`api/jobs/${id}/sample.mp4`),

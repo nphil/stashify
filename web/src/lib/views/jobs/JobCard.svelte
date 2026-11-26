@@ -31,7 +31,7 @@
 </script>
 
 <article class="job" aria-label={title}>
-  <MediaPair {job} {fresh} />
+  <MediaPair {job} />
   <div class="jbody">
     <div class="jhead">
       <div class="grow">

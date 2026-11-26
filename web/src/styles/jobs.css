@@ -1,9 +1,9 @@
 /* ---------- jobs ---------- */
 .job { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: var(--lu-space-5); padding: var(--lu-inset-card); border-radius: var(--lu-radius-card); background: var(--lu-material-card); border: 1px solid var(--lu-material-edge); }
 .jmedia { display: grid; grid-template-columns: 1fr 1fr; gap: var(--lu-space-2); align-content: start; }
-.jmedia .jv { position: relative; aspect-ratio: 16 / 9; border-radius: var(--lu-radius-control); overflow: hidden; }
+.jmedia .jv { width: 100%; min-width: 0; aspect-ratio: 16 / 9; object-fit: contain; background: var(--lu-material-well); border-radius: var(--lu-radius-control); }
 .jmedia .jc { grid-column: 1 / -1; display: flex; justify-content: space-between; color: var(--lu-ink-2); font: 500 var(--lu-type-caption)/1.3 var(--lu-font); }
-.jmedia.one { grid-template-columns: 1fr; }
+.jmedia[hidden] { display: none; }
 .jbody { display: flex; flex-direction: column; gap: var(--lu-space-3); min-width: 0; }
 .jhead { display: flex; align-items: flex-start; gap: var(--lu-space-3); }
 .jhead .ttl { font-size: 20px; }
@@ -55,10 +55,8 @@ ol.phases { list-style: none; margin: 0; padding: 0; }
 .pbar.is-paused i { opacity: .5; }
 .pbar.indeterminate i { width: 38%; transform: none; transition: none; animation: jsweep 1.4s ease-in-out infinite; }
 @keyframes jsweep { from { transform: translateX(-100%); } to { transform: translateX(263%); } }
-/* small pictures of a running card */
-.jv > .thumb { position: absolute; inset: 0; }
-.jv video, .cmp video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity var(--lu-motion-layer) var(--lu-ease); background: var(--lu-material-well); pointer-events: none; }
-.jv video.in, .cmp video.in { opacity: 1; }
+.cmp video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity var(--lu-motion-layer) var(--lu-ease); background: var(--lu-material-well); pointer-events: none; }
+.cmp video.in { opacity: 1; }
 /* live log */
 .jlog { display: grid; gap: var(--lu-space-2); justify-items: start; }
 .jlog .btn .cap { margin-left: var(--lu-space-2); }

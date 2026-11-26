@@ -44,6 +44,7 @@ import events
 import cloud_api
 import cloud_jasna
 import runner_stream
+from winrunner.frame_preview import latest_pair, mirror_pair, pair_path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -619,34 +620,11 @@ def gpu_poller():
 # --------------------------------------------------------------------------- #
 # live before/after frame preview
 #
-# While a job runs, the backend registers where its work-in-progress lives
-# (core.set_live_preview). Every few seconds this poller extracts the newest
-# decensored frame plus the matching original frame as small JPEGs, which the
-# dashboard shows side by side. Files land under PREVIEW_DIR/<job_id>/.
+# The runners publish matched JPEGs together in shared scratch. The poller
+# keeps a copy under PREVIEW_DIR/<job_id>/ so the pair survives job cleanup.
 # --------------------------------------------------------------------------- #
 
 PREVIEW_DIR = os.environ.get("PREVIEW_DIR", "/tmp/decensor_preview")
-
-
-def _preview_runner(info, dest_dir):
-    """The runner extracts the frames (its ffmpeg understands the growing
-    fragmented mp4 and it knows the true encode position); just mirror them."""
-    import requests
-
-    tok = info.get("token", "")
-    headers = {"X-Runner-Token": tok, "X-Lada-Token": tok}
-    for which in ("after", "before"):
-        try:
-            r = core.http().get("%s/jobs/%s/preview/%s.jpg" % (info["base"], info["rid"], which),
-                             headers=headers, timeout=10)
-        except Exception:  # noqa: BLE001
-            return
-        if r.status_code != 200 or not r.content:
-            return
-        tmp = os.path.join(dest_dir, which + ".tmp")
-        with open(tmp, "wb") as fh:
-            fh.write(r.content)
-        os.replace(tmp, os.path.join(dest_dir, which + ".jpg"))
 
 
 _seg_lock = threading.Lock()
@@ -686,6 +664,7 @@ def _mirror_segments(info, jid, dest):
             if rr.status_code != 200 or not rr.content:
                 ok = False
                 break
+            os.makedirs(dest, exist_ok=True)
             tmp = os.path.join(dest, "seg%d_%s.tmp" % (n, which))
             with open(tmp, "wb") as fh:
                 fh.write(rr.content)
@@ -702,6 +681,7 @@ def _mirror_segments(info, jid, dest):
             rr = core.http().get("%s/jobs/%s/sample.mp4" % (info["base"], info["rid"]),
                               headers=headers, timeout=60)
             if rr.status_code == 200 and rr.content:
+                os.makedirs(dest, exist_ok=True)
                 tmp = samp + ".tmp"
                 with open(tmp, "wb") as fh:
                     fh.write(rr.content)
@@ -711,34 +691,29 @@ def _mirror_segments(info, jid, dest):
 
 
 def preview_poller():
-    extractors = {"runner": _preview_runner, "lada": _preview_runner}   # accept legacy tag too
     while True:
         time.sleep(2)
-        with _jobs_lock:
-            jid = _running_job_id
-        if not jid:
-            continue
         info = core.get_live_preview()
-        fn = extractors.get(info.get("type"))
-        if not fn:
+        dest = info.get("preview_dir")
+        if not dest:
             continue
-        dest = os.path.join(PREVIEW_DIR, jid)
+        mirror_pair(os.path.join(info["out_dir"], ".preview"), dest)
         try:
-            os.makedirs(dest, exist_ok=True)
-            fn(info, dest)
-            _mirror_segments(info, jid, dest)
+            _mirror_segments(info, os.path.basename(dest), dest)
         except Exception:  # noqa: BLE001 - preview is best-effort, never fatal
             pass
 
 
-def preview_file(job_id, which):
-    p = os.path.join(PREVIEW_DIR, job_id, which + ".jpg")
-    return p if os.path.isfile(p) else None
+def preview_file(job_id, which, pair=None):
+    directory = os.path.join(PREVIEW_DIR, job_id)
+    return pair_path(directory, which, latest_pair(directory) if pair is None else pair)
 
 
 def seg_file(job_id, n, which):
-    p = os.path.join(PREVIEW_DIR, job_id, "seg%d_%s.mp4" % (int(n), which))
-    return p if os.path.isfile(p) else None
+    base = os.path.join(PREVIEW_DIR, job_id, "seg%d_" % int(n))
+    if all(os.path.isfile(base + side + ".mp4") for side in ("before", "after")):
+        return base + which + ".mp4"
+    return None
 
 
 def job_segments(job_id):
@@ -752,8 +727,7 @@ def sample_file(job_id):
 
 
 def _cleanup_preview(job_id):
-    """After keep/discard, drop the transient preview artifacts (segment clips +
-    the decensored sample reel). The full decensored video stays in Stash."""
+    """Drop the comparison frames, segment clips and sample; keep the full video."""
     import shutil
     with _seg_lock:
         _segments.pop(job_id, None)
@@ -900,7 +874,8 @@ def public(job):
             and job.get("stage") != "import":
         out["idle_s"] = max(0, int(time.time() - ua))   # how long since the job last gave a sign of life
     out["log_cursor"] = job_log_cursor(job.get("id"))
-    out["preview"] = preview_file(job.get("id"), "after") is not None
+    out["preview_id"] = latest_pair(os.path.join(PREVIEW_DIR, job["id"]))
+    out["preview"] = out["preview_id"] is not None
     out["segments"] = job_segments(job.get("id"))   # live mosaic-segment before/after clips
     out["sample"] = sample_file(job.get("id")) is not None   # concatenated decensored-only reel
     return out
@@ -981,7 +956,8 @@ def load_reviews():
 
 # What the card shows besides the number. Always set from a status (a None clears it), so a step or
 # time left never outlives the phase it belonged to.
-STATUS_KEYS = ("phase", "step", "steps", "detail", "pass_no", "passes", "estimate")
+STATUS_KEYS = ("phase", "step", "steps", "detail", "pass_no", "passes", "estimate",
+               "frame", "total_frames", "fps", "eta")
 
 
 def progress_cb(job_id):
@@ -999,7 +975,7 @@ def progress_cb(job_id):
             if "phase" not in stats:          # the coordinator's own step: its message is already plain words
                 stats = dict(stats, phase=msg, step=None, steps=None, detail=None, pass_no=None, passes=None,
                              estimate=False)
-        for k in ("stage", "frame", "total_frames", "fps", "eta", "indeterminate", "cloud_phase"):
+        for k in ("stage", "indeterminate", "cloud_phase"):
             if stats.get(k) is not None:
                 fields[k] = stats[k]
         for k in STATUS_KEYS:
@@ -1029,6 +1005,7 @@ def job_config(job):
 def do_process(job):
     job_id = job["id"]
     cfg = job_config(job)
+    cfg["_preview_dir"] = os.path.join(PREVIEW_DIR, job_id)
     set_job(job_id, state="running", message="Starting", started_at=time.time(),
             paused=False, stage=None, frame=None, total_frames=None, fps=None, eta=None,
             indeterminate=True, backend=cfg.get("backend"), phase="Starting", step=None, steps=None,
@@ -1385,7 +1362,8 @@ class Handler(BaseHTTPRequestHandler):
         # Live before/after preview frames (also <img>-loaded, so unauth'd).
         m = re.match(r"^/api/jobs/([0-9a-f]+)/preview/(before|after)\.jpg$", path)
         if m:
-            p = preview_file(m.group(1), m.group(2))
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query, keep_blank_values=True)
+            p = preview_file(m.group(1), m.group(2), query.get("pair", [None])[0])
             if not p:
                 return self._send(404, {"error": "no preview yet"})
             try:

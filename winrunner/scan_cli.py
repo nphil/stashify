@@ -1,17 +1,16 @@
 """Headless mosaic scan for the Stashify Windows runner's live-preview feature.
 
 The frozen jasna.exe has no scan CLI, so this reproduces jasna's whole-video
-mosaic scan without torch/TensorRT: decode sampled frames via ffmpeg (NVDEC when
-available), run the bundled rfdetr-v5.onnx through onnxruntime (DirectML -> the
-3080 via DirectX, no CUDA/cuDNN), take jasna's per-frame score
-(sigmoid(logits).max()), and merge above-floor samples into padded time ranges
-(jasna segments_from_scores). Prints one JSON line with the `--segments` string.
+mosaic scan: decode sampled frames via ffmpeg (NVDEC when available), run RF-DETR
+with a compatible TensorRT engine or through onnxruntime (DirectML), take jasna's
+per-frame score (sigmoid(logits).max()), and merge above-floor samples into
+padded time ranges. Prints one JSON line with the `--segments` string.
 
 jasna re-detects PRECISELY inside whatever ranges we pass, so the scan only needs
 recall: a low floor + generous padding + fine sampling. False positives just get
 harmlessly re-encoded.
 
-Deps: numpy + onnxruntime-directml (no opencv - ffmpeg does decode + resize).
+Deps: numpy and ffmpeg, plus TensorRT/torch or onnxruntime-directml.
 """
 import argparse
 import glob
@@ -134,7 +133,6 @@ class TrtScorer:
             self.engine = rt.deserialize_cuda_engine(fh.read())
         if self.engine is None:
             raise RuntimeError("deserialize failed (TensorRT version mismatch?)")
-        self.ctx = self.engine.create_execution_context()
         td = {trt.DataType.FLOAT: torch.float32, trt.DataType.HALF: torch.float16,
               trt.DataType.INT32: torch.int32, trt.DataType.BOOL: torch.bool}
         ins, outs = [], []
@@ -142,7 +140,18 @@ class TrtScorer:
             n = self.engine.get_tensor_name(i)
             (ins if self.engine.get_tensor_mode(n) == trt.TensorIOMode.INPUT else outs).append(n)
         self._in = ins[0]
-        self.ctx.set_input_shape(self._in, (self.batch, 3, RES, RES))
+        wanted = (self.batch, 3, RES, RES)
+        shape = tuple(self.engine.get_tensor_shape(self._in))
+        if len(shape) != len(wanted) or any(d not in (-1, w) for d, w in zip(shape, wanted)):
+            raise ValueError("engine input %s does not support %s" % (shape, wanted))
+        if -1 in shape:
+            # The execution context uses optimization profile 0 by default.
+            lo, _, hi = self.engine.get_tensor_profile_shape(self._in, 0)
+            if not all(a <= w <= b for a, w, b in zip(lo, wanted, hi)):
+                raise ValueError("engine profile %s to %s does not support %s" % (tuple(lo), tuple(hi), wanted))
+        self.ctx = self.engine.create_execution_context()
+        if self.ctx is None or not self.ctx.set_input_shape(self._in, wanted):
+            raise RuntimeError("could not set TensorRT input shape %s" % (wanted,))
         self._in_dtype = td[self.engine.get_tensor_dtype(self._in)]
         self._out_t, shapes = {}, {}
         for n in outs:
@@ -168,15 +177,22 @@ class TrtScorer:
 
 
 def make_scorer(args):
-    """TensorRT (fast) if requested + available, else onnxruntime; TRT failure
-    (missing engine, no tensorrt, version mismatch) transparently degrades to DML."""
-    if args.provider == "trt":
+    """Try compatible engines for the selected ONNX model, then DirectML."""
+    if args.provider != "trt":
+        return OrtScorer(args.onnx, args.provider)
+    if args.engine:
+        candidates = [args.engine]
+    else:
+        # Jasna cache filenames vary with the release/GPU and don't guarantee the input size.
+        stem = os.path.splitext(args.onnx)[0]
+        candidates = sorted(glob.glob(glob.escape(stem) + ".bs*.win.engine"))
+    for path in candidates:
         try:
-            return TrtScorer(args.engine)
+            return TrtScorer(path)
         except Exception as exc:  # noqa: BLE001
-            log("scan: tensorrt unavailable (%s); falling back to DirectML" % str(exc)[:160])
-        return OrtScorer(args.onnx, "dml")
-    return OrtScorer(args.onnx, args.provider)
+            log("scan: skipping TensorRT engine %s (%s)" % (os.path.basename(path), str(exc)[:160]))
+    log("scan: no compatible TensorRT engine for %dx%d; falling back to DirectML" % (RES, RES))
+    return OrtScorer(args.onnx, "dml")
 
 
 def ffprobe_meta(ffprobe, path):
@@ -323,7 +339,7 @@ def run_scan(args):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
-    ap.add_argument("--onnx", required=True, help="path to rfdetr-v5.onnx")
+    ap.add_argument("--onnx", required=True, help="path to the RF-DETR ONNX model")
     ap.add_argument("--ffmpeg", default="ffmpeg")
     ap.add_argument("--ffprobe", default="ffprobe")
     ap.add_argument("--stride-seconds", type=float, default=1.0)
@@ -332,7 +348,7 @@ def main():
     ap.add_argument("--provider", default="dml", choices=["trt", "dml", "cuda", "cpu"],
                     help="trt = direct TensorRT on jasna's engine (fast); dml = onnxruntime DirectML")
     ap.add_argument("--engine", default="",
-                    help="TensorRT engine for --provider trt (default: <onnx>.bs4.fp16.win.engine)")
+                    help="try this TensorRT engine only (default: discover engines next to the ONNX model)")
     ap.add_argument("--hwaccel", default="cuda", choices=["cuda", "none"])
     args = ap.parse_args()
     args._no_hw = False
@@ -340,14 +356,6 @@ def main():
         log("scan: input not found: " + args.input); return 2
     if not os.path.isfile(args.onnx):
         log("scan: onnx not found: " + args.onnx); return 2
-    if not args.engine:
-        # jasna names the engine it compiles after the model plus build details that
-        # change between releases (rfdetr-v5.bs4.fp16.win.engine,
-        # rfdetr-v6.bs1-4.fp16.sm86.win.engine): take the one that is there.
-        import glob
-        stem = os.path.splitext(args.onnx)[0]
-        args.engine = next(iter(sorted(glob.glob(stem + ".bs*.win.engine"))),
-                           stem + ".bs4.fp16.win.engine")
     result = run_scan(args)
     print(json.dumps(result), flush=True)   # single machine-readable line on stdout
     return 0

@@ -116,13 +116,12 @@ def _final_stage_progress(output_dir, input_path):
     return None
 
 
-# jasna's LTX model reports a different bar from BasicVSR++, one per step:
-#   LTX 2/4 encode:  92%|####| 63600/69150 [15:54<01:09, 79.52frame/s, run 1:39:22 left]
-# The bar's own % restarts every step, so whole-job progress comes from the clock:
-# time run so far against jasna's "run H:MM:SS left".
-_RE_LTX = re.compile(
-    r"LTX\s+(\d)/(\d)\s+(\w+):\s*\d{1,3}%.*?run\s+(?:(\d+):)?(\d+):(\d+)\s+left", re.IGNORECASE)
-_RE_LTX_FPS = re.compile(r"([\d.]+)\s*frame/s", re.IGNORECASE)
+# Jasna's scan bar has measured progress and no whole-run ETA. Later steps
+# restart the bar, so estimate whole-run progress from jasna's "run ... left".
+_RE_LTX = re.compile(r"LTX\s+(\d+)/(\d+)\s+(\w+):\s*(\d{1,3})\s*%\s*\|", re.IGNORECASE)
+_RE_LTX_RUN_LEFT = re.compile(r"run\s+(?:(\d+):)?(\d+):(\d+)\s+left", re.IGNORECASE)
+_RE_LTX_SCAN_LEFT = re.compile(r"\[[\d:]+<((?:\d+:)?\d+:\d{2})(?=,|\])")
+_RE_LTX_FPS = re.compile(r"(\d+(?:\.\d+)?)\s*frame/s\b", re.IGNORECASE)
 _T0 = time.time()
 
 
@@ -130,9 +129,18 @@ def _normalize_ltx(seg):
     m = _RE_LTX.search(seg)
     if not m:
         return None
-    step, steps, name, h, mi, s = m.groups()
-    f = _RE_LTX_FPS.search(seg)
-    fps = f.group(1) if f else None
+    step, steps, name, pct = m.groups()
+    speed = _RE_LTX_FPS.search(seg, m.end())
+    fps = speed.group(1) if speed else None
+    if name.lower() == "scan":
+        left = _RE_LTX_SCAN_LEFT.search(seg, m.end())
+        return (f"decensor: {pct}%| |LTX step {step} of {steps} (scan)"
+                + (f" | Scan Remaining: {left.group(1)}" if left else "")
+                + (f" | Speed: {fps} f/s" if fps else ""))
+    run_left = _RE_LTX_RUN_LEFT.search(seg, m.end())
+    if not run_left:
+        return None
+    h, mi, s = run_left.groups()
     left = int(h or 0) * 3600 + int(mi) * 60 + int(s)
     ran = time.time() - _T0
     pct = int(100 * ran / (ran + left)) if ran + left > 0 else 0
@@ -142,13 +150,13 @@ def _normalize_ltx(seg):
 
 def normalize(seg):
     """Jasna tqdm segment -> lada-style progress line, or None if not progress."""
-    seg = seg.replace(",", "")            # tqdm thousands separators in frame counts
     # tqdm redraws with \r (no \n), so a following log line gets glued onto the
     # bar; cut at that log timestamp so the progress line stays clean.
     seg = re.split(r"\d{2}:\d{2}:\d{2}\s+jasna\.", seg, maxsplit=1)[0]
     ltx = _normalize_ltx(seg)
     if ltx:
         return ltx
+    seg = seg.replace(",", "")            # tqdm thousands separators in frame counts
     if not _RE_HAS_PCT.search(seg) or "(" not in seg:
         return None
     # "Speed: 12.3fps" -> "Speed: 12.3 f/s" (the runner's fps regex wants f/s)
@@ -224,6 +232,8 @@ def main():
     ap.add_argument("--in-place", action="store_true",
                     help="jasna >=0.8.0 dropped --working-directory and writes the "
                          "output in place; skip the temp working dir entirely.")
+    ap.add_argument("--fmp4", action="store_true",
+                    help="make a direct export readable for previews as it is encoded")
     ap.add_argument("--extra", default="", help="extra raw args appended to jasna")
     ap.add_argument("--restoration-model", default="",
                     help="jasna restoration model: empty = BasicVSR++ (fast); ltx-basic | ltx | "
@@ -285,6 +295,8 @@ def main():
         argv += ["--encoder-settings", args.encoder_settings]
     if args.no_compile:
         argv.append("--no-compile-basicvsrpp")
+    if args.fmp4:
+        argv.append("--fmp4")
     if args.codec:
         argv += ["--codec", args.codec]
     if args.segments:

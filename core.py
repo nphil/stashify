@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 
 import jobprogress
 import runner_stream
+from winrunner.frame_preview import mirror_pair
 
 
 # --------------------------------------------------------------------------- #
@@ -201,9 +202,8 @@ def _fire_remote(name):
         return False
 
 
-# Live-preview registration: the running backend advertises where its
-# work-in-progress frames can be tapped (server.py's preview poller extracts
-# before/after JPEGs from it). Single running job -> a simple module global.
+# Live-preview registration: the runner advertises its active scratch media
+# and the destination for matched frames. There is one running server job.
 _live_preview = {}
 
 
@@ -646,11 +646,9 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None,
     set_remote_controls(cancel=lambda: _post("cancel"),
                         pause=lambda: _post("pause"),
                         resume=lambda: _post("resume"))
-    # The runner writes a fragmented mp4 (--mp4-fast-start): the worker can
-    # tail-follow the growing file for the live video feed, and the runner
-    # extracts before/after compare frames (rid/base let the worker fetch them).
+    preview_dir = cfg.get("_preview_dir")
     set_live_preview(type="runner", out_dir=sub, input=input_path,
-                     rid=rid, base=base, token=token)
+                     rid=rid, base=base, token=token, preview_dir=preview_dir)
     cursor = 0
     failures = 0                      # polls in a row that failed even after the quick retry
     lk = runner_stream.ensure(base, token)   # the runner's pushed state; None when streaming is off
@@ -729,6 +727,10 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None,
             else:
                 time.sleep(2)
 
+        # A short job may finish between preview polls. Save its last complete
+        # pair before moving the result and deleting the shared scratch.
+        if preview_dir:
+            mirror_pair(os.path.join(sub, ".preview"), preview_dir)
         produced = newest_video(sub)
         dest = os.path.join(result_dir, os.path.basename(produced))
         shutil.move(produced, dest)

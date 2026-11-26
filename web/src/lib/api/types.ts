@@ -84,6 +84,7 @@ export interface Job {
   log_cursor?: number;
   gpu_stats?: GpuStats | null;
   preview?: boolean;
+  preview_id?: string | null;
   segments?: JobSegment[];
   sample?: boolean;
   review_scene_id?: string | null;

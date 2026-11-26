@@ -418,8 +418,11 @@ are ignored.)
    confirm the Worker URL, token, and CORS before running a real job.
 1. Open any scene. A **Stashify** panel appears at the bottom-right.
 2. Hit **Decensor this scene** → watch the progress bar. The dashboard shows
-   the same job with full stats, live log, and a live preview; you can
-   cancel/pause/resume from there.
+   the same job with stats and a live log; you can cancel/pause/resume there.
+   During an LTX scan, the percentage and speed describe the scan, not the
+   whole restoration. The Before/After comparison appears when both sides of
+   a processed frame or completed moment are ready. Scanning and denoising
+   can advance without producing a new picture.
 3. When it's done, the panel shows a **preview player**. Review it.
 4. **Replace original** (overwrites the file in place, keeps all metadata) or
    **Discard** (deletes the preview).
