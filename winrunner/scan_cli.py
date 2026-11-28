@@ -13,6 +13,7 @@ harmlessly re-encoded.
 Deps: numpy and ffmpeg, plus TensorRT/torch or onnxruntime-directml.
 """
 import argparse
+import math
 import glob
 import importlib.util
 import json
@@ -59,6 +60,27 @@ def _normalize(ranges, duration=None):
     return merged
 
 
+def _floor_ms(seconds):
+    # Never round UP: jasna rejects a segment that ends past its own duration (which has
+    # sub-millisecond digits, e.g. 1538.666667 -> "01:25:38.667" would overshoot it).
+    return math.floor(float(seconds) * 1000 + 1e-6)
+
+
+def _on_ms_grid(ranges):
+    """Snap ranges to the millisecond grid the --segments string can express, rounding
+    both ends down, so the string, the ranges we report and jasna's check all agree."""
+    out = []
+    for s, e in ranges:
+        s_ms, e_ms = _floor_ms(s), _floor_ms(e)
+        if e_ms <= s_ms:
+            continue                                   # sliver at the very end of the video
+        if out and s_ms <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], e_ms))
+        else:
+            out.append((s_ms, e_ms))
+    return [(s / 1000.0, e / 1000.0) for s, e in out]
+
+
 def segments_from_scores(times, scores, threshold, stride, duration, pad=None):
     if pad is None:
         pad = stride / 2.0
@@ -67,7 +89,7 @@ def segments_from_scores(times, scores, threshold, stride, duration, pad=None):
         if sc < threshold:
             continue
         hits.append((max(0.0, t - pad), min(duration, t + stride + pad)))
-    return _normalize(hits, duration=duration)
+    return _on_ms_grid(_normalize(hits, duration=duration))
 
 
 def format_segments(ranges):
@@ -195,17 +217,46 @@ def make_scorer(args):
     return OrtScorer(args.onnx, "dml")
 
 
+def _ffprobe_json(ffprobe, path, *options):
+    r = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0", *options, "-of", "json", path],
+                       capture_output=True, text=True, timeout=30, creationflags=NOWIN)
+    return json.loads(r.stdout)
+
+
+def _rate(text, default):
+    num, _, den = str(text or "").partition("/")
+    try:
+        num, den = float(num), float(den or 1)
+    except ValueError:
+        return default
+    return num / den if den else num
+
+
+def jasna_duration(stream, fmt, count_packets=None):
+    """The video length jasna validates --segments against (jasna/media/probe.py
+    get_video_meta_data): the VIDEO stream's duration, else the container's, else
+    frames / fps. The container duration is the longest stream, so audio that runs past
+    the video makes it larger, and a segment ending there is rejected by jasna."""
+    value = stream.get("duration") or fmt.get("duration")
+    if value:
+        return float(value)
+    frames = int(stream.get("nb_frames") or 0)
+    if frames <= 0 and count_packets:
+        frames = count_packets()
+    fps = _rate(stream.get("avg_frame_rate"), 0.0) or _rate(stream.get("r_frame_rate"), 30.0)
+    return frames / fps
+
+
 def ffprobe_meta(ffprobe, path):
-    r = subprocess.run(
-        [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
-         "stream=r_frame_rate:format=duration", "-of", "json", path],
-        capture_output=True, text=True, timeout=30, creationflags=NOWIN)
-    j = json.loads(r.stdout)
-    dur = float(j["format"]["duration"])
-    rate = j["streams"][0].get("r_frame_rate", "30/1")
-    num, _, den = rate.partition("/")
-    fps = float(num) / float(den or 1)
-    return dur, fps
+    j = _ffprobe_json(ffprobe, path, "-show_entries",
+                      "stream=r_frame_rate,avg_frame_rate,duration,nb_frames:format=duration")
+    stream, fmt = j["streams"][0], j.get("format") or {}
+
+    def count_packets():
+        c = _ffprobe_json(ffprobe, path, "-count_packets", "-show_entries", "stream=nb_read_packets")
+        return int(c["streams"][0]["nb_read_packets"])
+
+    return jasna_duration(stream, fmt, count_packets), _rate(stream.get("r_frame_rate"), 30.0)
 
 
 def frames_via_ffmpeg(ffmpeg, path, rate, hwaccel):
