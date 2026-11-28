@@ -1453,7 +1453,7 @@ def log_since_cursor(jid, after):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "stashify-winrunner/1.0"
+    server_version = "stashify-winrunner/1.11.1"
     # Keep connections open between requests (every response carries its length).
     # A new connection per poll piled up thousands of lingering closed ones on
     # Windows, and new connects that collided with them were dropped.
