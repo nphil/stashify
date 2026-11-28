@@ -208,6 +208,9 @@ def main():
         log(f"encoder {enc} unavailable ({exc}); using libx264")
         ostream = out_c.add_stream("libx264", rate=fps)
     ostream.width, ostream.height = w * scale, h * scale
+    # hvc1 stores VPS/SPS/PPS in the MP4 header, not in the video samples.
+    hevc_mux = (["-bsf:v", "filter_units=remove_types=32|33|34", "-tag:v", "hvc1"]
+                if ostream.codec_context.codec.id == av.Codec("hevc", "r").id else [])
     ostream.pix_fmt = "yuv420p"
 
     t0 = time.time()
@@ -283,7 +286,7 @@ def main():
 
     try:
         r = subprocess.run([args.ffmpeg, "-y", "-loglevel", "error", "-i", vtmp, "-i", args.input,
-                            "-map", "0:v", "-map", "1:a?", "-c", "copy", "-shortest", final],
+                            "-map", "0:v", "-map", "1:a?", "-c", "copy", *hevc_mux, "-shortest", final],
                            capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=600, creationflags=NOWIN)
         rc = r.returncode

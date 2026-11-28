@@ -212,6 +212,11 @@ by the Dockerfile; to work on it: `cd web && npm ci && npm run dev` (add
 `?mock=1` to the URL to run it against built-in fixtures with no server).
 `WEBUI_DIR` points the server at a different build folder.
 
+**Watching a review on iPhone:** If the processed side does not play, open the
+separate review scene in Stash and select **HLS Full HD (1080p)** in the player’s
+source menu. This changes playback quality only; the full-resolution file and
+the original scene stay untouched. No new conversion is needed.
+
 Manage the fleet from the dashboard — the **runner chip** in the top bar:
 
 - **🔎 Discover on network** — scans your /24 on the runner ports (8711/8712,
@@ -420,9 +425,11 @@ are ignored.)
 2. Hit **Decensor this scene** → watch the progress bar. The dashboard shows
    the same job with stats and a live log; you can cancel/pause/resume there.
    During an LTX scan, the percentage and speed describe the scan, not the
-   whole restoration. The Before/After comparison appears when both sides of
-   a processed frame or completed moment are ready. Scanning and denoising
-   can advance without producing a new picture.
+   whole restoration. Before/After appears once both sides of a processed frame
+   or moment are ready. The latest complete pair stays visible while the next
+   one loads. Scanning and denoising can advance without producing a picture;
+   with Jasna smart rendering, comparisons can appear before the output is
+   stitched together.
 3. When it's done, the panel shows a **preview player**. Review it.
 4. **Replace original** (overwrites the file in place, keeps all metadata) or
    **Discard** (deletes the preview).

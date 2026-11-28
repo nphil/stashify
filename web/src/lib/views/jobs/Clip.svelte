@@ -1,19 +1,23 @@
 <script lang="ts">
-  /* A muted video that stays invisible until its first frame arrives, so a missing file leaves the
-     placeholder underneath instead of a broken player. */
-  let { src, video = $bindable(), loop = false, autoplay = true, onsync, onmeta }: {
+  /* Keep the available poster visible until the browser can display a video frame. */
+  let { src, label, video = $bindable(), loop = false, onsync, onerror }: {
     src: string;
+    label: string;
     video?: HTMLVideoElement;
     loop?: boolean;
-    autoplay?: boolean;
-    /** fires on play, pause, seek and time updates so a partner clip can follow */
-    onsync?: () => void;
-    /** fires once the length is known */
-    onmeta?: () => void;
+    onsync: (video: HTMLVideoElement, event: string) => void;
+    onerror: (video: HTMLVideoElement) => void;
   } = $props();
 
   let ok = $state(false);
+
+  function sync(e: Event & { currentTarget: HTMLVideoElement }): void {
+    if (e.currentTarget.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) ok = true;
+    onsync(e.currentTarget, e.type);
+  }
 </script>
 
-<video bind:this={video} {src} class={{ in: ok }} muted playsinline {autoplay} {loop} preload="auto" aria-hidden="true" tabindex="-1"
-  onloadeddata={() => (ok = true)} onloadedmetadata={onmeta} onplay={onsync} onpause={onsync} onseeked={onsync} ontimeupdate={onsync}></video>
+<video bind:this={video} {src} class={{ in: ok }} muted playsinline {loop} preload="auto" aria-label={label} tabindex="-1"
+  onloadedmetadata={sync} ondurationchange={sync} onloadeddata={sync} oncanplay={sync} onplaying={sync}
+  onpause={sync} onended={sync} onseeked={sync} ontimeupdate={sync}
+  onerror={() => { ok = false; if (video) onerror(video); }}></video>

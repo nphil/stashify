@@ -5,13 +5,14 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
 import core
 import server
 from winrunner import frame_preview as fp
-from winrunner.preview import JasnaFrames
+from winrunner.preview import JasnaFrames, SegmentPreview
 
 
 class PreviewCase(unittest.TestCase):
@@ -80,12 +81,54 @@ class PreviewStorageTest(PreviewCase):
         self.assertEqual(fp.latest_pair(self.pairs), pair)
         self.assertEqual(fp.pair_path(self.pairs, "after", pair).read_bytes(), b"processed")
 
+    def test_final_runner_status_delivers_announced_segments_and_sample(self):
+        output_dir = self.root / "output"
+        output_dir.mkdir()
+        segment = {"n": 0, "start": 1.0, "end": 2.0, "dur": 1.0}
+
+        def submit(_url, *, headers, json, timeout):
+            (Path(json["output_dir"]) / "finished.mp4").write_bytes(b"result")
+            return mock.Mock(**{"json.return_value": {"id": "a1"}})
+
+        def clip(url, **kwargs):
+            response = mock.MagicMock(status_code=200)
+            response.__enter__.return_value = response
+            response.iter_content.return_value = [url.rsplit("/", 1)[-1].encode()]
+            return response
+
+        cfg = {"runnerScratch": str(self.root / "scratch"), "_preview_dir": str(self.pairs),
+               "_finish_preview": server._mirror_segments}
+        runner = {"name": "pc", "url": "http://runner", "token": "secret", "engine": "jasna"}
+        status = {"state": "done", "segments": [segment], "sample": True}
+        with mock.patch.object(core, "http", return_value=mock.Mock(post=submit, get=clip)), \
+                mock.patch.object(core, "resolve_runner", return_value=runner), \
+                mock.patch.object(core.runner_stream, "ensure", return_value=None), \
+                mock.patch.object(core, "_poll_json", side_effect=[status, {}]), \
+                mock.patch.object(core, "check_cancel"), mock.patch.object(core, "_chown_like"), \
+                mock.patch.object(server, "_segments", {}):
+            core._runner_dispatch(cfg, "source.mp4", output_dir, "decensor")
+            self.assertEqual(server.job_segments("pairs"), [segment])
+        self.assertEqual((self.pairs / "seg0_before.mp4").read_bytes(), b"before.mp4")
+        self.assertEqual((self.pairs / "seg0_after.mp4").read_bytes(), b"after.mp4")
+        self.assertEqual((self.pairs / "sample.mp4").read_bytes(), b"sample.mp4")
+
+    def test_grab_does_not_use_removed_vsync_option_or_short_probe_timeout(self):
+        with mock.patch.object(fp, "_run", return_value=mock.Mock(
+                stderr=b"[Parsed_showinfo] n: 0 pts: 1000000", stdout=b"\xff\xd8data\xff\xd9")) as run:
+            self.assertEqual(fp._grab("ffmpeg", "output.mp4", (0.0, 0.0, 12.0), 1.0),
+                             (1.0, b"\xff\xd8data\xff\xd9"))
+            args = run.call_args.args[0]
+            self.assertNotIn("-vsync", args)
+            index = args.index("-fps_mode")
+            self.assertEqual(args[index + 1], "passthrough")
+            self.assertGreater(run.call_args.kwargs["timeout"], 8)
+
     def test_failed_before_frame_does_not_replace_a_pair_and_durationless_output_advances(self):
         source = self.root / "source.mp4"
         output = self.root / "output.mp4"
         watch = fp.FramePreview(source, self.pairs, "ffmpeg", "ffprobe")
 
-        def get_frame(_ffmpeg, path, _media, time):
+        def get_frame(_ffmpeg, path, _media, time, *, stop=None):
             return round(time), b"frame"
 
         with mock.patch.object(fp, "_probe", return_value=(0.0, 0.0, None)), \
@@ -164,14 +207,29 @@ class FrameCaptureTest(PreviewCase):
         (render / "job.json").write_text(json.dumps({"inputs": {"latents": {"segments": [
             {"start": 1.1, "end": 1.9, "restoration": {"model": "ltx"}},
         ]}}}), encoding="utf-8")
-        self.ffmpeg("-i", self.source, "-t", "1", "-c:v", "mpeg4", "-g", 1, fragments / "0000-raw.nut")
         self.ffmpeg("-ss", "1", "-i", self.source, "-t", "1", "-vf", "negate", "-c:v", "mpeg4", "-g", 1,
-                    fragments / "0001-raw.nut")
-        self.assertFalse(watcher.capture())         # the only known offset is the first, copied span
+                    fragments / "0001-partial.nut")
+        self.assertFalse(watcher.capture())   # later LTX spans may appear out of order
         self.assertIsNone(fp.latest_pair(self.pairs))
-        (fragments / "fragments.ffconcat").write_text(
-            "ffconcat version 1.0\nfile '0000.ts'\nduration 1\nfile '0001.ts'\nduration 1\n", encoding="utf-8")
+        self.ffmpeg("-i", self.source, "-t", "1", "-c:v", "mpeg4", "-g", 1, fragments / "0000-raw.nut")
+        self.assertTrue(watcher.capture())    # no late assembly manifest needed
+        self.assert_green_to_magenta()
+        (fragments / "0001-partial.nut").rename(fragments / "0001-raw.nut")
         self.assertTrue(watcher.capture())
+        self.assertEqual(watcher.completed, ((fragments / "0001-raw.nut", 1.0, 2.0),))
+
+        stop = threading.Event()
+        clips = self.root / "clips"
+        segment = SegmentPreview(jasna=watcher, src=self.source, prev_dir=clips,
+                                 ffmpeg="ffmpeg", ffprobe="ffprobe", encoder="mpeg4", height=40,
+                                 on_update=lambda _: stop.set())
+        worker = threading.Thread(target=segment.run, args=(stop, 0.01), daemon=True)
+        worker.start()
+        self.assertTrue(stop.wait(5))
+        worker.join()
+        self.assertEqual(segment.segments, [{"n": 0, "start": 1.1, "end": 1.9, "dur": 0.8}])
+        sample = segment.finish()
+        self.assertIsNotNone(sample)
         self.assert_green_to_magenta()
 
 

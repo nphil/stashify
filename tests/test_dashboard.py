@@ -280,6 +280,76 @@ class StaticTest(ServerCase):
         self.assertEqual(resp.getheader("Content-Type"), "image/png")
 
 
+class ReviewMediaTest(ServerCase):
+    @staticmethod
+    def upstream(status, body, **headers):
+        up = mock.MagicMock(status_code=status, headers=headers, text=body.decode())
+        up.__enter__.return_value = up
+        up.iter_content.return_value = iter([body])
+        return up
+
+    def test_original_stream_passes_through_range_and_closes_response(self):
+        up = self.upstream(206, b"mp", **{"Content-Type": "video/mp4", "Content-Length": "2",
+                                         "Content-Range": "bytes 0-1/1200", "Accept-Ranges": "bytes"})
+        with mock.patch.object(requests, "get", return_value=up) as get, \
+                mock.patch.object(server, "STASH_URL_RAW", "http://stash.test"), \
+                mock.patch.object(server, "STASH_API_KEY", "secret"):
+            resp, body = self.raw("GET", "/api/vid/5", token="", headers={"Range": "bytes=0-1"})
+        self.assertEqual((resp.status, resp.getheader("Content-Range"), body), (206, "bytes 0-1/1200", b"mp"))
+        self.assertEqual(get.call_args.args[0], "http://stash.test/scene/5/stream")
+        self.assertEqual(get.call_args.kwargs["headers"]["Range"], "bytes=0-1")
+        self.assertEqual(get.call_args.kwargs["headers"]["ApiKey"], "secret")
+        self.assertTrue(wait_for(lambda: up.__exit__.call_count == 1))
+
+    def test_hls_playlist_and_seek_segment_use_only_the_local_media_proxy(self):
+        manifest = (b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-TARGETDURATION:2\n"
+                    b"#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:2.0,\n/scene/5/stream.m3u8/17.ts?signature=secret\n"
+                    b"#EXT-X-ENDLIST\n")
+        playlist = self.upstream(200, manifest)
+        segment = self.upstream(200, b"ts", **{"Content-Type": "video/MP2T", "Content-Length": "2"})
+        with mock.patch.object(requests, "get", side_effect=[playlist, segment]) as get, \
+                mock.patch.object(server, "STASH_URL_RAW", "http://stash.test"), \
+                mock.patch.object(server, "STASH_API_KEY", "secret"):
+            resp, body = self.raw("GET", "/api/vid/5.m3u8", token="")
+            self.assertEqual((resp.status, resp.getheader("Content-Type")), (200, "application/vnd.apple.mpegurl"))
+            self.assertIn(b"\n5.m3u8/17.ts\n", body)
+            self.assertNotIn(b"secret", body)
+            self.assertNotIn(b"/scene/", body)
+            resp, body = self.raw("GET", "/api/vid/5.m3u8/17.ts?resolution=ORIGINAL", token="")
+        self.assertEqual((resp.status, resp.getheader("Content-Type"), body), (200, "video/MP2T", b"ts"))
+        self.assertEqual([c.args[0] for c in get.call_args_list],
+                         ["http://stash.test/scene/5/stream.m3u8", "http://stash.test/scene/5/stream.m3u8/17.ts"])
+        for call in get.call_args_list:
+            self.assertFalse(call.kwargs["allow_redirects"])
+            self.assertEqual(call.kwargs["params"], {"resolution": "FULL_HD"})
+
+    def test_hls_rejects_foreign_segments_and_external_key_tags(self):
+        for line in ("https://foreign.test/scene/5/stream.m3u8/1.ts", "/scene/6/stream.m3u8/1.ts",
+                     '#EXT-X-KEY:METHOD=AES-128,URI="https://foreign.test/key"'):
+            with self.subTest(line=line), mock.patch.object(server, "STASH_URL_RAW", "http://stash.test"), \
+                    mock.patch.object(requests, "get", return_value=self.upstream(200, f"#EXTM3U\n{line}\n".encode())):
+                self.assertEqual(self.call("GET", "/api/vid/5.m3u8", token="")[0], 502)
+
+    def test_local_review_clips_support_safari_probe_seek_and_unsatisfiable_range(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(server, "PREVIEW_DIR", tmp):
+            folder = os.path.join(tmp, "a1")
+            os.mkdir(folder)
+            for name in ("sample.mp4", "seg1_before.mp4", "seg1_after.mp4"):
+                with open(os.path.join(folder, name), "wb") as fh:
+                    fh.write(b"0123456789")
+            for path in ("/api/jobs/a1/sample.mp4", "/api/jobs/a1/seg/1/after.mp4"):
+                for rng, status, span, want in (
+                    (None, 200, None, b"0123456789"),
+                    ("bytes=0-1", 206, "bytes 0-1/10", b"01"),
+                    ("bytes=6-", 206, "bytes 6-9/10", b"6789"),
+                    ("bytes=-2", 206, "bytes 8-9/10", b"89"),
+                    ("bytes=10-", 416, "bytes */10", b""),
+                ):
+                    with self.subTest(path=path, range=rng):
+                        resp, body = self.raw("GET", path, token="", headers={"Range": rng} if rng else {})
+                        self.assertEqual((resp.status, resp.getheader("Content-Range"), body), (status, span, want))
+
+
 class RunnerTest(ServerCase):
     def health(self, **kw):
         body = {"ok": True, "node": "pc", "kind": "windows", "ops": ["decensor", "upscale"],

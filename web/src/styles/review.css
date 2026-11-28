@@ -1,6 +1,6 @@
 /* ---------- review compare stage ---------- */
 .cmp { position: relative; aspect-ratio: 16 / 9; border-radius: var(--lu-radius-card); overflow: hidden; --x: 50%; background: var(--lu-material-well); }
-.cmp .lay { position: absolute; inset: 0; }
+.cmp .lay { position: absolute; inset: 0; background: var(--lu-material-well); }
 .cmp .lay.after { clip-path: inset(0 0 0 var(--x)); }
 .cmp .grip { position: absolute; top: 0; bottom: 0; left: var(--x); width: 0; z-index: 2; }
 .cmp .grip::before { content: ""; position: absolute; top: 0; bottom: 0; left: -1px; width: 2px; background: var(--lu-ink); opacity: .9; }
@@ -22,6 +22,7 @@
 .cmp .wipe { touch-action: pan-y; outline: none; }
 .cmp .grip span { pointer-events: none; }
 .cmp .lay video { object-fit: contain; }
+.cmp .lay img { display: block; width: 100%; height: 100%; object-fit: contain; background: var(--lu-material-well); }
 .cmp-bar { justify-content: space-between; padding-bottom: var(--lu-space-1); }
 .tline .seek { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; appearance: none; -webkit-appearance: none; background: transparent; }
 .tline .seek::-webkit-slider-thumb { appearance: none; -webkit-appearance: none; width: 0; height: 0; border: 0; }

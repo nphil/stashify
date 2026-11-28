@@ -858,7 +858,7 @@ def run_job(lane, job):
 
     preview_dir = os.path.join(out_dir, ".preview")
     frames = FramePreview(src, preview_dir, FFMPEG, FFPROBE)
-    capture_output = lambda: frames.capture(_newest_video(out_dir))
+    capture_output = lambda stop: frames.capture(_newest_video(out_dir), stop=stop)
 
     try:
         if op == "transcode":
@@ -983,8 +983,7 @@ def run_job(lane, job):
             _seg = _seg_thread = None
             if preview_on:
                 _seg = SegmentPreview(
-                    jid=jid, watch_dir=mid_dir, out_stem=out_stem,
-                    src=src, ranges=seg_ranges,
+                    jasna=jasna_frames, src=src,
                     prev_dir=os.path.join(CFG["local_temp"], "preview_" + jid),
                     ffmpeg=FFMPEG, ffprobe=FFPROBE,
                     encoder=CFG.get("jasna_preview_encoder", "libx264"),
@@ -1001,19 +1000,19 @@ def run_job(lane, job):
             set_job(jid, stage=op, progress=0.0, indeterminate=True,
                     message="Loading models & engines", phase="Loading models",
                     pass_no=1, passes=n_phases, pass_progress=0.0, **_PASS_RESET)
-            with watch_frames(jasna_frames.capture):
+            with watch_frames(lambda stop: jasna_frames.capture(stop=stop)):
                 rc, cancelled = _stream_subprocess(lane, jid, argv, scale=(0, n_phases), stage=op)
             seg_stop.set()
+            if _seg_thread:
+                _seg_thread.join()
             if rc == 0 and not cancelled:
                 jasna_frames.capture(finished=True)
             if _seg is not None and rc == 0 and not cancelled:
-                # let the watcher drain the last segments, then concat them into one
-                # smooth "decensored portions only" sample clip for review
-                if _seg_thread:
-                    _seg_thread.join(timeout=45)
+                # Use matched clips the watcher finished, or a short comparison
+                # from the assembled result if Jasna removed its scratch first.
                 set_job(jid, message="Building decensored sample", indeterminate=True,
                         phase="Building the preview sample", step=None, steps=None, detail=None)
-                if _seg.build_sample():
+                if _seg.finish():
                     set_job(jid, sample=True)
             if chain and rc == 0 and not cancelled:
                 mid = restored
@@ -1036,7 +1035,7 @@ def run_job(lane, job):
                     if o.get("no_trt") or not CFG.get("upscale_trt", True):
                         argv.append("--no-trt")
                     upscale_part = os.path.join(out_dir, out_stem + ".upscaling.tmp.mp4")
-                    with watch_frames(lambda: frames.capture(upscale_part, windows=jasna_frames.ranges)):
+                    with watch_frames(lambda stop: frames.capture(upscale_part, windows=jasna_frames.ranges, stop=stop)):
                         rc, cancelled = _stream_subprocess(lane, jid, argv, scale=(1, n_phases))
             elif not chain and rc == 0 and not cancelled:
                 # decensor-only: jasna assembled locally in mid_dir; copy just the finished
@@ -1070,6 +1069,8 @@ def run_job(lane, job):
     finally:
         if seg_stop:
             seg_stop.set()
+            if _seg_thread:
+                _seg_thread.join()
         # retry-purge: on cancel/stall the tree-killed child can briefly hold these
         # locked (Windows), so a one-shot delete would silently leak multi-GB temps.
         _purge(tmp_copy)

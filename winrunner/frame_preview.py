@@ -73,8 +73,69 @@ def mirror_pair(source, dest):
         pass
 
 
-def _run(argv):
-    return subprocess.run(argv, capture_output=True, check=True, timeout=6, creationflags=NOWIN)
+@contextmanager
+def _read_input(argv, path):
+    if os.name != "nt" or path is None:
+        yield argv, None
+        return
+    # FFmpeg's normal Windows file open denies deletes/renames. A preview
+    # must never stop the encoder from committing or removing an intermediate.
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel.CreateFileW
+    create.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                       wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    create.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = create(os.path.abspath(path), 0x80000000, 7, None, 3, 0x80, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except OSError:
+        kernel.CloseHandle(handle)
+        raise
+    try:
+        args = list(argv)
+        args[args.index(str(path))] = "fd:"  # stdin, but remains seekable
+        yield args, fd
+    finally:
+        os.close(fd)
+
+
+def _run(argv, *, timeout=6, stop=None, shared_input=None):
+    with _read_input(argv, shared_input) as (args, stdin):
+        if stop is None:
+            return subprocess.run(args, stdin=stdin, capture_output=True, check=True,
+                                  timeout=timeout, creationflags=NOWIN)
+        return _run_until_stopped(args, stdin, timeout, stop)
+
+
+def _run_until_stopped(argv, stdin, timeout, stop):
+    if stop.is_set():
+        raise subprocess.SubprocessError("preview stopped")
+    with subprocess.Popen(argv, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          creationflags=NOWIN) as proc:
+        deadline = time.monotonic() + timeout
+        try:
+            while not stop.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                try:
+                    stdout, stderr = proc.communicate(timeout=min(0.25, remaining))
+                except subprocess.TimeoutExpired:
+                    continue
+                result = subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+                result.check_returncode()
+                return result
+            raise subprocess.SubprocessError("preview stopped")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
 
 
 def _number(value, default=None):
@@ -85,10 +146,10 @@ def _number(value, default=None):
         return default
 
 
-def _probe(ffprobe, path):
+def _probe(ffprobe, path, *, stop=None):
     data = json.loads(_run([ffprobe, "-v", "error", "-select_streams", "v:0",
                             "-show_entries", "stream=start_time,duration:format=start_time,duration",
-                            "-of", "json", str(path)]).stdout)
+                            "-of", "json", str(path)], stop=stop, shared_input=path).stdout)
     stream = data["streams"][0]
     fmt = data.get("format", {})
     start = _number(fmt.get("start_time"), 0.0)
@@ -96,21 +157,28 @@ def _probe(ffprobe, path):
         _number(stream.get("duration")) or _number(fmt.get("duration")))
 
 
-def _grab(ffmpeg, path, media, t):
+_SHOW_PTS = re.compile(rb"showinfo[^\n]*?\bpts:\s*(-?\d+)")
+
+
+def _seek(ffmpeg, path, media, t):
     file_start, video_start, _ = media
-    # ffmpeg seeks relative to the container's start (which may be earlier
-    # than the video), while showinfo reports the original frame timestamp.
+    # ffmpeg seeks relative to the container start; showinfo reports the original PTS.
     seek = max(0.0, video_start - file_start + t)
+    return [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "info", "-copyts",
+            "-threads", "1", "-ss", f"{seek:.6f}", "-i", str(path), "-map", "0:v:0",
+            "-filter_threads", "1"]
+
+
+def _grab(ffmpeg, path, media, t, *, stop=None):
     try:
-        r = _run([ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "info", "-copyts",
-                  "-threads", "1", "-ss", f"{seek:.6f}", "-i", str(path), "-map", "0:v:0",
-                  "-filter_threads", "1", "-vf", "scale=480:-2,settb=AVTB,showinfo=checksum=0",
-                  "-vsync", "0", "-frames:v", "1", "-c:v", "mjpeg", "-q:v", "4", "-f", "image2pipe", "pipe:1"])
+        r = _run([*_seek(ffmpeg, path, media, t), "-vf", "scale=480:-2,settb=AVTB,showinfo=checksum=0",
+                  "-fps_mode", "passthrough", "-frames:v", "1", "-c:v", "mjpeg", "-q:v", "4", "-f", "image2pipe", "pipe:1"],
+                 timeout=18, stop=stop, shared_input=path)
     except (OSError, subprocess.SubprocessError):
         return None                         # unfinished files can fail at one seek and succeed at another
-    match = re.search(rb"showinfo[^\n]*?\bpts:\s*(-?\d+)", r.stderr)
+    match = _SHOW_PTS.search(r.stderr)
     if match and r.stdout.startswith(b"\xff\xd8") and r.stdout.endswith(b"\xff\xd9"):
-        return int(match[1]) / 1_000_000 - video_start, r.stdout
+        return int(match[1]) / 1_000_000 - media[1], r.stdout
     return None
 
 
@@ -126,7 +194,26 @@ class FramePreview:
         self._attempts = {}
         self._shown = None
 
-    def capture(self, output, *, offset=0.0, duration=None, windows=None, finished=False):
+    def source_time_after(self, time_on_source, *, stop=None):
+        """Read the boundary after a completed smart fragment's last picture."""
+        try:
+            if self._source_media is None:
+                self._source_media = _probe(self.ffprobe, self.source, stop=stop)
+            media = self._source_media
+            # Confirm the last picture still matches instead of accumulating guessed
+            # durations: NUT's duration is its last PTS, not the next span's start.
+            r = _run([*_seek(self.ffmpeg, self.source, media, time_on_source - 0.001),
+                      "-vf", "settb=AVTB,showinfo=checksum=0",
+                      "-fps_mode", "passthrough", "-frames:v", "2", "-f", "null", "-"],
+                     timeout=18, stop=stop)
+            pts = _SHOW_PTS.findall(r.stderr)
+            if pts and abs(int(pts[0]) / 1_000_000 - media[1] - time_on_source) <= 0.001:
+                return int(pts[1]) / 1_000_000 - media[1] if len(pts) > 1 else media[2]
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, IndexError):
+            pass
+        return None
+
+    def capture(self, output, *, offset=0.0, duration=None, windows=None, finished=False, stop=None):
         """Capture a whole-timeline video, or an encoded span whose source offset is known."""
         try:
             output = Path(output)
@@ -137,9 +224,9 @@ class FramePreview:
             if not stat.st_size or (not finished and self._attempts.get(output) == version):
                 return False
             self._attempts[output] = version
-            media = _probe(self.ffprobe, output)
+            media = _probe(self.ffprobe, output, stop=stop)
             if self._source_media is None:
-                self._source_media = _probe(self.ffprobe, self.source)
+                self._source_media = _probe(self.ffprobe, self.source, stop=stop)
             length = duration or media[2]
             previous = self._shown[1] if self._shown and self._shown[0] == output else None
             if windows:
@@ -158,16 +245,21 @@ class FramePreview:
                 if abs(fallback - candidates[0][0]) > MATCH_SECONDS:
                     candidates.append((fallback, None))
             for t, bounds in candidates:
-                after = _grab(self.ffmpeg, output, media, t)
+                if stop is not None and stop.is_set():
+                    return False
+                after = _grab(self.ffmpeg, output, media, t, stop=stop)
                 if not after:
                     continue
                 absolute = after[0] + offset
                 if ((bounds and not bounds[0] <= absolute < bounds[1])
                         or (previous is not None and after[0] <= previous)):
                     continue
-                before = _grab(self.ffmpeg, self.source, self._source_media, max(0.0, absolute - MATCH_SECONDS))
+                before = _grab(self.ffmpeg, self.source, self._source_media, max(0.0, absolute - MATCH_SECONDS),
+                               stop=stop)
                 if not before or abs(before[0] - absolute) > MATCH_SECONDS:
                     continue
+                if stop is not None and stop.is_set():
+                    return False
                 pair = f"{time.time_ns():020d}-{uuid.uuid4().hex[:8]}"
                 _publish(self.directory, pair, before[1], after[1])
                 self._shown = (output, after[0])
@@ -186,7 +278,7 @@ def watch_frames(poll):
     def run():
         while not stop.wait(3.0):
             try:
-                poll()
+                poll(stop)
             except OSError:
                 pass                        # a growing file can be renamed during discovery
 

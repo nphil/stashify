@@ -1,57 +1,17 @@
-"""Segment live-preview for the Stashify Windows runner.
-
-In jasna >=0.8.0 smart mode (--segments), each timeline span is encoded to its own
-NNNN.ts fragment in a hidden temp dir next to the output, and the temp dir is
-deleted when the job ends. This watcher copies the restored (mosaic) fragments out
-DURING the run and builds a downscaled before/after mp4 pair per mosaic segment,
-so the dashboard can show original-vs-decensored side by side, live, for only the
-mosaic parts - with no extra GPU work (the fragments are a free byproduct, and the
-small preview re-encodes run off the 3080).
-
-Span -> mosaic identification is by cumulative-time overlap with the scanned ranges
-(no reliance on jasna internals): fragments are written in index order, so summing
-their durations gives each one's [start,end) on the shared input/output timeline;
-a fragment that overlaps a requested range is a restored span.
-"""
-import os
-import glob
+"""Matched stills and short comparison clips from Jasna's real processed frames."""
 import json
 import math
-import time
+import os
 import subprocess
-import threading
 from pathlib import Path
 
-IS_WIN = os.name == "nt"
-NOWIN = subprocess.CREATE_NO_WINDOW if IS_WIN else 0
-
-MAX_PREVIEW_SECONDS = 45.0   # cap a segment preview clip. A long fragment must NEVER
-                             # trigger a multi-minute before/after encode: a video with a
-                             # big mosaic-free gap produces one giant copy fragment, and
-                             # encoding its full length over SMB froze the whole preview.
+try:
+    from .frame_preview import _probe, _run
+except ImportError:  # standalone Windows runner
+    from frame_preview import _probe, _run
 
 
-def _run(argv, timeout=120):
-    return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", timeout=timeout, creationflags=NOWIN)
-
-
-def _safe_run(argv, timeout=120):
-    """Run ffmpeg, returning True on success. Never raises - a watcher-thread encode
-    must not crash the loop (or block a fragment) on a timeout/OS error."""
-    try:
-        return _run(argv, timeout=timeout).returncode == 0
-    except Exception:  # noqa: BLE001  (incl. subprocess.TimeoutExpired)
-        return False
-
-
-def _probe_duration(ffprobe, path):
-    try:
-        r = _run([ffprobe, "-v", "error", "-show_entries", "format=duration",
-                  "-of", "default=nw=1:nk=1", path], timeout=30)
-        return float(r.stdout.strip())
-    except Exception:  # noqa: BLE001
-        return None
+MAX_PREVIEW_SECONDS = 45.0   # don't re-encode an entire long restoration span
 
 
 class JasnaFrames:
@@ -64,6 +24,8 @@ class JasnaFrames:
         self.checkpoint = self.output.with_name(f".{self.output.stem}.jasna-resume") / "render"
         self._read_ranges = False
         self._last_span = -1
+        self._starts = [0.0]
+        self.completed = ()
 
     def _load_ranges(self):
         if self._read_ranges:
@@ -82,9 +44,8 @@ class JasnaFrames:
         except (OSError, ValueError, KeyError, TypeError):
             pass
 
-    def _spans(self, fragments):
-        # The raw span names alone don't tell us where they belong. Jasna writes
-        # the exact planned durations in its concat manifest before assembly.
+    def _manifest_spans(self, fragments):
+        # Jasna writes exact span durations only when assembling the final file.
         try:
             rows = (fragments / "fragments.ffconcat").read_text(encoding="utf-8").splitlines()
             if not rows or rows[0] != "ffconcat version 1.0" or len(rows) % 2 != 1:
@@ -96,71 +57,73 @@ class JasnaFrames:
                 duration = float(rows[i + 1].split(" ", 1)[1])
                 if not math.isfinite(duration) or duration <= 0:
                     raise ValueError("invalid span duration")
-                spans.append((start, duration))
+                spans.append((start, start + duration))
                 start += duration
             if spans:
                 return spans
         except (OSError, ValueError):
             pass
-        # Before assembly, only span zero is guaranteed to begin at 0. If it's
-        # a copy gap, no restored range overlaps the frames we can read from it.
-        return [(0.0, None)]
+        return None
 
-    def capture(self, finished=False):
+    def _spans(self, fragments, stop):
+        manifest = self._manifest_spans(fragments)
+        if manifest is not None:
+            return manifest
+        # Current Jasna writes the fragment with its own zero-based clock.
+        # An unbroken prefix of committed fragments lets us recover the next
+        # offset without counting frames or guessing a constant frame rate.
+        while True:
+            n, start = len(self._starts) - 1, self._starts[-1]
+            path = fragments / f"{n:04d}-raw.nut"
+            if not path.is_file():
+                break
+            try:
+                _, first, last = _probe(self.frames.ffprobe, path, stop=stop)
+                if last is None or last < first:
+                    break
+                end = self.frames.source_time_after(start + last - first, stop=stop)
+            except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError):
+                break
+            if end is None or end <= start:
+                break
+            self._starts.append(end)
+        return list(zip(self._starts, self._starts[1:])) + [(self._starts[-1], None)]
+
+    def capture(self, finished=False, *, stop=None):
         self._load_ranges()
-        if self.frames.capture(self.output, windows=self.ranges, finished=finished):
+        if self.frames.capture(self.output, windows=self.ranges, finished=finished, stop=stop):
             return True
         if finished or not self.ranges:
             return False
         fragments = self.checkpoint / "segments"
-        spans = self._spans(fragments)
-        for n in range(len(spans) - 1, self._last_span, -1):
-            start, duration = spans[n]
-            if duration and not any(lo < start + duration and hi > start for lo, hi in self.ranges):
+        spans = self._spans(fragments, stop)
+        self.completed = tuple(
+            (fragments / f"{n:04d}-raw.nut", start, end)
+            for n, (start, end) in enumerate(spans)
+            if end is not None and any(lo < end and hi > start for lo, hi in self.ranges)
+        )
+        for n in range(len(spans) - 1, max(0, self._last_span) - 1, -1):
+            start, end = spans[n]
+            if not any((end is None or lo < end) and hi > start for lo, hi in self.ranges):
                 continue
             fragment = fragments / f"{n:04d}-raw.nut"
-            if n == 0 and duration is None and not fragment.is_file():
-                fragment = fragments / "0000-partial.nut"
-            if self.frames.capture(fragment, offset=start, duration=duration, windows=self.ranges):
+            if end is None and not fragment.is_file():
+                fragment = fragments / f"{n:04d}-partial.nut"
+            if self.frames.capture(fragment, offset=start, duration=end - start if end is not None else None,
+                                   windows=self.ranges, stop=stop):
                 self._last_span = n
                 return True
         return False
 
 
-def _mosaic_window(start, end, ranges):
-    """Return (wstart, wend): the portion of fragment [start,end) that holds restored
-    mosaic content (its intersection with the scanned ranges), or None if this fragment
-    is not a restored span.
-
-    A render fragment keyframe-pads and largely contains its range, so the intersection
-    dominates it. A COPY fragment sits between ranges and at most edge-touches one; a LONG
-    copy fragment (a multi-minute mosaic-free gap) must return None - otherwise the watcher
-    builds a full-length before/after pair for it, which froze the preview at that segment."""
-    lo = hi = None
-    for s, e in ranges:
-        os_, oe = max(start, s), min(end, e)
-        if oe - os_ >= min(0.3, 0.5 * (e - s)):
-            lo = os_ if lo is None else min(lo, os_)
-            hi = oe if hi is None else max(hi, oe)
-    if lo is None:
-        return None
-    # a long fragment that's mostly outside any range is a copy span, not a segment
-    if (hi - lo) < 0.5 * (end - start) and (end - start) > MAX_PREVIEW_SECONDS:
-        return None
-    return lo, hi
-
-
 class SegmentPreview:
     """Watcher started as a daemon thread for a preview-enabled decensor job."""
 
-    def __init__(self, *, jid, watch_dir, out_stem, src, ranges, prev_dir,
-                 ffmpeg, ffprobe, encoder="libx264", height=720, on_update=None,
-                 log=None):
-        self.jid = jid
-        self.watch_dir = watch_dir            # dir where jasna writes .<stem>.segments-*
-        self.out_stem = out_stem              # jasna --output stem (<input>_decensored)
-        self.src = src                        # original input (for the "before" cut)
-        self.ranges = ranges                  # [[start,end], ...] scanned mosaic ranges
+    def __init__(self, *, jasna, src, prev_dir,
+                 ffmpeg, ffprobe, encoder="libx264", height=720, on_update=None, log=None):
+        self.jasna = jasna
+        self.src = src
+        self._emitted = set()
         self.prev_dir = prev_dir              # local dir we write seg<N>_before/after.mp4
         self.ffmpeg = ffmpeg
         self.ffprobe = ffprobe
@@ -168,82 +131,50 @@ class SegmentPreview:
         self.height = int(height)
         self.on_update = on_update            # callback(list_of_segment_dicts)
         self._log = log or (lambda m: None)
-        self.segments = []                    # published: {n,start,end,before,after,dur}
-        self._cum = 0.0
-        self._next_idx = 0
-        self._seg_no = 0
+        self.segments = []
         os.makedirs(prev_dir, exist_ok=True)
-
-    # -- fragment discovery ----------------------------------------------------
-    def _seg_temp_dir(self):
-        # hidden TemporaryDirectory: .<stem>.segments-XXXXXXXX next to the output
-        hits = glob.glob(os.path.join(self.watch_dir, ".*.segments-*"))
-        hits = [d for d in hits if os.path.isdir(d)]
-        return hits[0] if hits else None
-
-    def _fragment(self, temp_dir, idx):
-        for suf in (".ts", ".mkv"):
-            p = os.path.join(temp_dir, "%04d%s" % (idx, suf))
-            if os.path.isfile(p):
-                return p
-        return None
-
-    def _is_done(self, temp_dir, idx):
-        # Older Jasna writes spans in order. The next span or final assembly
-        # proves this one is finished.
-        nxt = self._fragment(temp_dir, idx + 1)
-        if nxt or os.path.exists(os.path.join(temp_dir, "%04d-raw.nut" % (idx + 1))):
-            return True
-        if os.path.exists(os.path.join(temp_dir, "assembled.ts")) or \
-           os.path.exists(os.path.join(temp_dir, "assembled.mkv")):
-            return True   # all spans emitted; final assembly started
-        return False
 
     # -- encode a before/after pair for a restored span ------------------------
     def _vf(self):
         return "scale=-2:%d:flags=bilinear" % self.height
 
-    def _encode_after(self, frag, ss, t, dst):
-        # downscale only the mosaic window [ss, ss+t) of the restored fragment off the
-        # 3080 (no -c copy: light, browser-friendly, faststart, normalized size). ss/t
-        # keep this bounded so a long fragment can't trigger a multi-minute encode.
-        argv = [self.ffmpeg, "-nostdin", "-loglevel", "error", "-abort_on", "empty_output_stream", "-y",
-                "-ss", "%.3f" % ss, "-i", frag, "-t", "%.3f" % t,
-                "-an", "-vf", self._vf(), "-c:v", self.encoder, "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart", dst]
-        return _safe_run(argv, timeout=120)
+    def _encode(self, src, start, dur, dst, stop):
+        try:
+            file_start, video_start, _ = _probe(self.ffprobe, src, stop=stop)
+            ss = max(0.0, start + video_start - file_start)
+            _run([self.ffmpeg, "-nostdin", "-loglevel", "error", "-abort_on", "empty_output_stream", "-y",
+                  "-ss", f"{ss:.6f}", "-i", str(src), "-t", f"{dur:.6f}", "-map", "0:v:0",
+                  "-an", "-vf", self._vf(), "-c:v", self.encoder, "-pix_fmt", "yuv420p",
+                  "-movflags", "+faststart", dst], timeout=120, stop=stop, shared_input=src)
+            return os.path.getsize(dst) > 0
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, IndexError):
+            return False
 
-    def _encode_before(self, start, dur, dst):
-        # cut the matching original window (accurate seek + re-encode for exact
-        # frame alignment with the after clip)
-        argv = [self.ffmpeg, "-nostdin", "-loglevel", "error", "-abort_on", "empty_output_stream", "-y",
-                "-ss", "%.3f" % start, "-i", self.src, "-t", "%.3f" % dur,
-                "-an", "-vf", self._vf(), "-c:v", self.encoder, "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart", dst]
-        return _safe_run(argv, timeout=120)
-
-    def _emit(self, idx, frag_start, win, frag):
-        wstart, wend = win
-        pdur = min(wend - wstart, MAX_PREVIEW_SECONDS)
-        ss = max(0.0, wstart - frag_start)     # mosaic window offset inside the fragment
-        n = self._seg_no
-        after = os.path.join(self.prev_dir, "seg%d_after.mp4" % n)
-        before = os.path.join(self.prev_dir, "seg%d_before.mp4" % n)
-        ok_a = self._encode_after(frag, ss, pdur, after)
-        ok_b = self._encode_before(wstart, pdur, before)
-        if ok_a and ok_b:
-            self._seg_no += 1
-            seg = {"n": n, "start": round(wstart, 3), "end": round(wstart + pdur, 3),
-                   "dur": round(pdur, 3)}
-            self.segments.append(seg)
-            self._log("preview: segment %d ready [%.1f-%.1fs]" % (n, wstart, wstart + pdur))
+    def _emit(self, frag, start, lo, hi, stop=None):
+        dur = min(hi - lo, MAX_PREVIEW_SECONDS)
+        n = len(self.segments)
+        after = os.path.join(self.prev_dir, f"seg{n}_after.mp4")
+        before = os.path.join(self.prev_dir, f"seg{n}_before.mp4")
+        if (self._encode(frag, lo - start, dur, after, stop)
+                and self._encode(self.src, lo, dur, before, stop)):
+            self.segments.append({"n": n, "start": round(lo, 3), "end": round(lo + dur, 3),
+                                  "dur": round(dur, 3)})
+            self._log("preview: segment %d ready [%.1f-%.1fs]" % (n, lo, lo + dur))
             if self.on_update:
-                try:
-                    self.on_update(list(self.segments))
-                except Exception:  # noqa: BLE001
-                    pass
-        else:
-            self._log("preview: segment encode failed (after=%s before=%s)" % (ok_a, ok_b))
+                self.on_update(list(self.segments))
+            return True
+        if stop is None or not stop.is_set():
+            self._log("preview: segment %d encode failed" % n)
+        return False
+
+    def finish(self):
+        # A fast render can remove its checkpoint before the sidecar finishes.
+        # In that case use the restored file (not the original) for one short
+        # comparison; never delay the next pass by re-encoding every range.
+        if not self.segments and self.jasna.ranges:
+            lo, hi = self.jasna.ranges[0]
+            self._emit(self.jasna.output, 0.0, lo, min(hi, lo + 8.0))
+        return self.build_sample()
 
     def build_sample(self):
         """Concatenate the decensored segment clips (in time order) into one smoothly
@@ -251,63 +182,34 @@ class SegmentPreview:
         the sample path or None. Clips are all the same 720p h264, so -c copy is clean."""
         if not self.segments:
             return None
-        ordered = sorted(self.segments, key=lambda s: s["n"])
+        ordered = sorted(self.segments, key=lambda s: s["start"])
         listing = os.path.join(self.prev_dir, "sample_concat.txt")
-        with open(listing, "w", encoding="utf-8") as fh:
-            for s in ordered:
-                clip = os.path.join(self.prev_dir, "seg%d_after.mp4" % s["n"])
-                if os.path.isfile(clip):
-                    fh.write("file '%s'\n" % clip.replace("\\", "/").replace("'", "'\\''"))
         sample = os.path.join(self.prev_dir, "sample.mp4")
-        r = _run([self.ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-f", "concat",
-                  "-safe", "0", "-i", listing, "-c", "copy", "-movflags", "+faststart",
-                  sample], timeout=180)
-        if r.returncode == 0 and os.path.isfile(sample) and os.path.getsize(sample) > 0:
-            self._log("preview: built decensored sample (%d segments)" % len(ordered))
-            return sample
-        # concat -c copy can fail on timestamp gaps; retry with a re-encode
-        r = _run([self.ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-f", "concat",
-                  "-safe", "0", "-i", listing, "-c:v", self.encoder, "-pix_fmt", "yuv420p",
-                  "-movflags", "+faststart", sample], timeout=300)
-        if r.returncode == 0 and os.path.isfile(sample) and os.path.getsize(sample) > 0:
-            self._log("preview: built decensored sample (%d segments, re-encoded)" % len(ordered))
-            return sample
-        self._log("preview: sample build failed")
+        try:
+            with open(listing, "w", encoding="utf-8") as fh:
+                for s in ordered:
+                    clip = os.path.join(self.prev_dir, "seg%d_after.mp4" % s["n"])
+                    if os.path.isfile(clip):
+                        fh.write("file '%s'\n" % clip.replace("\\", "/").replace("'", "'\\''"))
+            _run([self.ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-f", "concat",
+                  "-safe", "0", "-i", listing, "-c", "copy", "-movflags", "+faststart", sample], timeout=60)
+            if os.path.getsize(sample) > 0:
+                self._log("preview: built decensored sample (%d segments)" % len(ordered))
+                return sample
+        except (OSError, subprocess.SubprocessError):
+            self._log("preview: sample build failed")
         return None
 
-    # -- main loop -------------------------------------------------------------
     def run(self, stop_event, poll=1.5):
-        try:
-            self._loop(stop_event, poll)
-        except Exception as exc:  # noqa: BLE001 - never let preview crash the job
-            self._log("preview: watcher error: %r" % exc)
-
-    def _loop(self, stop_event, poll):
-        # wait for the temp dir to appear (jasna reaches smart-render)
-        temp_dir = None
-        while temp_dir is None:
-            if stop_event.wait(poll):
-                return
-            temp_dir = self._seg_temp_dir()
-        self._log("preview: watching %s" % os.path.basename(temp_dir))
-        drained = False
-        while True:
-            stopped = stop_event.wait(poll)
-            # process every fragment that is complete, in strict index order
-            while True:
-                frag = self._fragment(temp_dir, self._next_idx)
-                if not frag or not self._is_done(temp_dir, self._next_idx):
-                    break
-                dur = _probe_duration(self.ffprobe, frag)
-                if dur is None or dur <= 0:
-                    break                   # a missing duration would shift all following before-clips
-                start = self._cum
-                self._cum += dur
-                win = _mosaic_window(start, start + dur, self.ranges)
-                if win:
-                    self._emit(self._next_idx, start, win, frag)
-                self._next_idx += 1
-            if stopped:
-                if drained or not os.path.isdir(temp_dir):
-                    return
-                drained = True   # one more sweep after stop, then exit
+        while not stop_event.wait(poll):
+            for path, start, end in self.jasna.completed:
+                if not path.is_file():
+                    continue
+                for lo, hi in self.jasna.ranges:
+                    if stop_event.is_set():
+                        return
+                    lo, hi = max(lo, start), min(hi, end)
+                    if lo >= hi or (path, lo) in self._emitted:
+                        continue
+                    self._emitted.add((path, lo))
+                    self._emit(path, start, lo, hi, stop_event)

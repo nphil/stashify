@@ -44,7 +44,7 @@ import events
 import cloud_api
 import cloud_jasna
 import runner_stream
-from winrunner.frame_preview import latest_pair, mirror_pair, pair_path
+from winrunner.frame_preview import latest_pair, pair_path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -631,75 +631,65 @@ _seg_lock = threading.Lock()
 _segments = {}   # job_id -> [ {n,start,end,dur} ] mirrored from the runner
 
 
-def _mirror_segments(info, jid, dest):
-    """Mirror the runner's live segment preview (jasna 0.8.0 smart mode): pull the
-    segment list, then fetch each new seg<N>_before/after.mp4 into PREVIEW_DIR so the
-    dashboard (served from here, cross-origin to the runner) can play them."""
+def _mirror_segments(info):
+    """Copy announced preview clips; only advertise a comparison once both files exist."""
+    import tempfile
     import requests
 
-    tok = info.get("token", "")
+    dest = info["preview_dir"]
+    jid = os.path.basename(dest)
+    base = "%s/jobs/%s" % (info["base"], info["rid"])
+    tok = info["token"]
     headers = {"X-Runner-Token": tok, "X-Lada-Token": tok}
-    try:
-        r = core.http().get("%s/jobs/%s/segments" % (info["base"], info["rid"]),
-                         headers=headers, timeout=10)
-        if r.status_code != 200:
-            return
-        segs = (r.json() or {}).get("segments") or []
-    except Exception:  # noqa: BLE001
-        return
+
+    def fetch(url_path, name):
+        path = os.path.join(dest, name)
+        if os.path.isfile(path):
+            return True
+        temp = None
+        try:
+            with core.http().get(base + url_path, headers=headers, stream=True, timeout=(4, 20)) as response:
+                if response.status_code != 200:
+                    return False
+                os.makedirs(dest, exist_ok=True)
+                with tempfile.NamedTemporaryFile(dir=dest, delete=False) as out:
+                    temp = out.name
+                    for chunk in response.iter_content(chunk_size=256 * 1024):
+                        out.write(chunk)
+                    if not out.tell():
+                        return False
+            os.replace(temp, path)
+            return True
+        except (OSError, requests.RequestException):
+            return False
+        finally:
+            if temp and os.path.exists(temp):
+                os.unlink(temp)
+
     with _seg_lock:
         have = {s["n"] for s in _segments.get(jid, [])}
-    for s in segs:
-        n = s.get("n")
-        if n is None or n in have:
+    for segment in info.get("segments", ()):
+        n = segment.get("n")
+        if not isinstance(n, int) or n < 0 or n in have:
             continue
-        ok = True
-        for which in ("before", "after"):
-            try:
-                rr = core.http().get("%s/jobs/%s/seg/%d/%s.mp4" % (info["base"], info["rid"], n, which),
-                                  headers=headers, timeout=30)
-            except Exception:  # noqa: BLE001
-                ok = False
-                break
-            if rr.status_code != 200 or not rr.content:
-                ok = False
-                break
-            os.makedirs(dest, exist_ok=True)
-            tmp = os.path.join(dest, "seg%d_%s.tmp" % (n, which))
-            with open(tmp, "wb") as fh:
-                fh.write(rr.content)
-            os.replace(tmp, os.path.join(dest, "seg%d_%s.mp4" % (n, which)))
-        if ok:
+        if all(fetch(f"/seg/{n}/{side}.mp4", f"seg{n}_{side}.mp4") for side in ("before", "after")):
             with _seg_lock:
-                lst = _segments.setdefault(jid, [])
-                if not any(x["n"] == n for x in lst):
-                    lst.append(s)
-    # mirror the concatenated decensored-only sample clip once the runner builds it
-    samp = os.path.join(dest, "sample.mp4")
-    if not os.path.isfile(samp):
-        try:
-            rr = core.http().get("%s/jobs/%s/sample.mp4" % (info["base"], info["rid"]),
-                              headers=headers, timeout=60)
-            if rr.status_code == 200 and rr.content:
-                os.makedirs(dest, exist_ok=True)
-                tmp = samp + ".tmp"
-                with open(tmp, "wb") as fh:
-                    fh.write(rr.content)
-                os.replace(tmp, samp)
-        except Exception:  # noqa: BLE001
-            pass
+                items = _segments.setdefault(jid, [])
+                if not any(s["n"] == n for s in items):
+                    items.append(segment)
+            have.add(n)
+    if info.get("sample"):
+        fetch("/sample.mp4", "sample.mp4")
 
 
 def preview_poller():
     while True:
         time.sleep(2)
         info = core.get_live_preview()
-        dest = info.get("preview_dir")
-        if not dest:
+        if not info.get("preview_dir") or not (info.get("segments") or info.get("sample")):
             continue
-        mirror_pair(os.path.join(info["out_dir"], ".preview"), dest)
         try:
-            _mirror_segments(info, os.path.basename(dest), dest)
+            _mirror_segments(info)
         except Exception:  # noqa: BLE001 - preview is best-effort, never fatal
             pass
 
@@ -1006,6 +996,7 @@ def do_process(job):
     job_id = job["id"]
     cfg = job_config(job)
     cfg["_preview_dir"] = os.path.join(PREVIEW_DIR, job_id)
+    cfg["_finish_preview"] = _mirror_segments
     set_job(job_id, state="running", message="Starting", started_at=time.time(),
             paused=False, stage=None, frame=None, total_frames=None, fps=None, eta=None,
             indeterminate=True, backend=cfg.get("backend"), phase="Starting", step=None, steps=None,
@@ -1211,34 +1202,122 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             return self._send(502, {"error": "stash: " + str(exc)})
 
-    def proxy_media(self, kind, scene_id):
-        """Relay a Stash screenshot/stream through the worker (with the API key)
-        so the dashboard's <img>/<video> work without Stash's cookie."""
+    def proxy_media(self, kind, scene_id, hls=False, segment=None):
+        """Relay Stash's media without exposing its API key to the browser."""
         import requests
 
-        url = stash_base() + "/scene/" + scene_id + "/" + ("screenshot" if kind == "img" else "stream")
-        headers = {}
+        base = stash_base() + "/scene/" + scene_id + "/"
+        path = "screenshot" if kind == "img" else "stream"
+        if hls:
+            path += ".m3u8" if segment is None else f".m3u8/{segment}.ts"
+        headers = {"Accept-Encoding": "identity"}
         if STASH_API_KEY:
             headers["ApiKey"] = STASH_API_KEY
         rng = self.headers.get("Range")
-        if rng:
+        if rng and not (hls and segment is None):
             headers["Range"] = rng
         try:
-            up = requests.get(url, headers=headers, stream=True, timeout=60)
-        except Exception as exc:  # noqa: BLE001
-            return self._send(502, {"error": "stash media: " + str(exc)})
-        self.send_response(up.status_code)
-        for h in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"):
-            if h in up.headers:
-                self.send_header(h, up.headers[h])
+            up = requests.get(base + path, headers=headers, stream=True, timeout=60,
+                              allow_redirects=not hls, params={"resolution": "FULL_HD"} if hls else None)
+        except requests.RequestException:
+            return self._send(502, {"error": "Could not connect to Stash media"})
+        with up:
+            if hls and 300 <= up.status_code < 400:
+                return self._send(502, {"error": "Unexpected Stash stream redirect"})
+            if hls and segment is None and up.status_code == 200:
+                try:
+                    playlist = up.text
+                except requests.RequestException:
+                    return self._send(502, {"error": "Could not read the Stash video playlist"})
+                return self._send_hls_playlist(playlist, base + path, scene_id)
+            self.send_response(up.status_code)
+            for h in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"):
+                if h in up.headers:
+                    self.send_header(h, up.headers[h])
+            self._cors()
+            self.end_headers()
+            try:
+                for chunk in up.iter_content(65536):
+                    if chunk:
+                        self.wfile.write(chunk)
+            except OSError:
+                pass  # browser cancelled a range, or Stash closed the stream
+
+    def _send_hls_playlist(self, playlist, url, scene_id):
+        # Stash emits a VOD playlist of MPEG-TS segments. Only its exact same-scene
+        # segment URLs are allowed, and their credentials/query never leave the server.
+        origin = urllib.parse.urlsplit(url)
+        pattern = re.escape(origin.path) + r"/([0-9]+)\.ts"
+        tags = {"#EXTM3U", "#EXT-X-VERSION", "#EXT-X-MEDIA-SEQUENCE", "#EXT-X-TARGETDURATION",
+                "#EXT-X-PLAYLIST-TYPE", "#EXTINF", "#EXT-X-ENDLIST", "#EXT-X-DISCONTINUITY",
+                "#EXT-X-INDEPENDENT-SEGMENTS"}
+        lines = playlist.strip().splitlines()
+        if not lines or lines[0] != "#EXTM3U":
+            return self._send(502, {"error": "Invalid Stash video playlist"})
+        for i, line in enumerate(lines):
+            if not line:
+                continue
+            if line.startswith("#"):
+                if line.split(":", 1)[0] not in tags:
+                    return self._send(502, {"error": "Unsupported Stash video playlist"})
+                continue
+            part = urllib.parse.urlsplit(urllib.parse.urljoin(url, line))
+            match = re.fullmatch(pattern, part.path)
+            if not match or (part.scheme, part.netloc) != (origin.scheme, origin.netloc):
+                return self._send(502, {"error": "Unexpected Stash video segment"})
+            lines[i] = f"{scene_id}.m3u8/{match.group(1)}.ts"
+        body = ("\n".join(lines) + "\n").encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
         self._cors()
         self.end_headers()
+        self.wfile.write(body)
+
+    def send_video_file(self, path):
+        """Serve local sample/moment clips with the byte ranges required by iPhone video."""
         try:
-            for chunk in up.iter_content(65536):
-                if chunk:
+            fh = open(path, "rb")
+        except OSError:
+            return self._send(404, {"error": "Review clip is missing"})
+        with fh:
+            size = os.fstat(fh.fileno()).st_size
+            first, last = 0, size - 1
+            match = re.fullmatch(r"bytes=([0-9]*)-([0-9]*)", self.headers.get("Range", ""))
+            partial = bool(match and any(match.groups()))
+            if partial:
+                start, end = match.groups()
+                if start:
+                    first = int(start)
+                    if end:
+                        last = min(last, int(end))
+                else:
+                    first = max(0, size - int(end))
+                if first > last:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Length", "0")
+                    self._cors()
+                    self.end_headers()
+                    return
+            self.send_response(206 if partial else 200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Cache-Control", "no-store")
+            if partial:
+                self.send_header("Content-Range", f"bytes {first}-{last}/{size}")
+            left = last - first + 1
+            self.send_header("Content-Length", str(left))
+            self._cors()
+            self.end_headers()
+            fh.seek(first)
+            try:
+                while left and (chunk := fh.read(min(65536, left))):
                     self.wfile.write(chunk)
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
+                    left -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
     # -- paid cloud Jasna: thin routing only; the rules and refusals live in cloud_api.py --
 
@@ -1330,6 +1409,9 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/api/(img|vid)/(\d+)$", path)
         if m:
             return self.proxy_media(m.group(1), m.group(2))
+        m = re.fullmatch(r"/api/vid/([0-9]+)\.m3u8(?:/([0-9]+)\.ts)?", path)
+        if m:
+            return self.proxy_media("vid", m.group(1), hls=True, segment=m.group(2))
         # Live video feed: tail-follow the growing fragmented mp4 the lada
         # runner is writing. The browser plays it like a live stream — no
         # transcoding, a few seconds behind the encoder. Ends when the job does.
@@ -1384,36 +1466,14 @@ class Handler(BaseHTTPRequestHandler):
             p = sample_file(m.group(1))
             if not p:
                 return self._send(404, {"error": "no sample"})
-            try:
-                with open(p, "rb") as fh:
-                    body = fh.read()
-            except OSError:
-                return self._send(404, {"error": "no sample"})
-            self.send_response(200)
-            self.send_header("Content-Type", "video/mp4")
-            self.send_header("Cache-Control", "no-store")
-            self._cors()
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            return self.wfile.write(body)
+            return self.send_video_file(p)
         # Live segment preview clips (loaded by <video>, so unauth'd like the jpgs).
         m = re.match(r"^/api/jobs/([0-9a-f]+)/seg/(\d+)/(before|after)\.mp4$", path)
         if m:
             p = seg_file(m.group(1), m.group(2), m.group(3))
             if not p:
                 return self._send(404, {"error": "no segment"})
-            try:
-                with open(p, "rb") as fh:
-                    body = fh.read()
-            except OSError:
-                return self._send(404, {"error": "no segment"})
-            self.send_response(200)
-            self.send_header("Content-Type", "video/mp4")
-            self.send_header("Cache-Control", "no-store")
-            self._cors()
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            return self.wfile.write(body)
+            return self.send_video_file(p)
         if not self._authed():
             return self._send(401, {"error": "bad token"})
         if path == "/api/events":

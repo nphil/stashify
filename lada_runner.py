@@ -367,9 +367,9 @@ def run_job(job):
         if name == "upscale":
             stem = os.path.splitext(os.path.basename(current_input))[0]
             part = os.path.join(out_dir, stem + ".upscaling.tmp.mp4")
-            poll = lambda: frames.capture(part)
+            poll = lambda stop: frames.capture(part, stop=stop)
         else:
-            poll = lambda: frames.capture(_newest_video(out_dir))
+            poll = lambda stop: frames.capture(_newest_video(out_dir), stop=stop)
         with watch_frames(poll):
             rc, cancelled = _run_phase(jid, build(o, current_input, out_dir, encoder),
                                        idx, len(phases))

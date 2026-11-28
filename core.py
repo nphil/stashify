@@ -208,12 +208,12 @@ _live_preview = {}
 
 
 def set_live_preview(**info):
-    _live_preview.clear()
-    _live_preview.update(info)
+    global _live_preview
+    _live_preview = info
 
 
 def clear_live_preview():
-    _live_preview.clear()
+    set_live_preview()
 
 
 def get_live_preview():
@@ -647,8 +647,10 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None,
                         pause=lambda: _post("pause"),
                         resume=lambda: _post("resume"))
     preview_dir = cfg.get("_preview_dir")
-    set_live_preview(type="runner", out_dir=sub, input=input_path,
-                     rid=rid, base=base, token=token, preview_dir=preview_dir)
+    preview_info = dict(type="runner", out_dir=sub, input=input_path,
+                        rid=rid, base=base, token=token, preview_dir=preview_dir)
+    set_live_preview(**preview_info)
+    frame_poll_at = 0.0
     cursor = 0
     failures = 0                      # polls in a row that failed even after the quick retry
     lk = runner_stream.ensure(base, token)   # the runner's pushed state; None when streaming is off
@@ -714,6 +716,14 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None,
                     on_line(synth)
                 except Exception:  # noqa: BLE001
                     pass
+            if preview_dir:
+                if jb.get("segments") or jb.get("sample"):
+                    preview_info.update(segments=jb.get("segments") or (), sample=bool(jb.get("sample")))
+                    set_live_preview(**preview_info)
+                now = time.monotonic()
+                if now >= frame_poll_at:
+                    mirror_pair(os.path.join(sub, ".preview"), preview_dir)
+                    frame_poll_at = now + 2.0
             state = jb.get("state")
             if state == "done":
                 break
@@ -731,6 +741,12 @@ def _runner_dispatch(cfg, input_path, result_dir, op, on_line=None, log_cb=None,
         # pair before moving the result and deleting the shared scratch.
         if preview_dir:
             mirror_pair(os.path.join(sub, ".preview"), preview_dir)
+            finish_preview = cfg.get("_finish_preview")
+            if finish_preview and (preview_info.get("segments") or preview_info.get("sample")):
+                try:
+                    finish_preview(preview_info)
+                except OSError as exc:
+                    log.warning("Could not save runner preview media: %s", exc)
         produced = newest_video(sub)
         dest = os.path.join(result_dir, os.path.basename(produced))
         shutil.move(produced, dest)
